@@ -12,7 +12,6 @@ use tracing::{debug, info};
 
 use crate::db;
 
-use super::cache::Cache;
 use super::pg_cache::PgCache;
 use super::types::{TushareRequest, TushareResponse};
 
@@ -35,7 +34,6 @@ const TUSHARE_API_URL: &str = "http://api.tushare.pro";
 pub struct TushareClient {
     token: String,
     http: Client,
-    cache: Cache,
     pg_cache: Option<PgCache>,
 }
 
@@ -45,7 +43,6 @@ impl TushareClient {
         Self {
             token: token.to_string(),
             http: Client::new(),
-            cache: Cache::new("data/cache"),
             pg_cache: None,
         }
     }
@@ -62,7 +59,6 @@ impl TushareClient {
         Self {
             token: token.to_string(),
             http: Client::new(),
-            cache: Cache::new("data/cache"),
             pg_cache: Some(pg_cache),
         }
     }
@@ -87,7 +83,7 @@ impl TushareClient {
         // 构建缓存 key
         let cache_key = Self::build_cache_key(api_name, &param_map, fields);
 
-        // 尝试读 PostgreSQL raw store；未配置 PostgreSQL 时回退到 Parquet 缓存。
+        // 尝试读 PostgreSQL raw store；未配置 PostgreSQL 时不使用持久化缓存。
         if let Some(pg_cache) = &self.pg_cache {
             if let Some(raw) = pg_cache.load_raw(&cache_key).await? {
                 let df = self.response_to_dataframe(&raw.response_fields, &raw.response_items)?;
@@ -98,9 +94,6 @@ impl TushareClient {
                 );
                 return Ok(df);
             }
-        } else if let Some(df) = self.cache.load(&cache_key)? {
-            debug!(api = api_name, rows = df.height(), "Parquet 缓存命中");
-            return Ok(df);
         }
 
         // 构建请求
@@ -136,7 +129,7 @@ impl TushareClient {
 
         info!(api = api_name, rows = df.height(), "请求完成");
 
-        // 写缓存。PostgreSQL raw store 保存所有成功响应，包括空结果。
+        // 写 PostgreSQL 缓存。raw store 保存所有成功响应，包括空结果。
         if let Some(pg_cache) = &self.pg_cache {
             pg_cache
                 .save_raw(
@@ -151,8 +144,6 @@ impl TushareClient {
             pg_cache
                 .save_typed(api_name, &param_map, &data.fields, &data.items)
                 .await?;
-        } else if df.height() > 0 {
-            self.cache.save(&cache_key, &df)?;
         }
 
         Ok(df)

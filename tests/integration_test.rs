@@ -1,4 +1,4 @@
-//! 端到端集成测试 — 验证 Tushare API 查询 + Parquet 缓存完整链路。
+//! 端到端集成测试 — 验证 Tushare API 查询 + PostgreSQL raw 缓存完整链路。
 
 use deep_value::config::AppConfig;
 use deep_value::db;

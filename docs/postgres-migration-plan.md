@@ -155,7 +155,7 @@ Verification:
 Completion notes:
 
 - Added PostgreSQL-backed `TushareClient::new_with_pg` and `with_pg_cache`.
-- `query()` now reads/writes `deep_value.tushare_raw_responses` when a PostgreSQL store is configured, while `new()` retains the legacy Parquet fallback path.
+- `query()` now reads/writes `deep_value.tushare_raw_responses` when a PostgreSQL store is configured.
 - `query_no_cache()` still bypasses all storage.
 - `cache clear` now clears PostgreSQL raw cache records.
 - Verification passed: `cargo check`; `cargo test --lib` with 39 tests; `cargo test --test postgres_cache_test` with 2 tests; `cargo run -- ping`; `cargo test --test integration_test` with 6 tests; `cargo run -- cache clear`.
@@ -250,13 +250,13 @@ Completion notes:
 
 ### Stage 7: Parquet Cache Retirement
 
-Status: pending
+Status: completed
 
 Tasks:
 
-- [ ] Remove Parquet cache from the primary path.
-- [ ] Keep or add a migration utility only if old cache data is needed.
-- [ ] Update README and CLI help.
+- [x] Remove Parquet cache from the primary path.
+- [x] Keep or add a migration utility only if old cache data is needed.
+- [x] Update README and CLI help.
 
 Verification:
 
@@ -267,7 +267,11 @@ Verification:
 
 Completion notes:
 
-- Pending.
+- Removed Parquet reads/writes from `TushareClient::query()`.
+- `TushareClient::new()` now performs uncached HTTP queries; `new_with_pg()` and `with_pg_cache()` are the persistent storage paths.
+- Kept `src/tushare/cache.rs` as a legacy Parquet utility with existing tests.
+- Updated README and module/test comments to describe PostgreSQL storage.
+- Verification passed: `cargo check`; `cargo test --lib`; `cargo test --test postgres_cache_test`; `cargo test --test postgres_typed_tables_test`; `cargo test --test integration_test`; local `data/cache` temporarily moved aside and `cargo run -- ping` still worked.
 
 ## Commit Log
 
@@ -278,3 +282,4 @@ Completion notes:
 - Stage 4: typed PostgreSQL tables for trade calendar, stock basic, and daily basic.
 - Stage 5: typed PostgreSQL tables for financial and audit APIs.
 - Stage 6: typed PostgreSQL tables for daily prices, adjustment factors, and index prices.
+- Stage 7: retired Parquet from the primary Tushare query path.

@@ -6,7 +6,7 @@
 
 ## 功能
 
-- 🔌 **Tushare REST 客户端** — 直接调用 HTTP API，自动 Parquet 缓存
+- 🔌 **Tushare REST 客户端** — 直接调用 HTTP API，自动写入 PostgreSQL
 - 📊 **九步选股管线** — PB/PE/股息率三维打分、审计检查、排雷、行业分散
 - 📈 **回测引擎** — 季度再平衡净值曲线、基准对比、风险指标
 - 🛡️ **前视偏差修复** — `safe_financial_year()` 确保使用已公开财报数据
@@ -15,16 +15,20 @@
 ## 快速开始
 
 ```bash
-# 1. 配置 Tushare Token
-echo "TUSHARE_TOKEN=your_token_here" > .env
+# 1. 配置 Tushare Token 和 PostgreSQL
+cp .env.example .env
+# 编辑 .env，填入 TUSHARE_TOKEN 和 DATABASE_URL
 
 # 2. 测试连通性
 cargo run -- ping
 
-# 3. 单次选股 (Phase 3 完成后)
+# 3. 测试 PostgreSQL 连通性
+cargo run -- db ping
+
+# 4. 单次选股 (Phase 3 完成后)
 cargo run -- snapshot --date 20250515 --top 10
 
-# 4. 清除缓存
+# 5. 清除 PostgreSQL raw 缓存
 cargo run -- cache clear
 ```
 
@@ -38,7 +42,8 @@ src/
 ├── tushare/             # Tushare REST API 客户端
 │   ├── client.rs        # HTTP POST + DataFrame 转换
 │   ├── types.rs         # 请求/响应类型 (serde)
-│   └── cache.rs         # Parquet 文件缓存
+│   ├── pg_cache.rs      # PostgreSQL raw + typed 存储
+│   └── cache.rs         # Legacy Parquet 缓存工具
 ├── data/                # 数据获取层
 │   ├── cross_section.rs # A 股横截面 (daily_basic + stock_basic)
 │   ├── financials.rs    # 十年财务 + safe_financial_year
