@@ -1,0 +1,49 @@
+[package]
+name = "deep-value"
+version = "0.1.0"
+edition = "2021"
+description = "Deep Value 量化回测框架"
+authors = ["measimov"]
+license = "MIT"
+
+[[bin]]
+name = "deep-value"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# DataFrame
+polars = { version = "0.46", features = ["lazy", "parquet", "json", "dtype-full", "round_series", "rank"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Config
+dotenvy = "0.15"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Date/Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
