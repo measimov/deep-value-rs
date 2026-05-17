@@ -14,7 +14,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use deep_value::config::AppConfig;
-use deep_value::data::{audit, cross_section, financials};
+use deep_value::data::{cross_section, financials};
 use deep_value::db;
 use deep_value::report::formatter;
 use deep_value::strategy::{
@@ -215,24 +215,42 @@ async fn run_ashare_snapshot(
     ));
 
     let before = df.height();
+    let pb_10y = get_10y_pb_max(client, trade_date, config.lookback_years).await?;
+    df = df
+        .lazy()
+        .join(
+            pb_10y.lazy(),
+            [col("ts_code")],
+            [col("ts_code")],
+            JoinArgs::new(JoinType::Left),
+        )
+        .filter(col("pb_10y_max").gt(lit(config.pb_10y_must_exceed)))
+        .collect()?;
     step_records.push(screening::make_step(
         2,
         "十年 PB 高点检查",
         before,
         df.height(),
-        true,
-        "当前 Rust 数据层尚未实现十年 PB 历史接口，跳过该步骤",
+        false,
+        &format!("十年 PB max > {:.2}", config.pb_10y_must_exceed),
     ));
-    data_warnings.push("Step 2 十年 PB 高点检查已跳过：缺少历史 PB 数据源".to_string());
 
-    let net_equity = match financials::get_net_equity(client, trade_date).await {
-        Ok(df) => df,
-        Err(err) => {
-            data_warnings.push(format!("净资产数据获取失败，净资产筛选降级跳过: {err:#}"));
-            empty_net_equity_df()
-        }
-    };
-    let has_net_equity = net_equity.height() > 0;
+    let financial_pool_size = (config.top_n * 10).max(config.top_n).min(df.height());
+    if df.height() > financial_pool_size {
+        let scored_pool = scoring::score_candidates(&df)?;
+        df = screening::enforce_industry_cap(
+            &scored_pool,
+            config.industry_cap,
+            financial_pool_size,
+        )?;
+        data_warnings.push(format!(
+            "逐只拉取财务/审计数据前，按初筛打分和行业分散保留前 {} 只候选以控制 Tushare 请求量",
+            financial_pool_size
+        ));
+    }
+
+    let pool_codes = ts_codes_from_df(&df)?;
+    let net_equity = get_net_equity_for_codes(client, trade_date, &pool_codes).await?;
     df = df
         .lazy()
         .join(
@@ -243,14 +261,7 @@ async fn run_ashare_snapshot(
         )
         .collect()?;
 
-    let audit_info = match audit::get_audit_info(client, trade_date).await {
-        Ok(df) => df,
-        Err(err) => {
-            data_warnings.push(format!("审计数据获取失败，审计筛选降级跳过: {err:#}"));
-            empty_audit_df()
-        }
-    };
-    let has_audit = audit_info.height() > 0;
+    let audit_info = get_audit_for_codes(client, trade_date, &pool_codes).await?;
     df = df
         .lazy()
         .join(
@@ -262,7 +273,7 @@ async fn run_ashare_snapshot(
         .collect()?;
 
     let before = df.height();
-    if config.audit_big4_required && has_audit && has_net_equity {
+    if config.audit_big4_required {
         df = df
             .lazy()
             .filter(
@@ -271,23 +282,14 @@ async fn run_ashare_snapshot(
                     .or(col("net_equity_bn").gt(lit(config.audit_exemption_equity_bn))),
             )
             .collect()?;
-    } else if config.audit_big4_required && has_audit {
-        df = df.lazy().filter(col("is_big4").eq(lit(true))).collect()?;
     }
-    let audit_skipped = !has_audit;
-    let audit_note = if !has_audit {
-        "审计数据不可用，跳过该步骤".to_string()
-    } else if has_net_equity {
-        format!("净资产 > {:.0} 亿豁免", config.audit_exemption_equity_bn)
-    } else {
-        "净资产数据不可用，仅保留四大审计".to_string()
-    };
+    let audit_note = format!("净资产 > {:.0} 亿豁免", config.audit_exemption_equity_bn);
     step_records.push(screening::make_step(
         3,
         "四大审计或大净资产豁免",
         before,
         df.height(),
-        audit_skipped,
+        false,
         &audit_note,
     ));
 
@@ -306,60 +308,47 @@ async fn run_ashare_snapshot(
     ));
 
     let before = df.height();
-    if has_net_equity {
-        df = df
-            .lazy()
-            .filter(col("net_equity_bn").gt_eq(lit(config.net_equity_min_bn)))
-            .collect()?;
-    }
+    df = df
+        .lazy()
+        .filter(col("net_equity_bn").gt_eq(lit(config.net_equity_min_bn)))
+        .collect()?;
     step_records.push(screening::make_step(
         5,
         &format!("净资产 >= {:.0} 亿", config.net_equity_min_bn),
         before,
         df.height(),
-        !has_net_equity,
-        if has_net_equity {
-            ""
-        } else {
-            "净资产数据不可用，跳过该步骤"
-        },
+        false,
+        "",
     ));
 
     let before = df.height();
-    let anomaly_inputs = load_anomaly_inputs(client, trade_date, config.lookback_years).await;
-    let (eliminated, anomaly_skipped, anomaly_note) = match anomaly_inputs {
-        Ok((current_income, current_dividend, income_10y, dividend_10y)) => {
-            let anomaly_result = anomaly::remove_anomalies(
-                &df,
-                &current_income,
-                &current_dividend,
-                &income_10y,
-                &dividend_10y,
-            )?;
-            let eliminated = anomaly_result
-                .removed
-                .iter()
-                .map(|stock| EliminatedStock {
-                    ts_code: stock.ts_code.clone(),
-                    name: lookup_name(&df, &stock.ts_code).unwrap_or_else(|| stock.ts_code.clone()),
-                    reason: stock.reason.clone(),
-                })
-                .collect();
-            df = anomaly_result.kept;
-            (eliminated, false, "")
-        }
-        Err(err) => {
-            data_warnings.push(format!("排雷财务数据获取失败，排雷步骤跳过: {err:#}"));
-            (Vec::new(), true, "财务/分红数据不可用，跳过排雷")
-        }
-    };
+    let anomaly_codes = ts_codes_from_df(&df)?;
+    let (current_income, current_dividend, income_10y, dividend_10y) =
+        load_anomaly_inputs(client, trade_date, config.lookback_years, &anomaly_codes).await?;
+    let anomaly_result = anomaly::remove_anomalies(
+        &df,
+        &current_income,
+        &current_dividend,
+        &income_10y,
+        &dividend_10y,
+    )?;
+    let eliminated = anomaly_result
+        .removed
+        .iter()
+        .map(|stock| EliminatedStock {
+            ts_code: stock.ts_code.clone(),
+            name: lookup_name(&df, &stock.ts_code).unwrap_or_else(|| stock.ts_code.clone()),
+            reason: stock.reason.clone(),
+        })
+        .collect();
+    df = anomaly_result.kept;
     step_records.push(screening::make_step(
         6,
         "异常利润/分红排雷",
         before,
         df.height(),
-        anomaly_skipped,
-        anomaly_note,
+        false,
+        "",
     ));
 
     let before = df.height();
@@ -448,26 +437,266 @@ async fn load_anomaly_inputs(
     client: &TushareClient,
     trade_date: &str,
     lookback_years: usize,
+    codes: &[String],
 ) -> Result<(DataFrame, DataFrame, DataFrame, DataFrame)> {
-    let current_income = financials::get_current_year_income(client, trade_date).await?;
-    let current_dividend = financials::get_current_year_dividend(client, trade_date).await?;
-    let income_10y = financials::get_10y_income(client, trade_date, lookback_years).await?;
-    let dividend_10y = financials::get_10y_dividend(client, trade_date, lookback_years).await?;
+    let current_income = get_current_income_for_codes(client, trade_date, codes).await?;
+    let current_dividend = get_current_dividend_for_codes(client, trade_date, codes).await?;
+    let income_10y = get_10y_income_for_codes(client, trade_date, lookback_years, codes).await?;
+    let dividend_10y =
+        get_10y_dividend_for_codes(client, trade_date, lookback_years, codes).await?;
     Ok((current_income, current_dividend, income_10y, dividend_10y))
 }
 
-fn empty_net_equity_df() -> DataFrame {
-    DataFrame::empty_with_schema(&Schema::from_iter([
-        Field::new("ts_code".into(), DataType::String),
-        Field::new("net_equity_bn".into(), DataType::Float64),
-    ]))
+async fn get_10y_pb_max(
+    client: &TushareClient,
+    trade_date: &str,
+    lookback_years: usize,
+) -> Result<DataFrame> {
+    let year: i32 = trade_date[..4].parse().unwrap_or(2025);
+    let month_day = &trade_date[4..];
+    let start_year = year - lookback_years as i32 + 1;
+    let mut max_pb: HashMap<String, f64> = HashMap::new();
+
+    for y in start_year..=year {
+        let date = format!("{y}{month_day}");
+        let df = client
+            .query(
+                "daily_basic",
+                &[("trade_date", date.as_str())],
+                Some("ts_code,pb"),
+            )
+            .await?;
+        if df.height() == 0 {
+            continue;
+        }
+        let pb = df
+            .lazy()
+            .with_column(col("pb").cast(DataType::Float64))
+            .collect()?;
+        let codes = pb.column("ts_code")?.str()?;
+        let pb_values = pb.column("pb")?.f64()?;
+        for i in 0..pb.height() {
+            if let (Some(code), Some(value)) = (codes.get(i), pb_values.get(i)) {
+                max_pb
+                    .entry(code.to_string())
+                    .and_modify(|old| *old = old.max(value))
+                    .or_insert(value);
+            }
+        }
+    }
+
+    let mut codes: Vec<String> = max_pb.keys().cloned().collect();
+    codes.sort();
+    let values: Vec<f64> = codes.iter().map(|code| max_pb[code]).collect();
+    Ok(df!("ts_code" => codes, "pb_10y_max" => values)?)
 }
 
-fn empty_audit_df() -> DataFrame {
-    DataFrame::empty_with_schema(&Schema::from_iter([
-        Field::new("ts_code".into(), DataType::String),
-        Field::new("is_big4".into(), DataType::Boolean),
-    ]))
+async fn get_net_equity_for_codes(
+    client: &TushareClient,
+    trade_date: &str,
+    codes: &[String],
+) -> Result<DataFrame> {
+    let period = format!("{}1231", financials::safe_financial_year(trade_date));
+    let mut out_codes = Vec::new();
+    let mut values = Vec::new();
+    for code in codes {
+        let df = client
+            .query(
+                "balancesheet",
+                &[
+                    ("ts_code", code.as_str()),
+                    ("period", period.as_str()),
+                    ("report_type", "1"),
+                ],
+                Some("ts_code,end_date,total_hldr_eqy_exc_min_int"),
+            )
+            .await?;
+        if df.height() == 0 {
+            continue;
+        }
+        out_codes.push(code.clone());
+        values.push(parse_f64_cell(&df, "total_hldr_eqy_exc_min_int", 0).unwrap_or(0.0) / 1e8);
+    }
+    Ok(df!("ts_code" => out_codes, "net_equity_bn" => values)?)
+}
+
+async fn get_audit_for_codes(
+    client: &TushareClient,
+    trade_date: &str,
+    codes: &[String],
+) -> Result<DataFrame> {
+    let period = format!("{}1231", financials::safe_financial_year(trade_date));
+    let mut out_codes = Vec::new();
+    let mut flags = Vec::new();
+    for code in codes {
+        let df = client
+            .query(
+                "fina_audit",
+                &[("ts_code", code.as_str()), ("period", period.as_str())],
+                Some("ts_code,audit_agency"),
+            )
+            .await?;
+        if df.height() == 0 {
+            continue;
+        }
+        let agency = string_at(&df, "audit_agency", 0);
+        out_codes.push(code.clone());
+        flags.push(deep_value::strategy::domain::is_big4(&agency));
+    }
+    Ok(df!("ts_code" => out_codes, "is_big4" => flags)?)
+}
+
+async fn get_current_income_for_codes(
+    client: &TushareClient,
+    trade_date: &str,
+    codes: &[String],
+) -> Result<DataFrame> {
+    let period = format!("{}1231", financials::safe_financial_year(trade_date));
+    let mut out_codes = Vec::new();
+    let mut values = Vec::new();
+    for code in codes {
+        let df = client
+            .query(
+                "income",
+                &[
+                    ("ts_code", code.as_str()),
+                    ("period", period.as_str()),
+                    ("report_type", "1"),
+                ],
+                Some("ts_code,end_date,n_income"),
+            )
+            .await?;
+        if df.height() == 0 {
+            continue;
+        }
+        out_codes.push(code.clone());
+        values.push(parse_f64_cell(&df, "n_income", 0).unwrap_or(0.0));
+    }
+    Ok(df!("ts_code" => out_codes, "current_net_income" => values)?)
+}
+
+async fn get_current_dividend_for_codes(
+    client: &TushareClient,
+    trade_date: &str,
+    codes: &[String],
+) -> Result<DataFrame> {
+    let period = format!("{}1231", financials::safe_financial_year(trade_date));
+    let mut out_codes = Vec::new();
+    let mut values = Vec::new();
+    for code in codes {
+        let df = client
+            .query(
+                "dividend",
+                &[("ts_code", code.as_str()), ("end_date", period.as_str())],
+                Some("ts_code,end_date,cash_div_tax"),
+            )
+            .await?;
+        out_codes.push(code.clone());
+        values.push(sum_f64_column(&df, "cash_div_tax"));
+    }
+    Ok(df!("ts_code" => out_codes, "current_dividend_total" => values)?)
+}
+
+async fn get_10y_income_for_codes(
+    client: &TushareClient,
+    trade_date: &str,
+    lookback_years: usize,
+    codes: &[String],
+) -> Result<DataFrame> {
+    let safe_year = financials::safe_financial_year(trade_date);
+    let start_year = safe_year - lookback_years as i32 + 1;
+    let mut out_codes = Vec::new();
+    let mut values = Vec::new();
+    for code in codes {
+        let mut total = 0.0;
+        for year in start_year..=safe_year {
+            let period = format!("{year}1231");
+            let df = client
+                .query(
+                    "income",
+                    &[
+                        ("ts_code", code.as_str()),
+                        ("period", period.as_str()),
+                        ("report_type", "1"),
+                    ],
+                    Some("ts_code,end_date,n_income"),
+                )
+                .await?;
+            total += parse_f64_cell(&df, "n_income", 0).unwrap_or(0.0);
+        }
+        out_codes.push(code.clone());
+        values.push(total);
+    }
+    Ok(df!("ts_code" => out_codes, "sum_net_income_10y" => values)?)
+}
+
+async fn get_10y_dividend_for_codes(
+    client: &TushareClient,
+    trade_date: &str,
+    lookback_years: usize,
+    codes: &[String],
+) -> Result<DataFrame> {
+    let safe_year = financials::safe_financial_year(trade_date);
+    let start_year = safe_year - lookback_years as i32 + 1;
+    let mut out_codes = Vec::new();
+    let mut values = Vec::new();
+    for code in codes {
+        let mut total = 0.0;
+        for year in start_year..=safe_year {
+            let period = format!("{year}1231");
+            let df = client
+                .query(
+                    "dividend",
+                    &[("ts_code", code.as_str()), ("end_date", period.as_str())],
+                    Some("ts_code,end_date,cash_div_tax"),
+                )
+                .await?;
+            total += sum_f64_column(&df, "cash_div_tax");
+        }
+        out_codes.push(code.clone());
+        values.push(total);
+    }
+    Ok(df!("ts_code" => out_codes, "sum_dividend_10y" => values)?)
+}
+
+fn ts_codes_from_df(df: &DataFrame) -> Result<Vec<String>> {
+    Ok(df
+        .column("ts_code")?
+        .str()?
+        .into_iter()
+        .filter_map(|value| value.map(ToOwned::to_owned))
+        .collect())
+}
+
+fn parse_f64_cell(df: &DataFrame, column: &str, row: usize) -> Option<f64> {
+    if row >= df.height() {
+        return None;
+    }
+    let col = df.column(column).ok()?;
+    if let Ok(values) = col.f64() {
+        return values.get(row);
+    }
+    col.str().ok()?.get(row)?.parse().ok()
+}
+
+fn sum_f64_column(df: &DataFrame, column: &str) -> f64 {
+    if df.height() == 0 {
+        return 0.0;
+    }
+    let Ok(col) = df.column(column) else {
+        return 0.0;
+    };
+    if let Ok(values) = col.f64() {
+        return values.into_iter().flatten().sum();
+    }
+    col.str()
+        .map(|values| {
+            values
+                .into_iter()
+                .filter_map(|value| value.and_then(|text| text.parse::<f64>().ok()))
+                .sum()
+        })
+        .unwrap_or(0.0)
 }
 
 fn industry_distribution(holdings: &[Holding]) -> HashMap<String, usize> {
