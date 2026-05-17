@@ -90,6 +90,61 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
         create index if not exists idx_tushare_daily_basic_trade_date
             on deep_value.tushare_daily_basic(trade_date)
         "#,
+        r#"
+        create table if not exists deep_value.tushare_income (
+            ts_code text not null,
+            end_date text not null,
+            report_type text not null,
+            n_income double precision,
+            updated_at timestamptz not null default now(),
+            primary key (ts_code, end_date, report_type)
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_income_end_date
+            on deep_value.tushare_income(end_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_dividend (
+            row_hash text primary key,
+            ts_code text not null,
+            end_date text,
+            cash_div_tax double precision,
+            stk_div double precision,
+            updated_at timestamptz not null default now()
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_dividend_end_date
+            on deep_value.tushare_dividend(end_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_balancesheet (
+            ts_code text not null,
+            end_date text not null,
+            report_type text not null,
+            total_hldr_eqy_exc_min_int double precision,
+            updated_at timestamptz not null default now(),
+            primary key (ts_code, end_date, report_type)
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_balancesheet_end_date
+            on deep_value.tushare_balancesheet(end_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_fina_audit (
+            ts_code text not null,
+            period text not null,
+            audit_agency text,
+            updated_at timestamptz not null default now(),
+            primary key (ts_code, period)
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_fina_audit_period
+            on deep_value.tushare_fina_audit(period)
+        "#,
     ];
 
     let mut tx = pool.begin().await.context("启动 schema 初始化事务失败")?;

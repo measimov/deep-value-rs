@@ -184,3 +184,191 @@ async fn test_daily_basic_typed_roundtrip() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn test_income_typed_roundtrip() {
+    let (pool, cache) = typed_cache().await;
+    sqlx::query("delete from deep_value.tushare_income where end_date = '20981231'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let params = HashMap::from([
+        ("period".to_string(), "20981231".to_string()),
+        ("report_type".to_string(), "1".to_string()),
+    ]);
+    let fields = vec![
+        "ts_code".to_string(),
+        "end_date".to_string(),
+        "n_income".to_string(),
+    ];
+    let items = vec![
+        vec![json!("TST001.SZ"), json!("20981231"), json!(100.5)],
+        vec![json!("TST002.SZ"), json!("20981231"), json!(-20.0)],
+    ];
+
+    cache
+        .save_typed("income", &params, &fields, &items)
+        .await
+        .unwrap();
+
+    let loaded = cache
+        .load_typed("income", &params, Some("ts_code,end_date,n_income"))
+        .await
+        .unwrap()
+        .expect("typed income 应存在");
+
+    assert_eq!(loaded.height(), 2);
+    assert_eq!(
+        loaded.column("n_income").unwrap().str().unwrap().get(0),
+        Some("100.5")
+    );
+
+    sqlx::query("delete from deep_value.tushare_income where end_date = '20981231'")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_dividend_typed_roundtrip() {
+    let (pool, cache) = typed_cache().await;
+    sqlx::query("delete from deep_value.tushare_dividend where end_date = '20981231'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let params = HashMap::from([("end_date".to_string(), "20981231".to_string())]);
+    let fields = vec![
+        "ts_code".to_string(),
+        "end_date".to_string(),
+        "cash_div_tax".to_string(),
+        "stk_div".to_string(),
+    ];
+    let items = vec![
+        vec![
+            json!("TST001.SZ"),
+            json!("20981231"),
+            json!(1.2),
+            json!(0.0),
+        ],
+        vec![
+            json!("TST001.SZ"),
+            json!("20981231"),
+            json!(0.8),
+            json!(0.1),
+        ],
+    ];
+
+    cache
+        .save_typed("dividend", &params, &fields, &items)
+        .await
+        .unwrap();
+
+    let loaded = cache
+        .load_typed(
+            "dividend",
+            &params,
+            Some("ts_code,end_date,cash_div_tax,stk_div"),
+        )
+        .await
+        .unwrap()
+        .expect("typed dividend 应存在");
+
+    assert_eq!(loaded.height(), 2);
+
+    sqlx::query("delete from deep_value.tushare_dividend where end_date = '20981231'")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_balancesheet_typed_roundtrip() {
+    let (pool, cache) = typed_cache().await;
+    sqlx::query("delete from deep_value.tushare_balancesheet where end_date = '20981231'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let params = HashMap::from([
+        ("period".to_string(), "20981231".to_string()),
+        ("report_type".to_string(), "1".to_string()),
+    ]);
+    let fields = vec![
+        "ts_code".to_string(),
+        "end_date".to_string(),
+        "total_hldr_eqy_exc_min_int".to_string(),
+    ];
+    let items = vec![vec![
+        json!("TST001.SZ"),
+        json!("20981231"),
+        json!(123456789.0),
+    ]];
+
+    cache
+        .save_typed("balancesheet", &params, &fields, &items)
+        .await
+        .unwrap();
+
+    let loaded = cache
+        .load_typed(
+            "balancesheet",
+            &params,
+            Some("ts_code,end_date,total_hldr_eqy_exc_min_int"),
+        )
+        .await
+        .unwrap()
+        .expect("typed balancesheet 应存在");
+
+    assert_eq!(loaded.height(), 1);
+    assert_eq!(
+        loaded
+            .column("total_hldr_eqy_exc_min_int")
+            .unwrap()
+            .str()
+            .unwrap()
+            .get(0),
+        Some("123456789")
+    );
+
+    sqlx::query("delete from deep_value.tushare_balancesheet where end_date = '20981231'")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_fina_audit_typed_roundtrip() {
+    let (pool, cache) = typed_cache().await;
+    sqlx::query("delete from deep_value.tushare_fina_audit where period = '20981231'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let params = HashMap::from([("period".to_string(), "20981231".to_string())]);
+    let fields = vec!["ts_code".to_string(), "audit_agency".to_string()];
+    let items = vec![vec![json!("TST001.SZ"), json!("普华永道中天会计师事务所")]];
+
+    cache
+        .save_typed("fina_audit", &params, &fields, &items)
+        .await
+        .unwrap();
+
+    let loaded = cache
+        .load_typed("fina_audit", &params, Some("ts_code,audit_agency"))
+        .await
+        .unwrap()
+        .expect("typed fina_audit 应存在");
+
+    assert_eq!(loaded.height(), 1);
+    assert_eq!(
+        loaded.column("audit_agency").unwrap().str().unwrap().get(0),
+        Some("普华永道中天会计师事务所")
+    );
+
+    sqlx::query("delete from deep_value.tushare_fina_audit where period = '20981231'")
+        .execute(&pool)
+        .await
+        .unwrap();
+}

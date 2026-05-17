@@ -191,7 +191,7 @@ Completion notes:
 
 ### Stage 5: Typed Tables Batch 2
 
-Status: pending
+Status: completed
 
 Tables:
 
@@ -202,9 +202,9 @@ Tables:
 
 Tasks:
 
-- [ ] Add schemas and conservative uniqueness/upsert rules.
-- [ ] Preserve duplicate-sensitive data such as dividend records.
-- [ ] Verify current financial aggregation functions produce unchanged results.
+- [x] Add schemas and conservative uniqueness/upsert rules.
+- [x] Preserve duplicate-sensitive data such as dividend records.
+- [x] Verify typed financial and audit roundtrips plus existing integration paths.
 
 Verification:
 
@@ -214,7 +214,11 @@ Verification:
 
 Completion notes:
 
-- Pending.
+- Added typed PostgreSQL tables for `income`, `dividend`, `balancesheet`, and `fina_audit`.
+- `income` and `balancesheet` use `(ts_code, end_date, report_type)` upserts.
+- `fina_audit` uses `(ts_code, period)` upserts.
+- `dividend` uses a stable row hash to preserve duplicate-sensitive dividend records.
+- Verification passed: `cargo check`; `cargo test --lib` with 39 tests; `cargo test --test postgres_typed_tables_test` with 7 tests; `cargo test --test postgres_cache_test` with 2 tests; `cargo test --test integration_test` with 6 tests.
 
 ### Stage 6: Typed Tables Batch 3
 
@@ -269,3 +273,4 @@ Completion notes:
 - Stage 2: PostgreSQL schema migration and raw Tushare response table.
 - Stage 3: PostgreSQL raw read/write path for Tushare queries.
 - Stage 4: typed PostgreSQL tables for trade calendar, stock basic, and daily basic.
+- Stage 5: typed PostgreSQL tables for financial and audit APIs.

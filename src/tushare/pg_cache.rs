@@ -152,6 +152,10 @@ impl PgCache {
             "trade_cal" => self.save_trade_cal(params, fields, items).await,
             "stock_basic" => self.save_stock_basic(params, fields, items).await,
             "daily_basic" => self.save_daily_basic(params, fields, items).await,
+            "income" => self.save_income(params, fields, items).await,
+            "dividend" => self.save_dividend(params, fields, items).await,
+            "balancesheet" => self.save_balancesheet(params, fields, items).await,
+            "fina_audit" => self.save_fina_audit(params, fields, items).await,
             _ => Ok(()),
         }
     }
@@ -167,6 +171,10 @@ impl PgCache {
             "trade_cal" => self.load_trade_cal(params, fields).await,
             "stock_basic" => self.load_stock_basic(params, fields).await,
             "daily_basic" => self.load_daily_basic(params, fields).await,
+            "income" => self.load_income(params, fields).await,
+            "dividend" => self.load_dividend(params, fields).await,
+            "balancesheet" => self.load_balancesheet(params, fields).await,
+            "fina_audit" => self.load_fina_audit(params, fields).await,
             _ => Ok(None),
         }
     }
@@ -417,6 +425,310 @@ impl PgCache {
             &rows,
         )
     }
+
+    async fn save_income(
+        &self,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
+    ) -> Result<()> {
+        let Some(ts_code_idx) = field_index(fields, "ts_code") else {
+            return Ok(());
+        };
+        let end_date_idx = field_index(fields, "end_date");
+        let n_income_idx = field_index(fields, "n_income");
+        let report_type = params.get("report_type").cloned().unwrap_or_default();
+
+        for row in items {
+            let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
+            let end_date = end_date_idx
+                .and_then(|idx| cell_string(row, idx))
+                .or_else(|| params.get("period").cloned());
+            let Some(end_date) = end_date else {
+                continue;
+            };
+
+            sqlx::query(
+                r#"
+                insert into deep_value.tushare_income (ts_code, end_date, report_type, n_income)
+                values ($1, $2, $3, $4)
+                on conflict (ts_code, end_date, report_type) do update set
+                    n_income = coalesce(excluded.n_income, deep_value.tushare_income.n_income),
+                    updated_at = now()
+                "#,
+            )
+            .bind(ts_code)
+            .bind(end_date)
+            .bind(&report_type)
+            .bind(n_income_idx.and_then(|idx| cell_f64(row, idx)))
+            .execute(&self.pool)
+            .await
+            .context("写入 tushare_income 失败")?;
+        }
+
+        Ok(())
+    }
+
+    async fn save_dividend(
+        &self,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
+    ) -> Result<()> {
+        let Some(ts_code_idx) = field_index(fields, "ts_code") else {
+            return Ok(());
+        };
+        let end_date_idx = field_index(fields, "end_date");
+        let cash_div_tax_idx = field_index(fields, "cash_div_tax");
+        let stk_div_idx = field_index(fields, "stk_div");
+
+        for row in items {
+            let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
+            let end_date = end_date_idx
+                .and_then(|idx| cell_string(row, idx))
+                .or_else(|| params.get("end_date").cloned());
+            let cash_div_tax = cash_div_tax_idx.and_then(|idx| cell_f64(row, idx));
+            let stk_div = stk_div_idx.and_then(|idx| cell_f64(row, idx));
+            let row_hash = stable_row_hash("dividend", fields, row);
+
+            sqlx::query(
+                r#"
+                insert into deep_value.tushare_dividend (
+                    row_hash, ts_code, end_date, cash_div_tax, stk_div
+                )
+                values ($1, $2, $3, $4, $5)
+                on conflict (row_hash) do update set
+                    ts_code = excluded.ts_code,
+                    end_date = excluded.end_date,
+                    cash_div_tax = excluded.cash_div_tax,
+                    stk_div = excluded.stk_div,
+                    updated_at = now()
+                "#,
+            )
+            .bind(row_hash)
+            .bind(ts_code)
+            .bind(end_date)
+            .bind(cash_div_tax)
+            .bind(stk_div)
+            .execute(&self.pool)
+            .await
+            .context("写入 tushare_dividend 失败")?;
+        }
+
+        Ok(())
+    }
+
+    async fn save_balancesheet(
+        &self,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
+    ) -> Result<()> {
+        let Some(ts_code_idx) = field_index(fields, "ts_code") else {
+            return Ok(());
+        };
+        let end_date_idx = field_index(fields, "end_date");
+        let total_eqy_idx = field_index(fields, "total_hldr_eqy_exc_min_int");
+        let report_type = params.get("report_type").cloned().unwrap_or_default();
+
+        for row in items {
+            let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
+            let end_date = end_date_idx
+                .and_then(|idx| cell_string(row, idx))
+                .or_else(|| params.get("period").cloned());
+            let Some(end_date) = end_date else {
+                continue;
+            };
+
+            sqlx::query(
+                r#"
+                insert into deep_value.tushare_balancesheet (
+                    ts_code, end_date, report_type, total_hldr_eqy_exc_min_int
+                )
+                values ($1, $2, $3, $4)
+                on conflict (ts_code, end_date, report_type) do update set
+                    total_hldr_eqy_exc_min_int = coalesce(
+                        excluded.total_hldr_eqy_exc_min_int,
+                        deep_value.tushare_balancesheet.total_hldr_eqy_exc_min_int
+                    ),
+                    updated_at = now()
+                "#,
+            )
+            .bind(ts_code)
+            .bind(end_date)
+            .bind(&report_type)
+            .bind(total_eqy_idx.and_then(|idx| cell_f64(row, idx)))
+            .execute(&self.pool)
+            .await
+            .context("写入 tushare_balancesheet 失败")?;
+        }
+
+        Ok(())
+    }
+
+    async fn save_fina_audit(
+        &self,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
+    ) -> Result<()> {
+        let Some(ts_code_idx) = field_index(fields, "ts_code") else {
+            return Ok(());
+        };
+        let audit_agency_idx = field_index(fields, "audit_agency");
+        let Some(period) = params.get("period") else {
+            return Ok(());
+        };
+
+        for row in items {
+            let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
+            let audit_agency = audit_agency_idx.and_then(|idx| cell_string(row, idx));
+
+            sqlx::query(
+                r#"
+                insert into deep_value.tushare_fina_audit (ts_code, period, audit_agency)
+                values ($1, $2, $3)
+                on conflict (ts_code, period) do update set
+                    audit_agency = coalesce(
+                        excluded.audit_agency,
+                        deep_value.tushare_fina_audit.audit_agency
+                    ),
+                    updated_at = now()
+                "#,
+            )
+            .bind(ts_code)
+            .bind(period)
+            .bind(audit_agency)
+            .execute(&self.pool)
+            .await
+            .context("写入 tushare_fina_audit 失败")?;
+        }
+
+        Ok(())
+    }
+
+    async fn load_income(
+        &self,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        let Some(period) = params.get("period") else {
+            return Ok(None);
+        };
+        let report_type = params.get("report_type").map(String::as_str).unwrap_or("");
+        let rows = sqlx::query(
+            r#"
+            select ts_code, end_date, n_income
+            from deep_value.tushare_income
+            where end_date = $1 and report_type = $2
+            order by ts_code
+            "#,
+        )
+        .bind(period)
+        .bind(report_type)
+        .fetch_all(&self.pool)
+        .await
+        .context("读取 tushare_income 失败")?;
+
+        rows_to_dataframe(
+            &requested_fields(fields, &["ts_code", "end_date", "n_income"]),
+            &rows,
+        )
+    }
+
+    async fn load_dividend(
+        &self,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        let Some(end_date) = params.get("end_date") else {
+            return Ok(None);
+        };
+        let rows = sqlx::query(
+            r#"
+            select ts_code, end_date, cash_div_tax, stk_div
+            from deep_value.tushare_dividend
+            where end_date = $1
+            order by ts_code, row_hash
+            "#,
+        )
+        .bind(end_date)
+        .fetch_all(&self.pool)
+        .await
+        .context("读取 tushare_dividend 失败")?;
+
+        rows_to_dataframe(
+            &requested_fields(fields, &["ts_code", "end_date", "cash_div_tax", "stk_div"]),
+            &rows,
+        )
+    }
+
+    async fn load_balancesheet(
+        &self,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        let Some(period) = params.get("period") else {
+            return Ok(None);
+        };
+        let report_type = params.get("report_type").map(String::as_str).unwrap_or("");
+        let rows = sqlx::query(
+            r#"
+            select ts_code, end_date, total_hldr_eqy_exc_min_int
+            from deep_value.tushare_balancesheet
+            where end_date = $1 and report_type = $2
+            order by ts_code
+            "#,
+        )
+        .bind(period)
+        .bind(report_type)
+        .fetch_all(&self.pool)
+        .await
+        .context("读取 tushare_balancesheet 失败")?;
+
+        rows_to_dataframe(
+            &requested_fields(
+                fields,
+                &["ts_code", "end_date", "total_hldr_eqy_exc_min_int"],
+            ),
+            &rows,
+        )
+    }
+
+    async fn load_fina_audit(
+        &self,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        let Some(period) = params.get("period") else {
+            return Ok(None);
+        };
+        let rows = sqlx::query(
+            r#"
+            select ts_code, audit_agency
+            from deep_value.tushare_fina_audit
+            where period = $1
+            order by ts_code
+            "#,
+        )
+        .bind(period)
+        .fetch_all(&self.pool)
+        .await
+        .context("读取 tushare_fina_audit 失败")?;
+
+        rows_to_dataframe(
+            &requested_fields(fields, &["ts_code", "audit_agency"]),
+            &rows,
+        )
+    }
 }
 
 fn field_index(fields: &[String], name: &str) -> Option<usize> {
@@ -492,8 +804,16 @@ fn rows_to_dataframe(
 fn row_value_as_string(row: &sqlx::postgres::PgRow, field: &str) -> Result<Option<String>> {
     let value = match field {
         "exchange" | "cal_date" | "is_open" | "ts_code" | "trade_date" | "name" | "industry"
-        | "list_status" => row.try_get::<Option<String>, _>(field)?,
-        "pb" | "pe" | "pe_ttm" | "dv_ratio" | "total_mv" => row
+        | "list_status" | "end_date" | "audit_agency" => row.try_get::<Option<String>, _>(field)?,
+        "pb"
+        | "pe"
+        | "pe_ttm"
+        | "dv_ratio"
+        | "total_mv"
+        | "n_income"
+        | "cash_div_tax"
+        | "stk_div"
+        | "total_hldr_eqy_exc_min_int" => row
             .try_get::<Option<f64>, _>(field)?
             .map(|value| trim_float_string(value)),
         _ => None,
@@ -513,4 +833,35 @@ fn trim_float_string(value: f64) -> String {
         }
     }
     text
+}
+
+fn stable_row_hash(api_name: &str, fields: &[String], row: &[Value]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in api_name.as_bytes() {
+        hash = fnv1a(hash, *byte);
+    }
+    for field in fields {
+        for byte in field.as_bytes() {
+            hash = fnv1a(hash, *byte);
+        }
+        hash = fnv1a(hash, 0xff);
+    }
+    for value in row {
+        let text = match value {
+            Value::Null => "null".to_string(),
+            Value::String(value) => value.clone(),
+            Value::Number(value) => value.to_string(),
+            Value::Bool(value) => value.to_string(),
+            value => value.to_string(),
+        };
+        for byte in text.as_bytes() {
+            hash = fnv1a(hash, *byte);
+        }
+        hash = fnv1a(hash, 0xfe);
+    }
+    format!("{hash:016x}")
+}
+
+fn fnv1a(hash: u64, byte: u8) -> u64 {
+    (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
 }
