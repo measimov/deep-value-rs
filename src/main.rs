@@ -59,6 +59,10 @@ enum Commands {
         /// 最终持仓数量
         #[arg(long, default_value_t = 10)]
         top: usize,
+
+        /// 跳过市场 PB 中位数建仓门槛检查
+        #[arg(long)]
+        skip_pb_check: bool,
     },
 }
 
@@ -94,7 +98,11 @@ async fn main() -> Result<()> {
         Commands::Db { action } => match action {
             DbAction::Ping => cmd_db_ping().await?,
         },
-        Commands::Snapshot { date, top } => cmd_snapshot(&date, top).await?,
+        Commands::Snapshot {
+            date,
+            top,
+            skip_pb_check,
+        } => cmd_snapshot(&date, top, skip_pb_check).await?,
     }
 
     Ok(())
@@ -131,10 +139,10 @@ async fn cmd_db_ping() -> Result<()> {
 }
 
 /// 单期真实选股快照。
-async fn cmd_snapshot(date: &str, top: usize) -> Result<()> {
+async fn cmd_snapshot(date: &str, top: usize, skip_pb_check: bool) -> Result<()> {
     let config = AppConfig::load()?;
     let client = TushareClient::new_with_pg(&config.tushare_token, &config.database_url).await?;
-    let result = run_ashare_snapshot(&client, date, top).await?;
+    let result = run_ashare_snapshot(&client, date, top, skip_pb_check).await?;
     println!("{}", formatter::format_snapshot(&result));
     Ok(())
 }
@@ -143,6 +151,7 @@ async fn run_ashare_snapshot(
     client: &TushareClient,
     trade_date: &str,
     top: usize,
+    skip_pb_check: bool,
 ) -> Result<SnapshotResult> {
     let mut config = DeepValueConfig {
         top_n: top,
@@ -160,7 +169,14 @@ async fn run_ashare_snapshot(
     market_pb_map.insert("ashare".to_string(), market_pb);
     is_investable_map.insert("ashare".to_string(), investable);
 
-    if config.enforce_market_gate && !investable {
+    if skip_pb_check {
+        data_warnings.push(format!(
+            "已按命令行参数跳过市场 PB 门槛检查：A 股 PB 中位数 {:.2}，默认阈值 {:.2}",
+            market_pb, config.market_pb_threshold
+        ));
+    }
+
+    if config.enforce_market_gate && !skip_pb_check && !investable {
         data_warnings.push(format!(
             "A 股 PB 中位数 {:.2} 高于阈值 {:.2}，按配置不建仓",
             market_pb, config.market_pb_threshold
@@ -209,7 +225,14 @@ async fn run_ashare_snapshot(
     ));
     data_warnings.push("Step 2 十年 PB 高点检查已跳过：缺少历史 PB 数据源".to_string());
 
-    let net_equity = financials::get_net_equity(client, trade_date).await?;
+    let net_equity = match financials::get_net_equity(client, trade_date).await {
+        Ok(df) => df,
+        Err(err) => {
+            data_warnings.push(format!("净资产数据获取失败，净资产筛选降级跳过: {err:#}"));
+            empty_net_equity_df()
+        }
+    };
+    let has_net_equity = net_equity.height() > 0;
     df = df
         .lazy()
         .join(
@@ -220,7 +243,14 @@ async fn run_ashare_snapshot(
         )
         .collect()?;
 
-    let audit_info = audit::get_audit_info(client, trade_date).await?;
+    let audit_info = match audit::get_audit_info(client, trade_date).await {
+        Ok(df) => df,
+        Err(err) => {
+            data_warnings.push(format!("审计数据获取失败，审计筛选降级跳过: {err:#}"));
+            empty_audit_df()
+        }
+    };
+    let has_audit = audit_info.height() > 0;
     df = df
         .lazy()
         .join(
@@ -232,7 +262,7 @@ async fn run_ashare_snapshot(
         .collect()?;
 
     let before = df.height();
-    if config.audit_big4_required {
+    if config.audit_big4_required && has_audit && has_net_equity {
         df = df
             .lazy()
             .filter(
@@ -241,14 +271,24 @@ async fn run_ashare_snapshot(
                     .or(col("net_equity_bn").gt(lit(config.audit_exemption_equity_bn))),
             )
             .collect()?;
+    } else if config.audit_big4_required && has_audit {
+        df = df.lazy().filter(col("is_big4").eq(lit(true))).collect()?;
     }
+    let audit_skipped = !has_audit;
+    let audit_note = if !has_audit {
+        "审计数据不可用，跳过该步骤".to_string()
+    } else if has_net_equity {
+        format!("净资产 > {:.0} 亿豁免", config.audit_exemption_equity_bn)
+    } else {
+        "净资产数据不可用，仅保留四大审计".to_string()
+    };
     step_records.push(screening::make_step(
         3,
         "四大审计或大净资产豁免",
         before,
         df.height(),
-        false,
-        &format!("净资产 > {:.0} 亿豁免", config.audit_exemption_equity_bn),
+        audit_skipped,
+        &audit_note,
     ));
 
     let before = df.height();
@@ -266,50 +306,60 @@ async fn run_ashare_snapshot(
     ));
 
     let before = df.height();
-    df = df
-        .lazy()
-        .filter(col("net_equity_bn").gt_eq(lit(config.net_equity_min_bn)))
-        .collect()?;
+    if has_net_equity {
+        df = df
+            .lazy()
+            .filter(col("net_equity_bn").gt_eq(lit(config.net_equity_min_bn)))
+            .collect()?;
+    }
     step_records.push(screening::make_step(
         5,
         &format!("净资产 >= {:.0} 亿", config.net_equity_min_bn),
         before,
         df.height(),
-        false,
-        "",
+        !has_net_equity,
+        if has_net_equity {
+            ""
+        } else {
+            "净资产数据不可用，跳过该步骤"
+        },
     ));
 
-    let current_income = financials::get_current_year_income(client, trade_date).await?;
-    let current_dividend = financials::get_current_year_dividend(client, trade_date).await?;
-    let income_10y = financials::get_10y_income(client, trade_date, config.lookback_years).await?;
-    let dividend_10y =
-        financials::get_10y_dividend(client, trade_date, config.lookback_years).await?;
-
     let before = df.height();
-    let anomaly_result = anomaly::remove_anomalies(
-        &df,
-        &current_income,
-        &current_dividend,
-        &income_10y,
-        &dividend_10y,
-    )?;
-    let eliminated = anomaly_result
-        .removed
-        .iter()
-        .map(|stock| EliminatedStock {
-            ts_code: stock.ts_code.clone(),
-            name: lookup_name(&df, &stock.ts_code).unwrap_or_else(|| stock.ts_code.clone()),
-            reason: stock.reason.clone(),
-        })
-        .collect();
-    df = anomaly_result.kept;
+    let anomaly_inputs = load_anomaly_inputs(client, trade_date, config.lookback_years).await;
+    let (eliminated, anomaly_skipped, anomaly_note) = match anomaly_inputs {
+        Ok((current_income, current_dividend, income_10y, dividend_10y)) => {
+            let anomaly_result = anomaly::remove_anomalies(
+                &df,
+                &current_income,
+                &current_dividend,
+                &income_10y,
+                &dividend_10y,
+            )?;
+            let eliminated = anomaly_result
+                .removed
+                .iter()
+                .map(|stock| EliminatedStock {
+                    ts_code: stock.ts_code.clone(),
+                    name: lookup_name(&df, &stock.ts_code).unwrap_or_else(|| stock.ts_code.clone()),
+                    reason: stock.reason.clone(),
+                })
+                .collect();
+            df = anomaly_result.kept;
+            (eliminated, false, "")
+        }
+        Err(err) => {
+            data_warnings.push(format!("排雷财务数据获取失败，排雷步骤跳过: {err:#}"));
+            (Vec::new(), true, "财务/分红数据不可用，跳过排雷")
+        }
+    };
     step_records.push(screening::make_step(
         6,
         "异常利润/分红排雷",
         before,
         df.height(),
-        false,
-        "",
+        anomaly_skipped,
+        anomaly_note,
     ));
 
     let before = df.height();
@@ -392,6 +442,32 @@ fn dataframe_to_holdings(df: &DataFrame) -> Result<Vec<Holding>> {
         });
     }
     Ok(holdings)
+}
+
+async fn load_anomaly_inputs(
+    client: &TushareClient,
+    trade_date: &str,
+    lookback_years: usize,
+) -> Result<(DataFrame, DataFrame, DataFrame, DataFrame)> {
+    let current_income = financials::get_current_year_income(client, trade_date).await?;
+    let current_dividend = financials::get_current_year_dividend(client, trade_date).await?;
+    let income_10y = financials::get_10y_income(client, trade_date, lookback_years).await?;
+    let dividend_10y = financials::get_10y_dividend(client, trade_date, lookback_years).await?;
+    Ok((current_income, current_dividend, income_10y, dividend_10y))
+}
+
+fn empty_net_equity_df() -> DataFrame {
+    DataFrame::empty_with_schema(&Schema::from_iter([
+        Field::new("ts_code".into(), DataType::String),
+        Field::new("net_equity_bn".into(), DataType::Float64),
+    ]))
+}
+
+fn empty_audit_df() -> DataFrame {
+    DataFrame::empty_with_schema(&Schema::from_iter([
+        Field::new("ts_code".into(), DataType::String),
+        Field::new("is_big4".into(), DataType::Boolean),
+    ]))
 }
 
 fn industry_distribution(holdings: &[Holding]) -> HashMap<String, usize> {
