@@ -8,8 +8,10 @@
 //! - [`config`] — 配置加载（.env + 环境变量）
 //! - [`data`] — 数据获取（横截面、财务、审计）
 //! - [`strategy`] — 策略逻辑（领域类型、打分、排雷、筛选）
+//! - [`report`] — 报告格式化输出
 
 pub mod config;
 pub mod data;
+pub mod report;
 pub mod strategy;
 pub mod tushare;
