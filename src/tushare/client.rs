@@ -148,6 +148,9 @@ impl TushareClient {
                     &data.items,
                 )
                 .await?;
+            pg_cache
+                .save_typed(api_name, &param_map, &data.fields, &data.items)
+                .await?;
         } else if df.height() > 0 {
             self.cache.save(&cache_key, &df)?;
         }

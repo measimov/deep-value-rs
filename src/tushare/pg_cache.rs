@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
+use polars::prelude::*;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 
@@ -138,4 +139,378 @@ impl PgCache {
 
         Ok(result.rows_affected())
     }
+
+    /// Save supported Tushare responses into typed tables.
+    pub async fn save_typed(
+        &self,
+        api_name: &str,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
+    ) -> Result<()> {
+        match api_name {
+            "trade_cal" => self.save_trade_cal(params, fields, items).await,
+            "stock_basic" => self.save_stock_basic(params, fields, items).await,
+            "daily_basic" => self.save_daily_basic(params, fields, items).await,
+            _ => Ok(()),
+        }
+    }
+
+    /// Load supported typed data as a DataFrame.
+    pub async fn load_typed(
+        &self,
+        api_name: &str,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        match api_name {
+            "trade_cal" => self.load_trade_cal(params, fields).await,
+            "stock_basic" => self.load_stock_basic(params, fields).await,
+            "daily_basic" => self.load_daily_basic(params, fields).await,
+            _ => Ok(None),
+        }
+    }
+
+    async fn save_trade_cal(
+        &self,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
+    ) -> Result<()> {
+        let Some(cal_date_idx) = field_index(fields, "cal_date") else {
+            return Ok(());
+        };
+        let exchange_idx = field_index(fields, "exchange");
+        let is_open_idx = field_index(fields, "is_open");
+
+        for row in items {
+            let Some(cal_date) = cell_string(row, cal_date_idx) else {
+                continue;
+            };
+            let exchange = exchange_idx
+                .and_then(|idx| cell_string(row, idx))
+                .or_else(|| params.get("exchange").cloned())
+                .unwrap_or_default();
+            let is_open = is_open_idx.and_then(|idx| cell_string(row, idx));
+
+            sqlx::query(
+                r#"
+                insert into deep_value.tushare_trade_cal (exchange, cal_date, is_open)
+                values ($1, $2, $3)
+                on conflict (exchange, cal_date) do update set
+                    is_open = excluded.is_open,
+                    updated_at = now()
+                "#,
+            )
+            .bind(exchange)
+            .bind(cal_date)
+            .bind(is_open)
+            .execute(&self.pool)
+            .await
+            .context("写入 tushare_trade_cal 失败")?;
+        }
+
+        Ok(())
+    }
+
+    async fn save_stock_basic(
+        &self,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
+    ) -> Result<()> {
+        let Some(ts_code_idx) = field_index(fields, "ts_code") else {
+            return Ok(());
+        };
+        let name_idx = field_index(fields, "name");
+        let industry_idx = field_index(fields, "industry");
+        let list_status_idx = field_index(fields, "list_status");
+
+        for row in items {
+            let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
+            let name = name_idx.and_then(|idx| cell_string(row, idx));
+            let industry = industry_idx.and_then(|idx| cell_string(row, idx));
+            let list_status = list_status_idx
+                .and_then(|idx| cell_string(row, idx))
+                .or_else(|| params.get("list_status").cloned());
+
+            sqlx::query(
+                r#"
+                insert into deep_value.tushare_stock_basic (ts_code, name, industry, list_status)
+                values ($1, $2, $3, $4)
+                on conflict (ts_code) do update set
+                    name = coalesce(excluded.name, deep_value.tushare_stock_basic.name),
+                    industry = coalesce(excluded.industry, deep_value.tushare_stock_basic.industry),
+                    list_status = coalesce(excluded.list_status, deep_value.tushare_stock_basic.list_status),
+                    updated_at = now()
+                "#,
+            )
+            .bind(ts_code)
+            .bind(name)
+            .bind(industry)
+            .bind(list_status)
+            .execute(&self.pool)
+            .await
+            .context("写入 tushare_stock_basic 失败")?;
+        }
+
+        Ok(())
+    }
+
+    async fn save_daily_basic(
+        &self,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
+    ) -> Result<()> {
+        let Some(ts_code_idx) = field_index(fields, "ts_code") else {
+            return Ok(());
+        };
+        let trade_date_idx = field_index(fields, "trade_date");
+        let pb_idx = field_index(fields, "pb");
+        let pe_idx = field_index(fields, "pe");
+        let pe_ttm_idx = field_index(fields, "pe_ttm");
+        let dv_ratio_idx = field_index(fields, "dv_ratio");
+        let total_mv_idx = field_index(fields, "total_mv");
+
+        for row in items {
+            let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
+            let trade_date = trade_date_idx
+                .and_then(|idx| cell_string(row, idx))
+                .or_else(|| params.get("trade_date").cloned());
+            let Some(trade_date) = trade_date else {
+                continue;
+            };
+
+            sqlx::query(
+                r#"
+                insert into deep_value.tushare_daily_basic (
+                    ts_code, trade_date, pb, pe, pe_ttm, dv_ratio, total_mv
+                )
+                values ($1, $2, $3, $4, $5, $6, $7)
+                on conflict (ts_code, trade_date) do update set
+                    pb = coalesce(excluded.pb, deep_value.tushare_daily_basic.pb),
+                    pe = coalesce(excluded.pe, deep_value.tushare_daily_basic.pe),
+                    pe_ttm = coalesce(excluded.pe_ttm, deep_value.tushare_daily_basic.pe_ttm),
+                    dv_ratio = coalesce(excluded.dv_ratio, deep_value.tushare_daily_basic.dv_ratio),
+                    total_mv = coalesce(excluded.total_mv, deep_value.tushare_daily_basic.total_mv),
+                    updated_at = now()
+                "#,
+            )
+            .bind(ts_code)
+            .bind(trade_date)
+            .bind(pb_idx.and_then(|idx| cell_f64(row, idx)))
+            .bind(pe_idx.and_then(|idx| cell_f64(row, idx)))
+            .bind(pe_ttm_idx.and_then(|idx| cell_f64(row, idx)))
+            .bind(dv_ratio_idx.and_then(|idx| cell_f64(row, idx)))
+            .bind(total_mv_idx.and_then(|idx| cell_f64(row, idx)))
+            .execute(&self.pool)
+            .await
+            .context("写入 tushare_daily_basic 失败")?;
+        }
+
+        Ok(())
+    }
+
+    async fn load_trade_cal(
+        &self,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        let exchange = params.get("exchange").map(String::as_str).unwrap_or("SSE");
+        let Some(start_date) = params.get("start_date") else {
+            return Ok(None);
+        };
+        let Some(end_date) = params.get("end_date") else {
+            return Ok(None);
+        };
+        let is_open = params.get("is_open").map(String::as_str);
+
+        let rows = sqlx::query(
+            r#"
+            select exchange, cal_date, is_open
+            from deep_value.tushare_trade_cal
+            where exchange = $1
+              and cal_date >= $2
+              and cal_date <= $3
+              and ($4::text is null or is_open = $4)
+            order by cal_date
+            "#,
+        )
+        .bind(exchange)
+        .bind(start_date)
+        .bind(end_date)
+        .bind(is_open)
+        .fetch_all(&self.pool)
+        .await
+        .context("读取 tushare_trade_cal 失败")?;
+
+        rows_to_dataframe(
+            &requested_fields(fields, &["exchange", "cal_date", "is_open"]),
+            &rows,
+        )
+    }
+
+    async fn load_stock_basic(
+        &self,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        let list_status = params.get("list_status").map(String::as_str);
+        let rows = sqlx::query(
+            r#"
+            select ts_code, name, industry, list_status
+            from deep_value.tushare_stock_basic
+            where ($1::text is null or list_status = $1)
+            order by ts_code
+            "#,
+        )
+        .bind(list_status)
+        .fetch_all(&self.pool)
+        .await
+        .context("读取 tushare_stock_basic 失败")?;
+
+        rows_to_dataframe(
+            &requested_fields(fields, &["ts_code", "name", "industry", "list_status"]),
+            &rows,
+        )
+    }
+
+    async fn load_daily_basic(
+        &self,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        let Some(trade_date) = params.get("trade_date") else {
+            return Ok(None);
+        };
+        let rows = sqlx::query(
+            r#"
+            select ts_code, trade_date, pb, pe, pe_ttm, dv_ratio, total_mv
+            from deep_value.tushare_daily_basic
+            where trade_date = $1
+            order by ts_code
+            "#,
+        )
+        .bind(trade_date)
+        .fetch_all(&self.pool)
+        .await
+        .context("读取 tushare_daily_basic 失败")?;
+
+        rows_to_dataframe(
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "trade_date",
+                    "pb",
+                    "pe",
+                    "pe_ttm",
+                    "dv_ratio",
+                    "total_mv",
+                ],
+            ),
+            &rows,
+        )
+    }
+}
+
+fn field_index(fields: &[String], name: &str) -> Option<usize> {
+    fields.iter().position(|field| field == name)
+}
+
+fn cell_string(row: &[Value], idx: usize) -> Option<String> {
+    match row.get(idx)? {
+        Value::Null => None,
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        value => Some(value.to_string()),
+    }
+}
+
+fn cell_f64(row: &[Value], idx: usize) -> Option<f64> {
+    match row.get(idx)? {
+        Value::Null => None,
+        Value::Number(value) => value.as_f64(),
+        Value::String(value) => value.parse().ok(),
+        Value::Bool(_) => None,
+        value => value.to_string().parse().ok(),
+    }
+}
+
+fn requested_fields(fields: Option<&str>, default_fields: &[&str]) -> Vec<String> {
+    fields
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|field| !field.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            default_fields
+                .iter()
+                .map(|field| (*field).to_string())
+                .collect()
+        })
+}
+
+fn rows_to_dataframe(
+    fields: &[String],
+    rows: &[sqlx::postgres::PgRow],
+) -> Result<Option<DataFrame>> {
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    let columns: Result<Vec<Column>> = fields
+        .iter()
+        .map(|field| {
+            let values: Result<Vec<Option<String>>> = rows
+                .iter()
+                .map(|row| row_value_as_string(row, field))
+                .collect();
+            Ok(Column::new(
+                PlSmallStr::from(field.as_str()),
+                values?
+                    .iter()
+                    .map(|value| value.as_deref())
+                    .collect::<Vec<Option<&str>>>(),
+            ))
+        })
+        .collect();
+
+    Ok(Some(DataFrame::new(columns?)?))
+}
+
+fn row_value_as_string(row: &sqlx::postgres::PgRow, field: &str) -> Result<Option<String>> {
+    let value = match field {
+        "exchange" | "cal_date" | "is_open" | "ts_code" | "trade_date" | "name" | "industry"
+        | "list_status" => row.try_get::<Option<String>, _>(field)?,
+        "pb" | "pe" | "pe_ttm" | "dv_ratio" | "total_mv" => row
+            .try_get::<Option<f64>, _>(field)?
+            .map(|value| trim_float_string(value)),
+        _ => None,
+    };
+
+    Ok(value)
+}
+
+fn trim_float_string(value: f64) -> String {
+    let mut text = value.to_string();
+    if text.contains('.') {
+        while text.ends_with('0') {
+            text.pop();
+        }
+        if text.ends_with('.') {
+            text.pop();
+        }
+    }
+    text
 }

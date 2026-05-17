@@ -162,7 +162,7 @@ Completion notes:
 
 ### Stage 4: Typed Tables Batch 1
 
-Status: pending
+Status: completed
 
 Tables:
 
@@ -172,9 +172,9 @@ Tables:
 
 Tasks:
 
-- [ ] Add schemas and upsert logic.
-- [ ] Add read paths that return DataFrames from typed tables.
-- [ ] Verify output equivalence against Tushare/raw responses.
+- [x] Add schemas and upsert logic.
+- [x] Add read paths that return DataFrames from typed tables.
+- [x] Verify output equivalence against Tushare/raw responses.
 
 Verification:
 
@@ -184,7 +184,10 @@ Verification:
 
 Completion notes:
 
-- Pending.
+- Added typed PostgreSQL tables for `trade_cal`, `stock_basic`, and `daily_basic`.
+- Added typed upsert and DataFrame read paths in `PgCache`.
+- `TushareClient::query()` now writes supported Batch 1 API responses to typed tables after raw persistence.
+- Verification passed: `cargo check`; `cargo test --lib` with 39 tests; `cargo test --test postgres_typed_tables_test` with 3 tests; `cargo test --test postgres_cache_test` with 2 tests; `cargo test --test integration_test` with 6 tests.
 
 ### Stage 5: Typed Tables Batch 2
 
@@ -265,3 +268,4 @@ Completion notes:
 - Stage 1: database configuration and PostgreSQL health check.
 - Stage 2: PostgreSQL schema migration and raw Tushare response table.
 - Stage 3: PostgreSQL raw read/write path for Tushare queries.
+- Stage 4: typed PostgreSQL tables for trade calendar, stock basic, and daily basic.
