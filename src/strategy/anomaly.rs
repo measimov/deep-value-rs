@@ -67,17 +67,11 @@ pub fn remove_anomalies(
         // 规则 1a: 当年净利润 > 十年净利润总和（十年总和 > 0）
         if let (Some(cur), Some(sum)) = (cur_income, sum_10y_income) {
             if sum > 0.0 && cur > sum {
-                reasons.push(format!(
-                    "当年净利润({:.0}) > 十年总和({:.0})",
-                    cur, sum
-                ));
+                reasons.push(format!("当年净利润({:.0}) > 十年总和({:.0})", cur, sum));
             }
             // 规则 1b: 十年利润 ≤ 0 但当年暴利（超过十年亏损绝对值）
             if sum <= 0.0 && cur > sum.abs() {
-                reasons.push(format!(
-                    "十年累计亏损({:.0})但当年暴利({:.0})",
-                    sum, cur
-                ));
+                reasons.push(format!("十年累计亏损({:.0})但当年暴利({:.0})", sum, cur));
             }
         }
 
@@ -86,10 +80,7 @@ pub fn remove_anomalies(
         let sum_10y_div = get_f64_by_code(dividend_10y, code, "sum_dividend_10y");
         if let (Some(cur), Some(sum)) = (cur_div, sum_10y_div) {
             if sum > 0.0 && cur > sum {
-                reasons.push(format!(
-                    "当年分红({:.0}) > 十年总额({:.0})",
-                    cur, sum
-                ));
+                reasons.push(format!("当年分红({:.0}) > 十年总额({:.0})", cur, sum));
             }
         }
 
@@ -155,7 +146,14 @@ mod tests {
         )
         .unwrap();
 
-        let result = remove_anomalies(&candidates, &income, &empty_div, &income_10y, &empty_div_10y).unwrap();
+        let result = remove_anomalies(
+            &candidates,
+            &income,
+            &empty_div,
+            &income_10y,
+            &empty_div_10y,
+        )
+        .unwrap();
         // A: 200 > 100 → 被剔除
         // B: 50 < 500 → 保留
         assert_eq!(result.kept.height(), 1);
@@ -187,7 +185,8 @@ mod tests {
         )
         .unwrap();
 
-        let result = remove_anomalies(&candidates, &income, &empty, &income_10y, &empty_10y).unwrap();
+        let result =
+            remove_anomalies(&candidates, &income, &empty, &income_10y, &empty_10y).unwrap();
         // X: sum=-50, cur=60 > |−50|=50 → 剔除
         assert_eq!(result.removed.len(), 1);
         assert!(result.removed[0].reason.contains("十年累计亏损"));
@@ -217,7 +216,14 @@ mod tests {
         )
         .unwrap();
 
-        let result = remove_anomalies(&candidates, &empty_income, &div, &empty_income_10y, &div_10y).unwrap();
+        let result = remove_anomalies(
+            &candidates,
+            &empty_income,
+            &div,
+            &empty_income_10y,
+            &div_10y,
+        )
+        .unwrap();
         assert_eq!(result.removed.len(), 1);
         assert!(result.removed[0].reason.contains("当年分红"));
     }

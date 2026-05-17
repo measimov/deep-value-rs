@@ -90,7 +90,13 @@ impl Cache {
         // 清理 key 中的非法文件名字符
         let safe_key: String = key
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         self.base_dir.join(format!("{safe_key}.parquet"))
     }

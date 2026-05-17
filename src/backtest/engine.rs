@@ -87,16 +87,15 @@ pub async fn fetch_ashare_prices(
                     .lazy()
                     .with_column(col("close").cast(DataType::Float64))
                     .join(
-                        adj_df.lazy().with_column(
-                            col("adj_factor").cast(DataType::Float64),
-                        ),
+                        adj_df
+                            .lazy()
+                            .with_column(col("adj_factor").cast(DataType::Float64)),
                         [col("ts_code"), col("trade_date")],
                         [col("ts_code"), col("trade_date")],
                         JoinArgs::new(JoinType::Left),
                     )
                     .with_column(
-                        (col("close") * col("adj_factor").fill_null(lit(1.0)))
-                            .alias("close_adj"),
+                        (col("close") * col("adj_factor").fill_null(lit(1.0))).alias("close_adj"),
                     )
                     .select([col("ts_code"), col("trade_date"), col("close_adj")])
                     .collect()?;
@@ -296,10 +295,7 @@ pub fn compute_metrics_from_nav(
     let ann_return = metrics::annualized_return(total_return, days);
 
     // 日收益率
-    let daily_returns: Vec<f64> = nav_values
-        .windows(2)
-        .map(|w| w[1] / w[0] - 1.0)
-        .collect();
+    let daily_returns: Vec<f64> = nav_values.windows(2).map(|w| w[1] / w[0] - 1.0).collect();
 
     let volatility = metrics::annualized_volatility(&daily_returns);
     let sharpe = metrics::sharpe_ratio(&daily_returns, 0.03);

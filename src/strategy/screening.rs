@@ -36,10 +36,7 @@ pub fn enforce_industry_cap(df: &DataFrame, cap: f64, top_n: usize) -> anyhow::R
             break;
         }
 
-        let industry = industries
-            .get(i)
-            .unwrap_or("未分类")
-            .to_string();
+        let industry = industries.get(i).unwrap_or("未分类").to_string();
         let industry = if industry.is_empty() {
             "未分类".to_string()
         } else {

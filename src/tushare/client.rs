@@ -97,9 +97,7 @@ impl TushareClient {
             bail!("Tushare API 错误 ({}): {}", api_name, body.error_message());
         }
 
-        let data = body
-            .data
-            .context("Tushare 返回数据为空")?;
+        let data = body.data.context("Tushare 返回数据为空")?;
 
         // 转换为 DataFrame
         let df = self.response_to_dataframe(&data.fields, &data.items)?;
@@ -185,12 +183,7 @@ impl TushareClient {
             // 返回空 DataFrame (保留列名)
             let columns: Vec<Column> = fields
                 .iter()
-                .map(|name| {
-                    Column::new(
-                        PlSmallStr::from(name.as_str()),
-                        Vec::<String>::new(),
-                    )
-                })
+                .map(|name| Column::new(PlSmallStr::from(name.as_str()), Vec::<String>::new()))
                 .collect();
             return Ok(DataFrame::new(columns)?);
         }
@@ -203,20 +196,22 @@ impl TushareClient {
                 let values: Vec<Option<String>> = items
                     .iter()
                     .map(|row| {
-                        row.get(col_idx)
-                            .and_then(|v| match v {
-                                serde_json::Value::Null => None,
-                                serde_json::Value::String(s) => Some(s.clone()),
-                                serde_json::Value::Number(n) => Some(n.to_string()),
-                                serde_json::Value::Bool(b) => Some(b.to_string()),
-                                _ => Some(v.to_string()),
-                            })
+                        row.get(col_idx).and_then(|v| match v {
+                            serde_json::Value::Null => None,
+                            serde_json::Value::String(s) => Some(s.clone()),
+                            serde_json::Value::Number(n) => Some(n.to_string()),
+                            serde_json::Value::Bool(b) => Some(b.to_string()),
+                            _ => Some(v.to_string()),
+                        })
                     })
                     .collect();
 
                 Column::new(
                     PlSmallStr::from(name.as_str()),
-                    values.iter().map(|v| v.as_deref()).collect::<Vec<Option<&str>>>(),
+                    values
+                        .iter()
+                        .map(|v| v.as_deref())
+                        .collect::<Vec<Option<&str>>>(),
                 )
             })
             .collect();
@@ -242,7 +237,9 @@ impl TushareClient {
 
         if let Some(f) = fields {
             // 对 fields 做 hash 防止文件名过长
-            let hash: u64 = f.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+            let hash: u64 = f
+                .bytes()
+                .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
             parts.push(format!("f{hash:x}"));
         }
 

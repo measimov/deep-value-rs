@@ -46,10 +46,7 @@ pub async fn get_current_year_income(
     let df = client
         .query(
             "income",
-            &[
-                ("period", period.as_str()),
-                ("report_type", "1"),
-            ],
+            &[("period", period.as_str()), ("report_type", "1")],
             Some("ts_code,end_date,n_income"),
         )
         .await
@@ -103,7 +100,11 @@ pub async fn get_current_year_dividend(
     // 按 ts_code 汇总分红总额
     let df = df
         .lazy()
-        .with_column(col("cash_div_tax").cast(DataType::Float64).fill_null(lit(0.0)))
+        .with_column(
+            col("cash_div_tax")
+                .cast(DataType::Float64)
+                .fill_null(lit(0.0)),
+        )
         .group_by([col("ts_code")])
         .agg([col("cash_div_tax").sum().alias("current_dividend_total")])
         .collect()?;
@@ -161,7 +162,10 @@ pub async fn get_10y_income(
 
     // 合并所有年份，按 ts_code 汇总
     let combined = concat(
-        all_frames.iter().map(|df| df.clone().lazy()).collect::<Vec<_>>(),
+        all_frames
+            .iter()
+            .map(|df| df.clone().lazy())
+            .collect::<Vec<_>>(),
         Default::default(),
     )?;
 
@@ -203,7 +207,11 @@ pub async fn get_10y_dividend(
         if df.height() > 0 {
             let df = df
                 .lazy()
-                .with_column(col("cash_div_tax").cast(DataType::Float64).fill_null(lit(0.0)))
+                .with_column(
+                    col("cash_div_tax")
+                        .cast(DataType::Float64)
+                        .fill_null(lit(0.0)),
+                )
                 .group_by([col("ts_code")])
                 .agg([col("cash_div_tax").sum().alias("year_div")])
                 .collect()?;
@@ -222,7 +230,10 @@ pub async fn get_10y_dividend(
     }
 
     let combined = concat(
-        all_frames.iter().map(|df| df.clone().lazy()).collect::<Vec<_>>(),
+        all_frames
+            .iter()
+            .map(|df| df.clone().lazy())
+            .collect::<Vec<_>>(),
         Default::default(),
     )?;
 
@@ -236,10 +247,7 @@ pub async fn get_10y_dividend(
 }
 
 /// 获取净资产数据（资产负债表）。
-pub async fn get_net_equity(
-    client: &TushareClient,
-    trade_date: &str,
-) -> Result<DataFrame> {
+pub async fn get_net_equity(client: &TushareClient, trade_date: &str) -> Result<DataFrame> {
     let safe_year = safe_financial_year(trade_date);
     let period = format!("{}1231", safe_year);
 

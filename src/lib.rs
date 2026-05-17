@@ -14,6 +14,7 @@
 pub mod backtest;
 pub mod config;
 pub mod data;
+pub mod db;
 pub mod report;
 pub mod strategy;
 pub mod tushare;

@@ -88,14 +88,14 @@ Completion notes:
 
 ### Stage 1: Database Configuration and Health Check
 
-Status: pending
+Status: completed
 
 Tasks:
 
-- [ ] Add `DATABASE_URL` to `AppConfig`.
-- [ ] Add PostgreSQL async dependency.
-- [ ] Add a small database health-check path that runs `select 1`.
-- [ ] Add tests for config loading and DB connectivity.
+- [x] Add `DATABASE_URL` to `AppConfig`.
+- [x] Add PostgreSQL async dependency.
+- [x] Add a small database health-check path that runs `select 1`.
+- [x] Add tests for config loading and DB connectivity.
 
 Verification:
 
@@ -105,7 +105,10 @@ Verification:
 
 Completion notes:
 
-- Pending.
+- Added `sqlx` PostgreSQL support and `src/db.rs` connection helpers.
+- Added `deep-value db ping` CLI health check.
+- Added config unit tests and a PostgreSQL integration health-check test.
+- Verification passed: `cargo check`; `cargo test --lib` with 39 tests; `cargo run -- db ping`; `cargo test --test integration_test test_postgres_health_check`.
 
 ### Stage 2: Schema Migration and Raw Table
 
@@ -252,3 +255,4 @@ Completion notes:
 ## Commit Log
 
 - Stage 0: plan document and environment placeholder.
+- Stage 1: database configuration and PostgreSQL health check.

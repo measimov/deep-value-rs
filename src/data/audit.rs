@@ -11,10 +11,7 @@ use crate::tushare::client::TushareClient;
 ///
 /// 调用 `fina_audit` 接口，判断每家公司是否由四大审计。
 /// 返回 DataFrame 包含 `ts_code`, `is_big4` (bool)。
-pub async fn get_audit_info(
-    client: &TushareClient,
-    trade_date: &str,
-) -> Result<DataFrame> {
+pub async fn get_audit_info(client: &TushareClient, trade_date: &str) -> Result<DataFrame> {
     let safe_year = crate::data::financials::safe_financial_year(trade_date);
     let period = format!("{}1231", safe_year);
 
@@ -60,11 +57,7 @@ pub async fn get_audit_info(
         .filter(|v| *v == Some(true))
         .count();
 
-    info!(
-        rows = result.height(),
-        big4 = big4_count,
-        "审计机构完成"
-    );
+    info!(rows = result.height(), big4 = big4_count, "审计机构完成");
 
     Ok(result)
 }

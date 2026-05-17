@@ -1,6 +1,7 @@
 //! 端到端集成测试 — 验证 Tushare API 查询 + Parquet 缓存完整链路。
 
 use deep_value::config::AppConfig;
+use deep_value::db;
 use deep_value::tushare::cache::Cache;
 use deep_value::tushare::client::TushareClient;
 
@@ -13,6 +14,18 @@ async fn test_ping() {
     assert!(result.is_ok(), "ping 应成功: {:?}", result.err());
     let msg = result.unwrap();
     assert!(msg.contains("连接成功"), "应包含成功提示: {msg}");
+}
+
+/// 测试 PostgreSQL 连通性
+#[tokio::test]
+async fn test_postgres_health_check() {
+    let config = AppConfig::load().expect("应能加载 .env 配置");
+    let pool = db::connect(&config.database_url)
+        .await
+        .expect("应能连接 PostgreSQL");
+    db::health_check(&pool)
+        .await
+        .expect("PostgreSQL 健康检查应成功");
 }
 
 /// 测试 2: 查询 trade_cal 并验证 DataFrame 结构
@@ -35,7 +48,11 @@ async fn test_query_trade_cal() {
         .expect("trade_cal 查询应成功");
 
     // 验证列名
-    let col_names: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let col_names: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     assert_eq!(col_names, vec!["exchange", "cal_date", "is_open"]);
 
     // 1月有31天
@@ -113,8 +130,15 @@ async fn test_query_daily_basic() {
     assert!(df.height() > 0, "daily_basic 应返回非空结果");
 
     // 验证列名
-    let col_names: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
-    assert!(col_names.iter().any(|n| n == "ts_code"), "应包含 ts_code 列");
+    let col_names: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert!(
+        col_names.iter().any(|n| n == "ts_code"),
+        "应包含 ts_code 列"
+    );
     assert!(col_names.iter().any(|n| n == "pb"), "应包含 pb 列");
 }
 

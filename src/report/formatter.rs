@@ -23,7 +23,11 @@ pub fn format_snapshot(result: &SnapshotResult) -> String {
             .get(market)
             .copied()
             .unwrap_or(false);
-        let icon = if investable { "✅ 可建仓" } else { "❌ 不建仓" };
+        let icon = if investable {
+            "✅ 可建仓"
+        } else {
+            "❌ 不建仓"
+        };
         out.push_str(&format!("  {market}: PB 中位数 = {pb:.2}  {icon}\n"));
     }
     out.push('\n');
@@ -36,10 +40,7 @@ pub fn format_snapshot(result: &SnapshotResult) -> String {
     out.push('\n');
 
     // 最终持仓
-    out.push_str(&format!(
-        "【最终持仓】共 {} 只\n",
-        result.holdings.len()
-    ));
+    out.push_str(&format!("【最终持仓】共 {} 只\n", result.holdings.len()));
     if !result.holdings.is_empty() {
         out.push_str("  代码           名称       行业         PB       PE    股息率     净资产(亿)     总分     权重\n");
         out.push_str(&format!("  {}\n", "-".repeat(80)));

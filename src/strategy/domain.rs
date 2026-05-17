@@ -94,7 +94,9 @@ pub const BIG4_PATTERNS: &[&str] = &[
 /// 判断审计机构名称是否属于四大。
 pub fn is_big4(auditor: &str) -> bool {
     let upper = auditor.to_uppercase();
-    BIG4_PATTERNS.iter().any(|p| upper.contains(&p.to_uppercase()))
+    BIG4_PATTERNS
+        .iter()
+        .any(|p| upper.contains(&p.to_uppercase()))
 }
 
 // =====================================================================
@@ -280,7 +282,7 @@ mod tests {
     fn test_is_big4() {
         assert!(is_big4("普华永道中天会计师事务所"));
         assert!(is_big4("PricewaterhouseCoopers Zhong Tian"));
-        assert!(is_big4("pwc"));  // case-insensitive
+        assert!(is_big4("pwc")); // case-insensitive
         assert!(is_big4("德勤华永会计师事务所"));
         assert!(is_big4("Deloitte Touche Tohmatsu"));
         assert!(is_big4("安永华明会计师事务所"));

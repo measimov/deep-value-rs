@@ -11,6 +11,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use deep_value::config::AppConfig;
+use deep_value::db;
 use deep_value::tushare::cache::Cache;
 use deep_value::tushare::client::TushareClient;
 
@@ -32,12 +33,24 @@ enum Commands {
         #[command(subcommand)]
         action: CacheAction,
     },
+
+    /// 数据库管理
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
+    },
 }
 
 #[derive(Subcommand)]
 enum CacheAction {
     /// 清除所有缓存文件
     Clear,
+}
+
+#[derive(Subcommand)]
+enum DbAction {
+    /// 测试 PostgreSQL 连通性
+    Ping,
 }
 
 #[tokio::main]
@@ -56,6 +69,9 @@ async fn main() -> Result<()> {
         Commands::Ping => cmd_ping().await?,
         Commands::Cache { action } => match action {
             CacheAction::Clear => cmd_cache_clear()?,
+        },
+        Commands::Db { action } => match action {
+            DbAction::Ping => cmd_db_ping().await?,
         },
     }
 
@@ -77,5 +93,14 @@ fn cmd_cache_clear() -> Result<()> {
     let count = cache.clear()?;
     info!(count, "缓存已清除");
     println!("✅ 已清除 {count} 个缓存文件");
+    Ok(())
+}
+
+/// PostgreSQL 连通性测试。
+async fn cmd_db_ping() -> Result<()> {
+    let config = AppConfig::load()?;
+    let pool = db::connect(&config.database_url).await?;
+    db::health_check(&pool).await?;
+    println!("✅ PostgreSQL 连接成功");
     Ok(())
 }

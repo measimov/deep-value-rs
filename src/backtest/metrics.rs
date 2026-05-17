@@ -143,7 +143,7 @@ mod tests {
         // Peak at 1.2, trough at 0.8 → dd = 0.8/1.2 - 1 = -0.333
         assert!((dd - (-1.0 / 3.0)).abs() < 0.01);
         assert_eq!(start, 2); // peak at index 2
-        assert_eq!(end, 4);   // trough at index 4
+        assert_eq!(end, 4); // trough at index 4
     }
 
     #[test]

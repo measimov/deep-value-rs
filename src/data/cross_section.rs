@@ -12,10 +12,7 @@ use crate::tushare::client::TushareClient;
 /// 获取全市场 PB 中位数（用于市场前提判断）。
 ///
 /// 调用 `daily_basic` 接口，计算 PB 中位数。
-pub async fn get_market_pb_median(
-    client: &TushareClient,
-    trade_date: &str,
-) -> Result<f64> {
+pub async fn get_market_pb_median(client: &TushareClient, trade_date: &str) -> Result<f64> {
     let df = client
         .query(
             "daily_basic",
@@ -40,11 +37,7 @@ pub async fn get_market_pb_median(
         return Ok(f64::NAN);
     }
 
-    let median = pb_col
-        .column("pb")?
-        .f64()?
-        .median()
-        .unwrap_or(f64::NAN);
+    let median = pb_col.column("pb")?.f64()?.median().unwrap_or(f64::NAN);
 
     info!(trade_date, median, "A 股 PB 中位数");
     Ok(median)
@@ -56,10 +49,7 @@ pub async fn get_market_pb_median(
 /// - `ts_code`, `name`, `industry`
 /// - `pb`, `pe_ttm`, `dv_ratio`
 /// - `total_mv` (总市值，万元)
-pub async fn build_cross_section(
-    client: &TushareClient,
-    trade_date: &str,
-) -> Result<DataFrame> {
+pub async fn build_cross_section(client: &TushareClient, trade_date: &str) -> Result<DataFrame> {
     // 1. 日行情指标
     let daily = client
         .query(
@@ -105,11 +95,7 @@ pub async fn build_cross_section(
         )
         .collect()?;
 
-    info!(
-        rows = result.height(),
-        trade_date,
-        "A 股横截面构建完成"
-    );
+    info!(rows = result.height(), trade_date, "A 股横截面构建完成");
 
     Ok(result)
 }

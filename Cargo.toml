@@ -27,6 +27,9 @@ clap = { version = "4", features = ["derive"] }
 # Config
 dotenvy = "0.15"
 
+# Database
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json", "chrono"] }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
