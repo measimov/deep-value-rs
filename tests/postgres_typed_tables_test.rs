@@ -372,3 +372,142 @@ async fn test_fina_audit_typed_roundtrip() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn test_daily_price_typed_roundtrip() {
+    let (pool, cache) = typed_cache().await;
+    sqlx::query("delete from deep_value.tushare_daily where ts_code = 'TST001.SZ'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let params = HashMap::from([
+        ("ts_code".to_string(), "TST001.SZ".to_string()),
+        ("start_date".to_string(), "20990101".to_string()),
+        ("end_date".to_string(), "20990102".to_string()),
+    ]);
+    let fields = vec![
+        "ts_code".to_string(),
+        "trade_date".to_string(),
+        "close".to_string(),
+    ];
+    let items = vec![
+        vec![json!("TST001.SZ"), json!("20990101"), json!(10.5)],
+        vec![json!("TST001.SZ"), json!("20990102"), json!(11.0)],
+    ];
+
+    cache
+        .save_typed("daily", &params, &fields, &items)
+        .await
+        .unwrap();
+
+    let loaded = cache
+        .load_typed("daily", &params, Some("ts_code,trade_date,close"))
+        .await
+        .unwrap()
+        .expect("typed daily 应存在");
+
+    assert_eq!(loaded.height(), 2);
+    assert_eq!(
+        loaded.column("close").unwrap().str().unwrap().get(0),
+        Some("10.5")
+    );
+
+    sqlx::query("delete from deep_value.tushare_daily where ts_code = 'TST001.SZ'")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_adj_factor_typed_roundtrip() {
+    let (pool, cache) = typed_cache().await;
+    sqlx::query("delete from deep_value.tushare_adj_factor where ts_code = 'TST001.SZ'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let params = HashMap::from([
+        ("ts_code".to_string(), "TST001.SZ".to_string()),
+        ("start_date".to_string(), "20990101".to_string()),
+        ("end_date".to_string(), "20990102".to_string()),
+    ]);
+    let fields = vec![
+        "ts_code".to_string(),
+        "trade_date".to_string(),
+        "adj_factor".to_string(),
+    ];
+    let items = vec![
+        vec![json!("TST001.SZ"), json!("20990101"), json!(1.01)],
+        vec![json!("TST001.SZ"), json!("20990102"), json!(1.02)],
+    ];
+
+    cache
+        .save_typed("adj_factor", &params, &fields, &items)
+        .await
+        .unwrap();
+
+    let loaded = cache
+        .load_typed("adj_factor", &params, Some("ts_code,trade_date,adj_factor"))
+        .await
+        .unwrap()
+        .expect("typed adj_factor 应存在");
+
+    assert_eq!(loaded.height(), 2);
+    assert_eq!(
+        loaded.column("adj_factor").unwrap().str().unwrap().get(1),
+        Some("1.02")
+    );
+
+    sqlx::query("delete from deep_value.tushare_adj_factor where ts_code = 'TST001.SZ'")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_index_daily_typed_roundtrip() {
+    let (pool, cache) = typed_cache().await;
+    sqlx::query("delete from deep_value.tushare_index_daily where ts_code = 'TSTIDX.SH'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let params = HashMap::from([
+        ("ts_code".to_string(), "TSTIDX.SH".to_string()),
+        ("start_date".to_string(), "20990101".to_string()),
+        ("end_date".to_string(), "20990102".to_string()),
+    ]);
+    let fields = vec![
+        "ts_code".to_string(),
+        "trade_date".to_string(),
+        "close".to_string(),
+    ];
+    let items = vec![
+        vec![json!("TSTIDX.SH"), json!("20990101"), json!(3000.0)],
+        vec![json!("TSTIDX.SH"), json!("20990102"), json!(3010.5)],
+    ];
+
+    cache
+        .save_typed("index_daily", &params, &fields, &items)
+        .await
+        .unwrap();
+
+    let loaded = cache
+        .load_typed("index_daily", &params, Some("trade_date,close"))
+        .await
+        .unwrap()
+        .expect("typed index_daily 应存在");
+
+    assert_eq!(loaded.height(), 2);
+    assert_eq!(loaded.width(), 2);
+    assert_eq!(
+        loaded.column("close").unwrap().str().unwrap().get(1),
+        Some("3010.5")
+    );
+
+    sqlx::query("delete from deep_value.tushare_index_daily where ts_code = 'TSTIDX.SH'")
+        .execute(&pool)
+        .await
+        .unwrap();
+}

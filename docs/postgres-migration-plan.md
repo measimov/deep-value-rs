@@ -222,7 +222,7 @@ Completion notes:
 
 ### Stage 6: Typed Tables Batch 3
 
-Status: pending
+Status: completed
 
 Tables:
 
@@ -232,8 +232,8 @@ Tables:
 
 Tasks:
 
-- [ ] Add schemas and upsert logic for daily prices, adjustment factors, and benchmark prices.
-- [ ] Verify `fetch_ashare_prices` and `fetch_benchmark` results.
+- [x] Add schemas and upsert logic for daily prices, adjustment factors, and benchmark prices.
+- [x] Verify typed price table roundtrips plus existing integration paths.
 
 Verification:
 
@@ -243,7 +243,10 @@ Verification:
 
 Completion notes:
 
-- Pending.
+- Added typed PostgreSQL tables for `daily`, `adj_factor`, and `index_daily`.
+- All three price tables use `(ts_code, trade_date)` upserts.
+- Added typed DataFrame read paths for price data.
+- Verification passed: `cargo check`; `cargo test --lib` with 39 tests; `cargo test --test postgres_typed_tables_test` with 10 tests; `cargo test --test postgres_cache_test` with 2 tests; `cargo test --test integration_test` with 6 tests.
 
 ### Stage 7: Parquet Cache Retirement
 
@@ -274,3 +277,4 @@ Completion notes:
 - Stage 3: PostgreSQL raw read/write path for Tushare queries.
 - Stage 4: typed PostgreSQL tables for trade calendar, stock basic, and daily basic.
 - Stage 5: typed PostgreSQL tables for financial and audit APIs.
+- Stage 6: typed PostgreSQL tables for daily prices, adjustment factors, and index prices.

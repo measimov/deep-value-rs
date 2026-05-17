@@ -145,6 +145,45 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
         create index if not exists idx_tushare_fina_audit_period
             on deep_value.tushare_fina_audit(period)
         "#,
+        r#"
+        create table if not exists deep_value.tushare_daily (
+            ts_code text not null,
+            trade_date text not null,
+            close double precision,
+            updated_at timestamptz not null default now(),
+            primary key (ts_code, trade_date)
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_daily_trade_date
+            on deep_value.tushare_daily(trade_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_adj_factor (
+            ts_code text not null,
+            trade_date text not null,
+            adj_factor double precision,
+            updated_at timestamptz not null default now(),
+            primary key (ts_code, trade_date)
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_adj_factor_trade_date
+            on deep_value.tushare_adj_factor(trade_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_index_daily (
+            ts_code text not null,
+            trade_date text not null,
+            close double precision,
+            updated_at timestamptz not null default now(),
+            primary key (ts_code, trade_date)
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_index_daily_trade_date
+            on deep_value.tushare_index_daily(trade_date)
+        "#,
     ];
 
     let mut tx = pool.begin().await.context("启动 schema 初始化事务失败")?;
