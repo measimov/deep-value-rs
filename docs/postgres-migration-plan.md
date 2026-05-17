@@ -112,14 +112,14 @@ Completion notes:
 
 ### Stage 2: Schema Migration and Raw Table
 
-Status: pending
+Status: completed
 
 Tasks:
 
-- [ ] Add idempotent migration code for `deep_value` schema.
-- [ ] Create `deep_value.tushare_raw_responses`.
-- [ ] Add indexes and upsert constraints.
-- [ ] Add raw cache roundtrip tests.
+- [x] Add idempotent migration code for `deep_value` schema.
+- [x] Create `deep_value.tushare_raw_responses`.
+- [x] Add indexes and upsert constraints.
+- [x] Add raw cache roundtrip tests.
 
 Verification:
 
@@ -129,7 +129,10 @@ Verification:
 
 Completion notes:
 
-- Pending.
+- Added `db::init_schema` with a transaction-scoped PostgreSQL advisory lock so concurrent tests can initialize safely.
+- Added `tushare::pg_cache::PgCache` for raw response save/load/delete operations.
+- Added PostgreSQL integration tests for idempotent schema initialization and raw cache roundtrip.
+- Verification passed: `cargo check`; `cargo test --lib` with 39 tests; `cargo test --test postgres_cache_test` with 2 tests.
 
 ### Stage 3: Raw PostgreSQL Write Path
 
@@ -256,3 +259,4 @@ Completion notes:
 
 - Stage 0: plan document and environment placeholder.
 - Stage 1: database configuration and PostgreSQL health check.
+- Stage 2: PostgreSQL schema migration and raw Tushare response table.

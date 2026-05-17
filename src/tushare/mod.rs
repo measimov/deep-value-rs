@@ -2,4 +2,5 @@
 
 pub mod cache;
 pub mod client;
+pub mod pg_cache;
 pub mod types;
