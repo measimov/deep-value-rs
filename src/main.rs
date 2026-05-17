@@ -12,8 +12,8 @@ use tracing_subscriber::EnvFilter;
 
 use deep_value::config::AppConfig;
 use deep_value::db;
-use deep_value::tushare::cache::Cache;
 use deep_value::tushare::client::TushareClient;
+use deep_value::tushare::pg_cache::PgCache;
 
 /// Deep Value 量化回测框架
 #[derive(Parser)]
@@ -43,7 +43,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum CacheAction {
-    /// 清除所有缓存文件
+    /// 清除所有 PostgreSQL raw 缓存记录
     Clear,
 }
 
@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Ping => cmd_ping().await?,
         Commands::Cache { action } => match action {
-            CacheAction::Clear => cmd_cache_clear()?,
+            CacheAction::Clear => cmd_cache_clear().await?,
         },
         Commands::Db { action } => match action {
             DbAction::Ping => cmd_db_ping().await?,
@@ -81,18 +81,21 @@ async fn main() -> Result<()> {
 /// 连通性测试。
 async fn cmd_ping() -> Result<()> {
     let config = AppConfig::load()?;
-    let client = TushareClient::new(&config.tushare_token);
+    let client = TushareClient::new_with_pg(&config.tushare_token, &config.database_url).await?;
     let result = client.ping().await?;
     println!("{result}");
     Ok(())
 }
 
-/// 清除缓存。
-fn cmd_cache_clear() -> Result<()> {
-    let cache = Cache::new("data/cache");
-    let count = cache.clear()?;
-    info!(count, "缓存已清除");
-    println!("✅ 已清除 {count} 个缓存文件");
+/// 清除 PostgreSQL raw 缓存。
+async fn cmd_cache_clear() -> Result<()> {
+    let config = AppConfig::load()?;
+    let pool = db::connect(&config.database_url).await?;
+    db::init_schema(&pool).await?;
+    let cache = PgCache::new(pool);
+    let count = cache.clear_all().await?;
+    info!(count, "PostgreSQL raw 缓存已清除");
+    println!("✅ 已清除 {count} 条 PostgreSQL raw 缓存记录");
     Ok(())
 }
 

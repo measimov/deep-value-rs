@@ -128,4 +128,14 @@ impl PgCache {
 
         Ok(result.rows_affected())
     }
+
+    /// Delete all raw responses. Used by the cache clear CLI.
+    pub async fn clear_all(&self) -> Result<u64> {
+        let result = sqlx::query("delete from deep_value.tushare_raw_responses")
+            .execute(&self.pool)
+            .await
+            .context("清空 PostgreSQL raw Tushare 响应失败")?;
+
+        Ok(result.rows_affected())
+    }
 }

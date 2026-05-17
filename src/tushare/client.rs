@@ -10,7 +10,10 @@ use polars::prelude::*;
 use reqwest::Client;
 use tracing::{debug, info};
 
+use crate::db;
+
 use super::cache::Cache;
+use super::pg_cache::PgCache;
 use super::types::{TushareRequest, TushareResponse};
 
 /// Tushare API 端点。
@@ -33,6 +36,7 @@ pub struct TushareClient {
     token: String,
     http: Client,
     cache: Cache,
+    pg_cache: Option<PgCache>,
 }
 
 impl TushareClient {
@@ -42,6 +46,24 @@ impl TushareClient {
             token: token.to_string(),
             http: Client::new(),
             cache: Cache::new("data/cache"),
+            pg_cache: None,
+        }
+    }
+
+    /// 创建使用 PostgreSQL raw store 的客户端。
+    pub async fn new_with_pg(token: &str, database_url: &str) -> Result<Self> {
+        let pool = db::connect(database_url).await?;
+        db::init_schema(&pool).await?;
+        Ok(Self::with_pg_cache(token, PgCache::new(pool)))
+    }
+
+    /// 创建使用指定 PostgreSQL raw store 的客户端。
+    pub fn with_pg_cache(token: &str, pg_cache: PgCache) -> Self {
+        Self {
+            token: token.to_string(),
+            http: Client::new(),
+            cache: Cache::new("data/cache"),
+            pg_cache: Some(pg_cache),
         }
     }
 
@@ -63,18 +85,28 @@ impl TushareClient {
             .collect();
 
         // 构建缓存 key
-        let cache_key = self.build_cache_key(api_name, &param_map, fields);
+        let cache_key = Self::build_cache_key(api_name, &param_map, fields);
 
-        // 尝试读缓存
-        if let Some(df) = self.cache.load(&cache_key)? {
-            debug!(api = api_name, rows = df.height(), "缓存命中");
+        // 尝试读 PostgreSQL raw store；未配置 PostgreSQL 时回退到 Parquet 缓存。
+        if let Some(pg_cache) = &self.pg_cache {
+            if let Some(raw) = pg_cache.load_raw(&cache_key).await? {
+                let df = self.response_to_dataframe(&raw.response_fields, &raw.response_items)?;
+                debug!(
+                    api = api_name,
+                    rows = df.height(),
+                    "PostgreSQL raw 缓存命中"
+                );
+                return Ok(df);
+            }
+        } else if let Some(df) = self.cache.load(&cache_key)? {
+            debug!(api = api_name, rows = df.height(), "Parquet 缓存命中");
             return Ok(df);
         }
 
         // 构建请求
         let request = match fields {
-            Some(f) => TushareRequest::with_fields(api_name, &self.token, param_map, f),
-            None => TushareRequest::new(api_name, &self.token, param_map),
+            Some(f) => TushareRequest::with_fields(api_name, &self.token, param_map.clone(), f),
+            None => TushareRequest::new(api_name, &self.token, param_map.clone()),
         };
 
         debug!(api = api_name, "发送请求...");
@@ -104,8 +136,19 @@ impl TushareClient {
 
         info!(api = api_name, rows = df.height(), "请求完成");
 
-        // 写缓存
-        if df.height() > 0 {
+        // 写缓存。PostgreSQL raw store 保存所有成功响应，包括空结果。
+        if let Some(pg_cache) = &self.pg_cache {
+            pg_cache
+                .save_raw(
+                    &cache_key,
+                    api_name,
+                    &param_map,
+                    fields,
+                    &data.fields,
+                    &data.items,
+                )
+                .await?;
+        } else if df.height() > 0 {
             self.cache.save(&cache_key, &df)?;
         }
 
@@ -220,8 +263,15 @@ impl TushareClient {
     }
 
     /// 构建缓存 key。
+    pub fn cache_key_for(api_name: &str, params: &[(&str, &str)], fields: Option<&str>) -> String {
+        let param_map: HashMap<String, String> = params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Self::build_cache_key(api_name, &param_map, fields)
+    }
+
     fn build_cache_key(
-        &self,
         api_name: &str,
         params: &HashMap<String, String>,
         fields: Option<&str>,

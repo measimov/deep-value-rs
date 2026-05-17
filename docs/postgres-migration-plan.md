@@ -136,14 +136,14 @@ Completion notes:
 
 ### Stage 3: Raw PostgreSQL Write Path
 
-Status: pending
+Status: completed
 
 Tasks:
 
-- [ ] Write every successful `TushareClient::query` response to the raw table.
-- [ ] Read matching queries from PostgreSQL before calling Tushare.
-- [ ] Keep `query_no_cache` bypassing the store.
-- [ ] Convert `cache clear` to clear PostgreSQL raw cache.
+- [x] Write every successful `TushareClient::query` response to the raw table.
+- [x] Read matching queries from PostgreSQL before calling Tushare.
+- [x] Keep `query_no_cache` bypassing the store.
+- [x] Convert `cache clear` to clear PostgreSQL raw cache.
 
 Verification:
 
@@ -154,7 +154,11 @@ Verification:
 
 Completion notes:
 
-- Pending.
+- Added PostgreSQL-backed `TushareClient::new_with_pg` and `with_pg_cache`.
+- `query()` now reads/writes `deep_value.tushare_raw_responses` when a PostgreSQL store is configured, while `new()` retains the legacy Parquet fallback path.
+- `query_no_cache()` still bypasses all storage.
+- `cache clear` now clears PostgreSQL raw cache records.
+- Verification passed: `cargo check`; `cargo test --lib` with 39 tests; `cargo test --test postgres_cache_test` with 2 tests; `cargo run -- ping`; `cargo test --test integration_test` with 6 tests; `cargo run -- cache clear`.
 
 ### Stage 4: Typed Tables Batch 1
 
@@ -260,3 +264,4 @@ Completion notes:
 - Stage 0: plan document and environment placeholder.
 - Stage 1: database configuration and PostgreSQL health check.
 - Stage 2: PostgreSQL schema migration and raw Tushare response table.
+- Stage 3: PostgreSQL raw read/write path for Tushare queries.
