@@ -24,7 +24,13 @@ DELAY_MS="${SYNC_DELAY_MS:-150}"
 push_kuma() {
   local status="$1"
   local message="$2"
-  local push_url="${KUMA_PUSH_URL:-}"
+  # Pick the mode-specific URL, fall back to generic KUMA_PUSH_URL
+  local push_url=""
+  case "${MODE}" in
+    daily)     push_url="${KUMA_PUSH_URL_DAILY:-${KUMA_PUSH_URL:-}}" ;;
+    financial) push_url="${KUMA_PUSH_URL_FINANCIAL:-${KUMA_PUSH_URL:-}}" ;;
+    meta)      push_url="${KUMA_PUSH_URL_META:-${KUMA_PUSH_URL:-}}" ;;
+  esac
   if [[ -z "${push_url}" ]]; then
     return 0
   fi
