@@ -491,7 +491,7 @@ fn pagination_page_size(api: &str) -> Option<usize> {
 
 fn progress_key_fields(api: &str) -> &[&str] {
     match api {
-        "daily" | "adj_factor" | "index_daily" => &["ts_code", "trade_date"],
+        "daily" | "daily_basic" | "adj_factor" | "index_daily" => &["ts_code", "trade_date"],
         "income_vip" | "balancesheet_vip" | "cashflow_vip" | "fina_indicator_vip" => {
             &["ts_code", "end_date"]
         }
@@ -558,6 +558,7 @@ mod tests {
     fn test_progress_key_fields_per_endpoint() {
         // Market series: ts_code + trade_date
         assert_eq!(progress_key_fields("daily"), &["ts_code", "trade_date"]);
+        assert_eq!(progress_key_fields("daily_basic"), &["ts_code", "trade_date"]);
         assert_eq!(progress_key_fields("index_daily"), &["ts_code", "trade_date"]);
         // Financial VIP: ts_code + end_date
         assert_eq!(progress_key_fields("income_vip"), &["ts_code", "end_date"]);
