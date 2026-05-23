@@ -179,10 +179,19 @@ impl TushareClient {
 
         let paginate = page_size(api_name);
         let pg_size = paginate.unwrap_or(0);
+        // 分页进度检测使用 ts_code（Tushare 通用自然键），不依赖调用方 fields 顺序。
+        // 若原始 fields 不含 ts_code，内部追加后会在结果中移除。
+        let user_fields = fields.map(|f| f.to_string());
+        let effective_fields = if paginate.is_some() {
+            Self::ensure_ts_code(user_fields.as_deref())
+        } else {
+            fields.map(|f| f.to_string())
+        };
+        let strip_ts_code = effective_fields.as_deref() != user_fields.as_deref();
         let cache_key = Self::build_cache_key(api_name, param_map, fields);
         let mut all_fields: Vec<String> = Vec::new();
         let mut all_items: Vec<Vec<serde_json::Value>> = Vec::new();
-        let mut prev_first: String = String::new();
+        let mut prev_ts: String = String::new();
         let mut guard_broken: Option<&str> = None;
         let mut offset = 0;
         let mut page = 0;
@@ -194,7 +203,7 @@ impl TushareClient {
                 paginated.insert("offset".to_string(), offset.to_string());
             }
 
-            let request = match fields {
+            let request = match effective_fields.as_deref() {
                 Some(f) => TushareRequest::with_fields(api_name, &self.token, paginated, f),
                 None => TushareRequest::new(api_name, &self.token, paginated),
             };
@@ -233,13 +242,17 @@ impl TushareClient {
                 break;
             }
 
-            // 进度守卫：hash 整行比较，检测 offset 是否实际推进
-            let this_first = Self::row_hash_repr(&data.items[0]);
-            if page > 0 && this_first == prev_first {
-                guard_broken = Some("分页首行重复，offset 可能未被 endpoint 支持");
+            // 进度守卫：比较首行 ts_code 值，不依赖调用方 fields 选择
+            let ts_idx = all_fields.iter().position(|f| f == "ts_code");
+            let this_ts = ts_idx
+                .and_then(|idx| data.items[0].get(idx))
+                .map(Self::ts_value_str)
+                .unwrap_or_default();
+            if page > 0 && this_ts == prev_ts {
+                guard_broken = Some("分页首行 ts_code 重复，offset 可能未被 endpoint 支持");
                 break;
             }
-            prev_first = this_first;
+            prev_ts = this_ts;
 
             all_items.extend(data.items);
 
@@ -281,6 +294,17 @@ impl TushareClient {
                 all_items.len(),
                 page
             );
+        }
+
+        // 移除内部追加的 ts_code（若调用方未请求）
+        if strip_ts_code {
+            let ts_pos = all_fields.iter().position(|f| f == "ts_code");
+            if let Some(pos) = ts_pos {
+                all_fields.remove(pos);
+                for row in &mut all_items {
+                    row.remove(pos);
+                }
+            }
         }
 
         let df = self.response_to_dataframe(&all_fields, &all_items)?;
@@ -434,10 +458,22 @@ impl TushareClient {
         Self::build_cache_key(api_name, &param_map, fields)
     }
 
-    /// 将整行序列化为字符串用于分页进度比较。
-    /// 无论调用方请求什么字段顺序，重复行会产生相同的序列化结果。
-    fn row_hash_repr(row: &[serde_json::Value]) -> String {
-        serde_json::to_string(row).unwrap_or_default()
+    /// 确保 fields 中包含 ts_code，用于分页进度检测。
+    fn ensure_ts_code(fields: Option<&str>) -> Option<String> {
+        let base = fields.unwrap_or("");
+        if base.is_empty() || base.split(',').any(|f| f.trim() == "ts_code") {
+            return fields.map(|f| f.to_string());
+        }
+        Some(format!("ts_code,{base}"))
+    }
+
+    /// serde_json::Value → 短字符串表示，专门用于 ts_code 比较。
+    fn ts_value_str(v: &serde_json::Value) -> String {
+        match v {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => format!("{v}"),
+        }
     }
 
     fn build_cache_key(
