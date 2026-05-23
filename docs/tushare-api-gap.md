@@ -233,20 +233,29 @@ request-heavy:
   - 10-year income: 3000 `income` requests;
   - 10-year dividend: 3000 `dividend` requests.
 
-With the `sync` command and VIP endpoints, the equivalent full backfill drops to
-roughly 100 requests:
+With the `sync` command, the full backfill breaks down as:
 
-- `stock_basic`: 1 request
-- `daily_basic` (anniversary dates): ~20 requests
-- `income_vip` (per period): ~18 requests (all stocks each)
-- `balancesheet_vip` (per period): ~18 requests
-- `fina_indicator_vip` (per period): ~18 requests
-- `fina_audit` (per stock): ~5500 requests (no VIP equivalent)
-- `dividend` (per stock): ~5500 requests (no VIP equivalent)
-- `daily` / `adj_factor` / `index_daily`: ~120 requests / few
+- Bulk (VIP / single-call): ~200 requests total
+  - `stock_basic`: 1
+  - `daily_basic` (anniversary dates): ~20
+  - `income_vip` (per period): ~18 (all stocks each)
+  - `balancesheet_vip` (per period): ~18
+  - `fina_indicator_vip` (per period): ~18
+  - `daily` / `adj_factor` / `index_daily`: ~120
+- Per-stock (no VIP equivalents): ~11,000 requests total
+  - `fina_audit` (per stock): ~5,500
+  - `dividend` (per stock): ~5,500
 
-After sync, `snapshot --local` makes zero API calls — all data comes from PG
-typed tables.
+VIP endpoints eliminate the old 3,000+ per-stock `income` and `balancesheet`
+calls, and the fixed `dividend` call pattern removes 10-year nested loops. But
+`fina_audit` and `dividend` remain per-stock because no VIP interfaces exist for
+them, so they dominate the full-sync request budget (~11k of ~11.2k total).
+
+The incremental `financial` mode avoids re-pulling most stocks — it only fetches
+newly listed stocks' audit/dividend records, cutting per-stock calls from ~11k
+to a few dozen per run.
+
+After sync, `snapshot --local` makes zero API calls.
 
 ## Implemented (2026-05-24)
 
