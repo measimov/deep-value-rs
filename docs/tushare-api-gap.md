@@ -86,11 +86,12 @@ Deep Value A-share snapshot, backtest, and sync workflows.
 ### Pagination and Row Limits
 
 The client now auto-paginates via `limit`/`offset` in `execute_and_cache()`
-(PAGE_SIZE=5000) for 8 known-supported endpoints: `stock_basic`, `daily_basic`,
-`daily`, `income_vip`, `balancesheet_vip`, `fina_indicator_vip`, `adj_factor`,
-`index_daily`. Safety guards: max 20 pages and a progress check that stops if
-rows don't advance between pages. Endpoints outside the allowlist get a `warn!`
-if `has_more` is true but are not auto-paginated.
+for 10 known-supported endpoints with endpoint-specific page sizes:
+`stock_basic`, `daily_basic`, `daily`, `income_vip`, `balancesheet_vip`,
+`fina_indicator_vip`, `cashflow_vip`, `adj_factor`, `index_daily` (PAGE=5000),
+and `disclosure_date` (PAGE=3000). Safety guards: max 20 pages and a progress
+check that stops if rows don't advance between pages. Endpoints outside the
+allowlist get a `warn!` if `has_more` is true but are not auto-paginated.
 
 `query_no_cache()` still does single-page only with a `warn!` on `has_more`.
 

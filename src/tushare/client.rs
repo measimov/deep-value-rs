@@ -158,27 +158,27 @@ impl TushareClient {
         param_map: &HashMap<String, String>,
         fields: Option<&str>,
     ) -> Result<DataFrame> {
-        const PAGE_SIZE: usize = 5000;
         const MAX_PAGES: usize = 20;
 
-        /// 已知支持 limit/offset 分页的 Tushare endpoint。
-        fn pagination_supported(api: &str) -> bool {
-            matches!(
-                api,
+        /// 已知支持 limit/offset 分页的 Tushare endpoint 及其单页上限。
+        fn page_size(api: &str) -> Option<usize> {
+            match api {
+                "disclosure_date" => Some(3000),
                 "stock_basic"
-                    | "daily_basic"
-                    | "daily"
-                    | "balancesheet_vip"
-                    | "income_vip"
-                    | "fina_indicator_vip"
-                    | "cashflow_vip"
-                    | "adj_factor"
-                    | "index_daily"
-                    | "disclosure_date"
-            )
+                | "daily_basic"
+                | "daily"
+                | "balancesheet_vip"
+                | "income_vip"
+                | "fina_indicator_vip"
+                | "cashflow_vip"
+                | "adj_factor"
+                | "index_daily" => Some(5000),
+                _ => None,
+            }
         }
 
-        let paginate = pagination_supported(api_name);
+        let paginate = page_size(api_name);
+        let pg_size = paginate.unwrap_or(0);
         let cache_key = Self::build_cache_key(api_name, param_map, fields);
         let mut all_fields: Vec<String> = Vec::new();
         let mut all_items: Vec<Vec<serde_json::Value>> = Vec::new();
@@ -188,8 +188,8 @@ impl TushareClient {
 
         loop {
             let mut paginated = param_map.clone();
-            if paginate {
-                paginated.insert("limit".to_string(), PAGE_SIZE.to_string());
+            if paginate.is_some() {
+                paginated.insert("limit".to_string(), pg_size.to_string());
                 paginated.insert("offset".to_string(), offset.to_string());
             }
 
@@ -232,7 +232,7 @@ impl TushareClient {
 
             let has_more = data.has_more.unwrap_or(false) && row_count > 0;
 
-            if !paginate && has_more {
+            if paginate.is_none() && has_more {
                 tracing::warn!(
                     api = api_name,
                     rows = row_count,
@@ -263,7 +263,7 @@ impl TushareClient {
                 }
                 page += 1;
                 prev_count = all_items.len();
-                offset += PAGE_SIZE;
+                offset += pg_size;
                 info!(
                     api = api_name,
                     page,

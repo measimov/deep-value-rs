@@ -26,8 +26,6 @@ pub async fn health_check(pool: &PgPool) -> Result<()> {
 pub async fn init_schema(pool: &PgPool) -> Result<()> {
     const STATEMENTS: &[&str] = &[
         r#"create schema if not exists deep_value"#,
-        // upgrade-safe migrations for columns added after initial create
-        r#"alter table deep_value.tushare_stock_basic add column if not exists list_date text"#,
         r#"
         create table if not exists deep_value.tushare_raw_responses (
             cache_key text primary key,
@@ -238,6 +236,8 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
         create index if not exists idx_tushare_disclosure_date_end_date
             on deep_value.tushare_disclosure_date(end_date)
         "#,
+        // upgrade-safe migrations for columns added after initial create
+        r#"alter table deep_value.tushare_stock_basic add column if not exists list_date text"#,
     ];
 
     let mut tx = pool.begin().await.context("启动 schema 初始化事务失败")?;
