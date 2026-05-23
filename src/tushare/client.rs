@@ -179,19 +179,19 @@ impl TushareClient {
 
         let paginate = page_size(api_name);
         let pg_size = paginate.unwrap_or(0);
-        // 分页进度检测使用 ts_code（Tushare 通用自然键），不依赖调用方 fields 顺序。
-        // 若原始 fields 不含 ts_code，内部追加后会在结果中移除。
+        // 分页进度键：endpoint 特定的复合字段，确保跨页唯一。
+        // 如 index_daily 同一标的跨日期范围，ts_code 不变但 trade_date 推进。
+        let progress_keys: &[&str] = Self::progress_key_fields(api_name);
         let user_fields = fields.map(|f| f.to_string());
         let effective_fields = if paginate.is_some() {
-            Self::ensure_ts_code(user_fields.as_deref())
+            Self::ensure_pagination_fields(user_fields.as_deref(), progress_keys)
         } else {
             fields.map(|f| f.to_string())
         };
-        let strip_ts_code = effective_fields.as_deref() != user_fields.as_deref();
         let cache_key = Self::build_cache_key(api_name, param_map, fields);
         let mut all_fields: Vec<String> = Vec::new();
         let mut all_items: Vec<Vec<serde_json::Value>> = Vec::new();
-        let mut prev_ts: String = String::new();
+        let mut prev_key: String = String::new();
         let mut guard_broken: Option<&str> = None;
         let mut offset = 0;
         let mut page = 0;
@@ -242,17 +242,13 @@ impl TushareClient {
                 break;
             }
 
-            // 进度守卫：比较首行 ts_code 值，不依赖调用方 fields 选择
-            let ts_idx = all_fields.iter().position(|f| f == "ts_code");
-            let this_ts = ts_idx
-                .and_then(|idx| data.items[0].get(idx))
-                .map(Self::ts_value_str)
-                .unwrap_or_default();
-            if page > 0 && this_ts == prev_ts {
-                guard_broken = Some("分页首行 ts_code 重复，offset 可能未被 endpoint 支持");
+            // 进度守卫：端点特定复合键，检测 offset 是否实际推进
+            let this_key = Self::progress_key_str(&data.items[0], &all_fields, progress_keys);
+            if page > 0 && this_key == prev_key {
+                guard_broken = Some("分页首行复合键重复，offset 可能未被 endpoint 支持");
                 break;
             }
-            prev_ts = this_ts;
+            prev_key = this_key;
 
             all_items.extend(data.items);
 
@@ -296,10 +292,17 @@ impl TushareClient {
             );
         }
 
-        // 移除内部追加的 ts_code（若调用方未请求）
-        if strip_ts_code {
-            let ts_pos = all_fields.iter().position(|f| f == "ts_code");
-            if let Some(pos) = ts_pos {
+        // 移除内部分页追加的字段（若调用方未请求）
+        if let Some(orig) = user_fields.as_deref() {
+            let orig_set: Vec<&str> = orig.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let strip: Vec<usize> = all_fields
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| !orig_set.contains(&f.as_str()))
+                .map(|(i, _)| i)
+                .rev()
+                .collect();
+            for pos in strip {
                 all_fields.remove(pos);
                 for row in &mut all_items {
                     row.remove(pos);
@@ -458,17 +461,58 @@ impl TushareClient {
         Self::build_cache_key(api_name, &param_map, fields)
     }
 
-    /// 确保 fields 中包含 ts_code，用于分页进度检测。
-    fn ensure_ts_code(fields: Option<&str>) -> Option<String> {
-        let base = fields.unwrap_or("");
-        if base.is_empty() || base.split(',').any(|f| f.trim() == "ts_code") {
-            return fields.map(|f| f.to_string());
+    /// 端点特定的分页进度复合键字段。
+    ///
+    /// 对于 `index_daily`（同一标的跨日期范围），ts_code 不变但 trade_date 推进；
+    /// 对于财务 VIP（同一标的跨期间），ts_code 不变但 end_date 推进。
+    /// 此处按端点选择最小组字段集合，确保跨页唯一性。
+    fn progress_key_fields(api: &str) -> &[&str] {
+        match api {
+            "daily" | "adj_factor" | "index_daily" => &["ts_code", "trade_date"],
+            "income_vip" | "balancesheet_vip" | "cashflow_vip" | "fina_indicator_vip" => {
+                &["ts_code", "end_date"]
+            }
+            "disclosure_date" => &["ts_code", "end_date"],
+            _ => &["ts_code"], // stock_basic, daily_basic: ts_code per row is unique
         }
-        Some(format!("ts_code,{base}"))
     }
 
-    /// serde_json::Value → 短字符串表示，专门用于 ts_code 比较。
-    fn ts_value_str(v: &serde_json::Value) -> String {
+    /// 组装分页进度键字符串，从首行指定 fields 位置取值拼接。
+    fn progress_key_str(
+        row: &[serde_json::Value],
+        resp_fields: &[String],
+        keys: &[&str],
+    ) -> String {
+        keys.iter()
+            .filter_map(|k| {
+                resp_fields
+                    .iter()
+                    .position(|f| f == *k)
+                    .and_then(|idx| row.get(idx))
+                    .map(Self::value_repr)
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    /// 确保 fields 包含分页进度所需的键字段。
+    fn ensure_pagination_fields(fields: Option<&str>, keys: &[&str]) -> Option<String> {
+        let base = fields.unwrap_or("");
+        let existing: Vec<&str> = base.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let mut out = base.to_string();
+        for k in keys {
+            if !existing.contains(k) {
+                if !out.is_empty() {
+                    out.push(',');
+                }
+                out.push_str(k);
+            }
+        }
+        Some(out)
+    }
+
+    /// serde_json::Value → 短字符串表示。
+    fn value_repr(v: &serde_json::Value) -> String {
         match v {
             serde_json::Value::String(s) => s.clone(),
             serde_json::Value::Number(n) => n.to_string(),
