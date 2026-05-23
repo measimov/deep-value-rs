@@ -126,7 +126,7 @@ pub async fn run_sync(
     // 10. index_daily (benchmark: 000300.SH)
     force_step(client, &limiter, &mut stats, "index_daily",
         &[("ts_code", "000300.SH"), ("start_date", start_date), ("end_date", end_date)],
-        Some("trade_date,close")).await?;
+        Some("ts_code,trade_date,close")).await?;
 
     stats.elapsed_secs = started.elapsed().as_secs_f64();
     info!(calls = stats.total_calls, rows = stats.total_rows, errors = stats.errors, elapsed = stats.elapsed_secs, "全量同步完成");
@@ -202,7 +202,7 @@ async fn sync_daily_incremental(
     let first_date = recent.last().map(|s| s.to_string()).unwrap_or_default();
     force_step(client, &limiter, &mut stats, "index_daily",
         &[("ts_code", "000300.SH"), ("start_date", first_date.as_str()), ("end_date", end_date)],
-        Some("trade_date,close")).await?;
+        Some("ts_code,trade_date,close")).await?;
 
     stats.elapsed_secs = started.elapsed().as_secs_f64();
     info!(calls = stats.total_calls, skipped = stats.skipped, elapsed = stats.elapsed_secs, "daily 增量完成");
@@ -224,24 +224,34 @@ async fn sync_financial_incremental(
     let fin_end = safe_financial_year(end_date);
     let fin_start = fin_end - 9;
 
-    // 检查哪些 period 已有数据
-    let existing_periods = cache.existing_income_periods().await?;
+    // 检查各表已有 period（三表独立判断，避免部分缺失时跳过）
+    let income_periods = cache.existing_income_periods().await?;
+    let balance_periods = cache.existing_balancesheet_periods().await?;
+    let indicator_periods = cache.existing_fina_indicator_periods().await?;
 
     for year in fin_start..=fin_end {
         let period = format!("{year}1231");
-        if existing_periods.contains(&period) {
-            stats.skipped += 3; // income + balance + indicator
-            continue;
+        if !income_periods.contains(&period) {
+            force_step(client, &limiter, &mut stats, "income_vip",
+                &[("period", period.as_str()), ("report_type", "1")],
+                Some("ts_code,end_date,n_income")).await?;
+        } else {
+            stats.skipped += 1;
         }
-        force_step(client, &limiter, &mut stats, "income_vip",
-            &[("period", period.as_str()), ("report_type", "1")],
-            Some("ts_code,end_date,n_income")).await?;
-        force_step(client, &limiter, &mut stats, "balancesheet_vip",
-            &[("period", period.as_str()), ("report_type", "1")],
-            Some("ts_code,end_date,total_hldr_eqy_exc_min_int")).await?;
-        force_step(client, &limiter, &mut stats, "fina_indicator_vip",
-            &[("period", period.as_str()), ("report_type", "1")],
-            Some("ts_code,end_date,roe,roa,grossprofit_margin,netprofit_margin,debt_to_assets")).await?;
+        if !balance_periods.contains(&period) {
+            force_step(client, &limiter, &mut stats, "balancesheet_vip",
+                &[("period", period.as_str()), ("report_type", "1")],
+                Some("ts_code,end_date,total_hldr_eqy_exc_min_int")).await?;
+        } else {
+            stats.skipped += 1;
+        }
+        if !indicator_periods.contains(&period) {
+            force_step(client, &limiter, &mut stats, "fina_indicator_vip",
+                &[("period", period.as_str()), ("report_type", "1")],
+                Some("ts_code,end_date,roe,roa,grossprofit_margin,netprofit_margin,debt_to_assets")).await?;
+        } else {
+            stats.skipped += 1;
+        }
     }
 
     // 新上市股票：fina_audit + dividend
@@ -373,7 +383,10 @@ async fn get_trade_dates(
         .map(|c| c.into_iter().filter_map(|v| v.map(String::from)).collect())
         .unwrap_or_default();
     dates.sort();
-    dates.truncate(limit);
+    let drop = dates.len().saturating_sub(limit);
+    if drop > 0 {
+        dates.drain(..drop);
+    }
     Ok(dates)
 }
 

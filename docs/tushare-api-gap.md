@@ -219,20 +219,39 @@ That is roughly 6900+ requests before cache hits. At the 2000-point tier this ca
 exceed the 200 requests/minute limit unless throttled. At the 5000-point tier it
 is still slow and should be optimized.
 
-## Recommended Next Steps
+## Implemented (2026-05-24)
 
-1. Add a rate limiter around `TushareClient::query()` based on the configured
-   point tier.
-2. Add retry/backoff for transient HTTP failures and Tushare frequency errors.
-3. Add pagination/date-window handling and fail loudly when `has_more` is true
-   but no paging strategy exists.
-4. Fix `dividend` calls to use documented input parameters.
-5. Remove or rewrite period-only normal `income`, `balancesheet`, and
-   `fina_audit` helper calls.
-6. Implement `income_vip` and `balancesheet_vip` as optional fast paths for
-   5000+ point accounts.
-7. Correct adjusted-price naming and implement explicit `qfq` / `hfq` helpers.
-8. Decide whether typed tables should become a fallback read path when raw cache
-   is missing.
-9. Extend typed schemas only when fields are needed by strategy logic; otherwise
-   rely on raw storage as the durable source of truth.
+1. ✅ Rate limiter: `RateLimiter` struct with configurable min interval in
+   `src/tushare/client.rs`. Used by the `sync` command (`--delay-ms` flag).
+2. ✅ `dividend` calls fixed: online path now uses documented `ts_code` param
+   only, filters `end_date` in Rust via `sum_div_for_period()`.
+3. ✅ Broken period-only helpers removed: `get_current_year_dividend`,
+   `get_10y_dividend`, and `get_audit_info` deleted from `data/` layer.
+   `get_current_year_income`, `get_10y_income`, `get_net_equity` switched to
+   `income_vip` / `balancesheet_vip`.
+4. ✅ VIP endpoints implemented: `income_vip`, `balancesheet_vip`, and
+   `fina_indicator_vip` are routed through `PgCache::save_typed()` /
+   `load_typed()`, and used by the `sync` command for bulk all-stock queries.
+5. ✅ Typed tables as primary local path: `snapshot --local` reads exclusively
+   from typed tables via `src/data/local.rs` readers. Typed tables are not yet
+   a fallback within `TushareClient::query()` (raw cache remains the sole
+   read-through path there).
+6. ✅ `fina_indicator` typed table: stores ROE, ROA, margins, leverage, and
+   other quality metrics. Synced via `fina_indicator_vip`.
+7. ✅ `has_more` warning: `query()` and `query_force()` log a `warn!` when
+   Tushare returns `has_more=true`.
+8. ✅ Sync errors fail the command: `cmd_sync` exits non-zero when
+   `stats.errors > 0`.
+
+## Remaining
+
+1. Retry/backoff for transient HTTP failures and Tushare frequency errors.
+2. Full pagination support — currently `has_more` only warns; should implement
+   `limit`/`offset` or date-window segmentation.
+3. Correct adjusted-price naming and implement explicit `qfq` / `hfq` helpers.
+4. Typed table fallback inside `TushareClient::query()` when raw cache misses.
+5. ST/suspension/limit-up-limit-down filtering via dedicated Tushare endpoints.
+6. `disclosure_date` integration for point-in-time financial availability
+   instead of the conservative `safe_financial_year()` rule.
+7. `index_weight` for benchmark constituent analysis.
+8. `cashflow` / `cashflow_vip` for dividend sustainability checks.

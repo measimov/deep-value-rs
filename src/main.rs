@@ -217,6 +217,12 @@ async fn cmd_sync(
         stats.elapsed_secs,
         stats.errors
     );
+    if stats.errors > 0 {
+        anyhow::bail!(
+            "同步完成但有 {} 个 API 调用失败，数据可能不完整。检查日志中的 warn 条目。",
+            stats.errors
+        );
+    }
     Ok(())
 }
 
