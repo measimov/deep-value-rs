@@ -274,9 +274,10 @@ After sync, `snapshot --local` makes zero API calls.
    read-through path there).
 6. ✅ `fina_indicator` typed table: stores ROE, ROA, margins, leverage, and
    other quality metrics. Synced via `fina_indicator_vip`.
-7. ✅ Pagination: auto-paginate 8 known-supported endpoints via limit/offset
-   (PAGE_SIZE=5000, max 20 pages, progress guard). `query_no_cache()` warns on
-   `has_more`. Endpoints not in the allowlist get a warning and single-page.
+7. ✅ Pagination: auto-paginate 10 endpoints via limit/offset with
+   endpoint-specific page sizes (5000 default, 3000 for disclosure_date),
+   max 20 pages, first-row-comparison progress guard. `query_no_cache()`
+   warns on `has_more`. Endpoints not in the allowlist get a warning.
 8. ✅ Sync errors fail the command: `cmd_sync` exits non-zero when
    `stats.errors > 0`.
 9. ✅ `cashflow_vip`: typed table `tushare_cashflow` with `n_cashflow_act`,

@@ -149,8 +149,8 @@ impl TushareClient {
 
     /// 发送 HTTP 请求，自动处理分页（has_more），写入 raw + typed 缓存。
     ///
-    /// 仅对已知支持 limit/offset 的 endpoint 启用自动分页（已验证：
-    /// stock_basic, daily_basic, daily, balancesheet_vip, index_daily）。
+    /// 对 10 个已知支持 limit/offset 的 endpoint 启用自动分页，每页行数
+    /// 由 page_size() 按 endpoint 决定（5000 或 disclosure_date=3000）。
     /// 其他 endpoint 若返回 has_more 则仅 warn，不自动分页。
     async fn execute_and_cache(
         &self,
@@ -182,7 +182,7 @@ impl TushareClient {
         let cache_key = Self::build_cache_key(api_name, param_map, fields);
         let mut all_fields: Vec<String> = Vec::new();
         let mut all_items: Vec<Vec<serde_json::Value>> = Vec::new();
-        let mut prev_count = 0;
+        let mut prev_first: String = String::new();
         let mut offset = 0;
         let mut page = 0;
 
@@ -228,9 +228,26 @@ impl TushareClient {
             }
 
             let row_count = data.items.len();
+            if row_count == 0 {
+                break;
+            }
+
+            // 进度守卫：比较本页首行与上页首行，相同则 offset 未生效
+            let this_first = Self::item_first_repr(&data.items[0]);
+            if page > 0 && this_first == prev_first {
+                tracing::warn!(
+                    api = api_name,
+                    page,
+                    total = all_items.len(),
+                    "分页首行重复（offset 可能未被 endpoint 支持），停止分页"
+                );
+                break;
+            }
+            prev_first = this_first;
+
             all_items.extend(data.items);
 
-            let has_more = data.has_more.unwrap_or(false) && row_count > 0;
+            let has_more = data.has_more.unwrap_or(false);
 
             if paginate.is_none() && has_more {
                 tracing::warn!(
@@ -242,15 +259,6 @@ impl TushareClient {
             }
 
             if has_more {
-                // 安全守卫：如果本页没有新增行，说明 offset 未生效，停止
-                if all_items.len() == prev_count {
-                    tracing::warn!(
-                        api = api_name,
-                        total = all_items.len(),
-                        "分页未推进（offset 可能未被 endpoint 支持），停止分页"
-                    );
-                    break;
-                }
                 if page >= MAX_PAGES {
                     tracing::warn!(
                         api = api_name,
@@ -262,7 +270,6 @@ impl TushareClient {
                     break;
                 }
                 page += 1;
-                prev_count = all_items.len();
                 offset += pg_size;
                 info!(
                     api = api_name,
@@ -425,6 +432,24 @@ impl TushareClient {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         Self::build_cache_key(api_name, &param_map, fields)
+    }
+
+    /// 将 items 首行的前两个字段拼接为比较串，用于分页进度检测。
+    fn item_first_repr(row: &[serde_json::Value]) -> String {
+        let a = row.first().map(Self::value_str).unwrap_or_default();
+        let b = row.get(1).map(Self::value_str).unwrap_or_default();
+        format!("{a}|{b}")
+    }
+
+    /// serde_json::Value → 字符串表示
+    fn value_str(v: &serde_json::Value) -> String {
+        match v {
+            serde_json::Value::Null => String::new(),
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            _ => v.to_string(),
+        }
     }
 
     fn build_cache_key(
