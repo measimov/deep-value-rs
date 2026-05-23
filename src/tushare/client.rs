@@ -160,32 +160,15 @@ impl TushareClient {
     ) -> Result<DataFrame> {
         const MAX_PAGES: usize = 20;
 
-        /// 已知支持 limit/offset 分页的 Tushare endpoint 及其单页上限。
-        fn page_size(api: &str) -> Option<usize> {
-            match api {
-                "disclosure_date" => Some(3000),
-                "stock_basic"
-                | "daily_basic"
-                | "daily"
-                | "balancesheet_vip"
-                | "income_vip"
-                | "fina_indicator_vip"
-                | "cashflow_vip"
-                | "adj_factor"
-                | "index_daily" => Some(5000),
-                _ => None,
-            }
-        }
-
-        let paginate = page_size(api_name);
+        let paginate = pagination_page_size(api_name);
         let pg_size = paginate.unwrap_or(0);
         // 分页进度键：endpoint 特定的复合字段，确保跨页唯一。
         // 如 index_daily 同一标的跨日期范围，ts_code 不变但 trade_date 推进。
-        let progress_keys: &[&str] = Self::progress_key_fields(api_name);
+        let progress_keys: &[&str] = progress_key_fields(api_name);
         let user_fields = fields.map(|f| f.to_string());
         // fields=None 时 Tushare 返回全部默认列，已包含进度键，不注入字段列表。
         let effective_fields = if paginate.is_some() {
-            Self::ensure_pagination_fields(user_fields.as_deref(), progress_keys)
+            ensure_pagination_fields(user_fields.as_deref(), progress_keys)
         } else {
             fields.map(|f| f.to_string())
         };
@@ -244,7 +227,7 @@ impl TushareClient {
             }
 
             // 进度守卫：端点特定复合键，检测 offset 是否实际推进
-            let this_key = Self::progress_key_str(&data.items[0], &all_fields, progress_keys);
+            let this_key = progress_key_str(&data.items[0], &all_fields, progress_keys);
             if page > 0 && this_key == prev_key {
                 guard_broken = Some("分页首行复合键重复，offset 可能未被 endpoint 支持");
                 break;
@@ -462,69 +445,6 @@ impl TushareClient {
         Self::build_cache_key(api_name, &param_map, fields)
     }
 
-    /// 端点特定的分页进度复合键字段。
-    ///
-    /// 对于 `index_daily`（同一标的跨日期范围），ts_code 不变但 trade_date 推进；
-    /// 对于财务 VIP（同一标的跨期间），ts_code 不变但 end_date 推进。
-    /// 此处按端点选择最小组字段集合，确保跨页唯一性。
-    fn progress_key_fields(api: &str) -> &[&str] {
-        match api {
-            "daily" | "adj_factor" | "index_daily" => &["ts_code", "trade_date"],
-            "income_vip" | "balancesheet_vip" | "cashflow_vip" | "fina_indicator_vip" => {
-                &["ts_code", "end_date"]
-            }
-            "disclosure_date" => &["ts_code", "end_date"],
-            _ => &["ts_code"], // stock_basic, daily_basic: ts_code per row is unique
-        }
-    }
-
-    /// 组装分页进度键字符串，从首行指定 fields 位置取值拼接。
-    fn progress_key_str(
-        row: &[serde_json::Value],
-        resp_fields: &[String],
-        keys: &[&str],
-    ) -> String {
-        keys.iter()
-            .filter_map(|k| {
-                resp_fields
-                    .iter()
-                    .position(|f| f == *k)
-                    .and_then(|idx| row.get(idx))
-                    .map(Self::value_repr)
-            })
-            .collect::<Vec<_>>()
-            .join("|")
-    }
-
-    /// 确保 fields 包含分页进度所需的键字段。
-    /// 当 fields=None 时返回 None（Tushare 默认返回全部列，已包含进度键）。
-    fn ensure_pagination_fields(fields: Option<&str>, keys: &[&str]) -> Option<String> {
-        let base = match fields {
-            Some(f) => f,
-            None => return None,
-        };
-        let existing: Vec<&str> = base.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-        let mut out = base.to_string();
-        for k in keys {
-            if !existing.contains(k) {
-                if !out.is_empty() {
-                    out.push(',');
-                }
-                out.push_str(k);
-            }
-        }
-        Some(out)
-    }
-
-    /// serde_json::Value → 短字符串表示。
-    fn value_repr(v: &serde_json::Value) -> String {
-        match v {
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Number(n) => n.to_string(),
-            _ => format!("{v}"),
-        }
-    }
-
     fn build_cache_key(
         api_name: &str,
         params: &HashMap<String, String>,
@@ -548,5 +468,138 @@ impl TushareClient {
         }
 
         parts.join("__")
+    }
+}
+
+// ---- 分页辅助函数（模块级，便于单元测试） ----
+
+fn pagination_page_size(api: &str) -> Option<usize> {
+    match api {
+        "disclosure_date" => Some(3000),
+        "stock_basic"
+        | "daily_basic"
+        | "daily"
+        | "balancesheet_vip"
+        | "income_vip"
+        | "fina_indicator_vip"
+        | "cashflow_vip"
+        | "adj_factor"
+        | "index_daily" => Some(5000),
+        _ => None,
+    }
+}
+
+fn progress_key_fields(api: &str) -> &[&str] {
+    match api {
+        "daily" | "adj_factor" | "index_daily" => &["ts_code", "trade_date"],
+        "income_vip" | "balancesheet_vip" | "cashflow_vip" | "fina_indicator_vip" => {
+            &["ts_code", "end_date"]
+        }
+        "disclosure_date" => &["ts_code", "end_date"],
+        _ => &["ts_code"],
+    }
+}
+
+fn progress_key_str(row: &[serde_json::Value], resp_fields: &[String], keys: &[&str]) -> String {
+    keys.iter()
+        .filter_map(|k| {
+            resp_fields
+                .iter()
+                .position(|f| f == *k)
+                .and_then(|idx| row.get(idx))
+                .map(value_repr)
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn ensure_pagination_fields(fields: Option<&str>, keys: &[&str]) -> Option<String> {
+    let base = match fields {
+        Some(f) => f,
+        None => return None,
+    };
+    let existing: Vec<&str> = base.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let mut out = base.to_string();
+    for k in keys {
+        if !existing.contains(k) {
+            if !out.is_empty() {
+                out.push(',');
+            }
+            out.push_str(k);
+        }
+    }
+    Some(out)
+}
+
+fn value_repr(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => format!("{v}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_page_size_endpoints() {
+        assert_eq!(pagination_page_size("disclosure_date"), Some(3000));
+        assert_eq!(pagination_page_size("stock_basic"), Some(5000));
+        assert_eq!(pagination_page_size("daily"), Some(5000));
+        assert_eq!(pagination_page_size("income_vip"), Some(5000));
+        assert_eq!(pagination_page_size("cashflow_vip"), Some(5000));
+        assert_eq!(pagination_page_size("fina_audit"), None); // non-paginated
+    }
+
+    #[test]
+    fn test_progress_key_fields_per_endpoint() {
+        // Market series: ts_code + trade_date
+        assert_eq!(progress_key_fields("daily"), &["ts_code", "trade_date"]);
+        assert_eq!(progress_key_fields("index_daily"), &["ts_code", "trade_date"]);
+        // Financial VIP: ts_code + end_date
+        assert_eq!(progress_key_fields("income_vip"), &["ts_code", "end_date"]);
+        assert_eq!(progress_key_fields("cashflow_vip"), &["ts_code", "end_date"]);
+        // Unique per stock: ts_code only
+        assert_eq!(progress_key_fields("stock_basic"), &["ts_code"]);
+    }
+
+    #[test]
+    fn test_progress_key_str_compound() {
+        let fields = vec!["ts_code".to_string(), "trade_date".to_string(), "close".to_string()];
+        let row = vec![json!("000001.SZ"), json!("20250515"), json!(12.5)];
+        let keys: &[&str] = &["ts_code", "trade_date"];
+        let key = progress_key_str(&row, &fields, keys);
+        assert_eq!(key, "000001.SZ|20250515");
+    }
+
+    #[test]
+    fn test_progress_key_str_missing_field_omitted() {
+        let fields = vec!["trade_date".to_string(), "close".to_string()];
+        let row = vec![json!("20250515"), json!(12.5)];
+        let keys: &[&str] = &["ts_code", "trade_date"]; // ts_code missing from fields
+        let key = progress_key_str(&row, &fields, keys);
+        assert_eq!(key, "20250515"); // ts_code skipped, only trade_date used
+    }
+
+    #[test]
+    fn test_ensure_pagination_fields_none() {
+        // fields=None → return None (Tushare defaults include key fields)
+        let result = ensure_pagination_fields(None, &["ts_code"]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_ensure_pagination_fields_injects_missing() {
+        let result = ensure_pagination_fields(Some("end_date,n_income"), &["ts_code", "end_date"]);
+        assert_eq!(result.as_deref(), Some("end_date,n_income,ts_code"));
+    }
+
+    #[test]
+    fn test_ensure_pagination_fields_all_present() {
+        let result = ensure_pagination_fields(Some("ts_code,end_date,n_income"), &["ts_code", "end_date"]);
+        assert_eq!(result.as_deref(), Some("ts_code,end_date,n_income"));
     }
 }
