@@ -1,6 +1,6 @@
 # Tushare API Gap Analysis
 
-Last reviewed: 2026-05-23
+Last reviewed: 2026-05-24
 
 This document compares the local Tushare integration in this repository with the
 official Tushare Pro HTTP/API documentation. It focuses on APIs actually used by
@@ -41,16 +41,22 @@ The current typed PostgreSQL layer supports these APIs:
 - `trade_cal`
 - `stock_basic`
 - `daily_basic`
-- `income`
+- `income` / `income_vip`
 - `dividend`
-- `balancesheet`
+- `balancesheet` / `balancesheet_vip`
 - `fina_audit`
+- `fina_indicator` / `fina_indicator_vip`
 - `daily`
 - `adj_factor`
 - `index_daily`
 
+Two data access paths exist:
+- **Online**: `TushareClient::query()` — raw cache → API fallback → typed write.
+- **Offline**: `PgCache::load_typed()` via `src/data/local.rs` readers, used by
+  `snapshot --local`. Typed tables are populated by `sync` commands.
+
 This is not a full Tushare SDK. It is a targeted implementation for the current
-Deep Value A-share snapshot and early backtest workflows.
+Deep Value A-share snapshot, backtest, and sync workflows.
 
 ## API Coverage Matrix
 
@@ -62,15 +68,15 @@ Deep Value A-share snapshot and early backtest workflows.
 | `daily` | Implemented raw + typed | Backtest stock close price | Typed table stores only `close`; it omits OHLC, previous close, change, pct change, volume, and amount. |
 | `adj_factor` | Implemented raw + typed | Backtest adjusted stock price calculation | Field coverage is enough for adjustment factors, but current backtest labels the result as forward-adjusted while using `close * adj_factor`, which matches the official back-adjusted formula. Forward adjustment should be `close * adj_factor / latest_adj_factor`. |
 | `index_daily` | Implemented raw + typed | Backtest benchmark close price | Typed table stores only `close`; it omits index OHLC, previous close, change, pct change, volume, and amount. |
-| `income` | Partially implemented | Snapshot anomaly checks and data helpers | The per-stock calls in `main.rs` match the official `ts_code` requirement. Some batch helper functions call by `period` without `ts_code`, which does not match the official `income` contract. The official full-quarter all-stock interface is `income_vip`, which is not implemented. |
-| `balancesheet` | Partially implemented | Snapshot net equity checks and data helpers | The per-stock calls in `main.rs` match the official `ts_code` requirement. Some batch helper functions call by `period` without `ts_code`, which does not match the official `balancesheet` contract. The official full-quarter all-stock interface is `balancesheet_vip`, which is not implemented. |
-| `dividend` | Risky / likely mismatched | Snapshot dividend anomaly checks | Local code frequently passes `end_date` as an input parameter. Official docs list `ts_code`, `ann_date`, `record_date`, `ex_date`, and `imp_ann_date`, and require at least one of those. `end_date` is an output field, not a documented input. |
-| `fina_audit` | Partially implemented | Snapshot Big Four audit check | The per-stock calls in `main.rs` match the official `ts_code` requirement. `data/audit.rs` calls by `period` without `ts_code`, which does not match the official contract. Typed table stores only `audit_agency`; it omits `ann_date`, `end_date`, `audit_result`, `audit_fees`, and `audit_sign`. |
-| `pro_bar` | Not implemented | Not used | Official docs state adjusted行情 via `pro_bar` is a Python SDK dynamic calculation and cannot be called directly over HTTP. Local code should implement the equivalent adjustment formula if SDK parity is needed. |
-| `income_vip` | Not implemented | Not used | Needed to pull all companies for one period without per-stock loops; official docs state it requires 5000 points. |
-| `balancesheet_vip` | Not implemented | Not used | Needed to pull all companies for one period without per-stock loops; official docs state it requires 5000 points. |
-| `cashflow` / `cashflow_vip` | Not implemented | Not used | Useful for quality and dividend sustainability checks, but absent from current strategy. |
-| `fina_indicator` | Not implemented | Not used | Useful for ROE, margins, leverage, and dividend payout checks, but absent from current strategy. |
+| `income` | Implemented (per-stock) | Snapshot anomaly checks (online path) | Per-stock calls in `main.rs` match the official `ts_code` requirement. |
+| `balancesheet` | Implemented (per-stock) | Snapshot net equity checks (online path) | Per-stock calls in `main.rs` match the official `ts_code` requirement. |
+| `dividend` | Fixed | Snapshot dividend anomaly checks | Fixed in 2026-05: calls now use documented `ts_code` param; `end_date` filtering is done in Rust via `sum_div_for_period()`. |
+| `fina_audit` | Implemented (per-stock) | Snapshot Big Four audit check | Per-stock calls in `main.rs` match the official `ts_code` requirement. Broken `get_audit_info()` removed from `data/audit.rs`. Typed table stores `audit_agency`; omits `ann_date`, `end_date`, `audit_result`, `audit_fees`, `audit_sign`. |
+| `pro_bar` | Not implemented | Not used | Official docs state adjusted行情 via `pro_bar` is a Python SDK dynamic calculation and cannot be called directly over HTTP. |
+| `income_vip` | Implemented | `sync` command bulk financial pull | Requires 5000+ points. Pulls all companies for one period in a single call. Routed through `save_typed`/`load_typed` to `tushare_income`. |
+| `balancesheet_vip` | Implemented | `sync` command bulk financial pull | Requires 5000+ points. Pulls all companies for one period. Routed through `save_typed`/`load_typed` to `tushare_balancesheet`. |
+| `cashflow` / `cashflow_vip` | Not implemented | Not used | Useful for quality and dividend sustainability checks. |
+| `fina_indicator` / `fina_indicator_vip` | Implemented | `sync` command + local reader | Stores ROE, ROA, margins, leverage (13 fields). `fina_indicator_vip` pulls all stocks per period. Typed table: `tushare_fina_indicator`. Local reader: `get_fina_indicator()`. |
 | `disclosure_date` | Not implemented | Not used | Could improve point-in-time financial availability instead of the current conservative `safe_financial_year()` rule. |
 | `index_weight` | Not implemented | Not used | Needed for benchmark constituent analysis and index-aware portfolio comparison. |
 | ST / suspension / limit-up-limit-down APIs | Not implemented | Not used | Current snapshot does not explicitly remove ST stocks, suspended stocks, or limit-up/limit-down liquidity traps through dedicated Tushare endpoints. |
@@ -79,9 +85,10 @@ Deep Value A-share snapshot and early backtest workflows.
 
 ### Pagination and Row Limits
 
-The client parses `has_more` in the response type, but `query()` does not act on
-it. There is no generic pagination strategy using `limit` / `offset`, nor a
-date-window strategy for APIs that need segmented retrieval.
+The client parses `has_more` in the response type, and `query()` / `query_force()`
+now emit a `tracing::warn!` when `has_more == true`. However, there is still no
+generic pagination strategy using `limit` / `offset`, nor a date-window strategy
+for APIs that need segmented retrieval.
 
 This matters because several official docs specify single-request limits:
 
@@ -90,21 +97,24 @@ This matters because several official docs specify single-request limits:
 - `daily`: 6000 rows per request.
 - `index_daily`: up to 8000 rows per request.
 
-Current behavior may silently operate on incomplete data if Tushare truncates a
-result set without the caller noticing.
+Current behavior warns but does not automatically paginate. Large result sets
+may be silently truncated if the caller ignores the warning.
 
 ### Rate Limiting and Retries
 
-The local client does not implement:
+Implemented:
+- `RateLimiter` struct in `src/tushare/client.rs` with configurable min interval
+  (via `--delay-ms` flag on the `sync` command).
+- `sync` command errors fail the CLI command when `stats.errors > 0`.
 
-- per-token request throttling;
-- per-API request throttling;
-- retry with exponential backoff;
-- handling for permission/frequency errors beyond returning the Tushare error;
-- request accounting for cold-cache workflows.
+Not yet implemented:
+- retry with exponential backoff for transient HTTP failures;
+- automatic handling for Tushare frequency-limit errors (code -2001 etc.);
+- request accounting for cold-cache `snapshot` workflows.
 
-This is a practical issue for `snapshot` because cold-cache execution can issue
-thousands of requests when financial and audit data are pulled stock by stock.
+The `sync` commands use VIP endpoints to drastically reduce API call counts
+(from ~6900 per cold snapshot to ~100 for a full sync), making rate limiting
+less critical for routine operation.
 
 ### Raw Cache vs Typed Cache
 
@@ -117,15 +127,16 @@ but they are not part of the primary client lookup path.
 ### Financial API Shape
 
 Official `income`, `balancesheet`, and `fina_audit` are stock-oriented APIs with
-`ts_code` required in the normal interface. The repository has some helper
-functions that attempt period-only calls. These are not aligned with the docs.
+`ts_code` required in the normal interface. Broken period-only bulk helpers were
+removed from `data/financials.rs` and `data/audit.rs` in 2026-05.
 
-The better implementation path is:
-
-- use `income_vip` and `balancesheet_vip` for all-stock period data when the
-  token has 5000+ points;
-- otherwise keep per-stock calls but add rate limiting and request budgeting;
-- avoid undocumented parameters such as `dividend(end_date=...)`.
+Current implementation:
+- `sync` command uses `income_vip`, `balancesheet_vip`, `fina_indicator_vip` for
+  all-stock period data (5000+ points required).
+- Online `snapshot` path uses per-stock `income`, `balancesheet`, `fina_audit`
+  calls with correct `ts_code` + `period` parameters.
+- `dividend` calls use only `ts_code` parameter; `end_date` filtering is done in
+  Rust.
 
 ### Adjusted Price Semantics
 
@@ -164,6 +175,8 @@ Important thresholds for this repository:
 - `index_daily`: 2000 points and up.
 - `income_vip`: 5000 points.
 - `balancesheet_vip`: 5000 points.
+- `fina_indicator`: 2000 points.
+- `fina_indicator_vip`: 5000 points.
 
 Official point/frequency table:
 
@@ -185,12 +198,16 @@ Observed results:
 - `daily` returned `code = 0` with data, proving at least the 120-point tier.
 - `stock_basic` returned `code = 0` with data, proving at least the 2000-point
   tier.
-- `income_vip` returned `code = 0` with data, proving at least the 5000-point
-  tier.
-- `us_income` returned `code = 0` with an empty result in the tested query. This
-  is not enough to prove or disprove higher-tier or separate US-data permission.
+- `income_vip` returned `code = 0` with data (6,726 rows), proving at least the
+  5000-point tier.
+- `balancesheet_vip` returned `code = 0` with data (7,000 rows).
+- `fina_indicator_vip` returned `code = 0` with data (7,399 rows).
+- `dividend` with `ts_code`-only param returned 52 records for 000001.SZ.
+- `us_income` returned `code = 0` with an empty result. Not enough to prove or
+  disprove separate US-data permission.
 
-Conclusion: the tested token is at least a 5000-point token. These low-frequency
+All 10 endpoints in the sync pipeline were verified on 2026-05-23. The token is
+a confirmed 5000+ point token. These low-frequency
 probes do not reliably distinguish 5000, 10000, and 15000+ tiers because the
 higher tiers mostly differ by request frequency, daily totals, and special-data
 permissions. Do not use rate-limit stress tests by default because they consume
@@ -202,7 +219,8 @@ points table.
 
 ## Snapshot Request Budget
 
-Cold-cache `snapshot --top 30` can be request-heavy:
+Cold-cache `snapshot --top 30` (online path, without prior sync) can be
+request-heavy:
 
 - market PB and cross-section: about 3 requests;
 - 10-year PB check: about 10 `daily_basic` requests;
@@ -215,9 +233,20 @@ Cold-cache `snapshot --top 30` can be request-heavy:
   - 10-year income: 3000 `income` requests;
   - 10-year dividend: 3000 `dividend` requests.
 
-That is roughly 6900+ requests before cache hits. At the 2000-point tier this can
-exceed the 200 requests/minute limit unless throttled. At the 5000-point tier it
-is still slow and should be optimized.
+With the `sync` command and VIP endpoints, the equivalent full backfill drops to
+roughly 100 requests:
+
+- `stock_basic`: 1 request
+- `daily_basic` (anniversary dates): ~20 requests
+- `income_vip` (per period): ~18 requests (all stocks each)
+- `balancesheet_vip` (per period): ~18 requests
+- `fina_indicator_vip` (per period): ~18 requests
+- `fina_audit` (per stock): ~5500 requests (no VIP equivalent)
+- `dividend` (per stock): ~5500 requests (no VIP equivalent)
+- `daily` / `adj_factor` / `index_daily`: ~120 requests / few
+
+After sync, `snapshot --local` makes zero API calls — all data comes from PG
+typed tables.
 
 ## Implemented (2026-05-24)
 
