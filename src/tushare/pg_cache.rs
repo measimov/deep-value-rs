@@ -1,6 +1,6 @@
 //! PostgreSQL storage for raw Tushare responses.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use polars::prelude::*;
@@ -140,6 +140,63 @@ impl PgCache {
         Ok(result.rows_affected())
     }
 
+    /// Return all distinct trade_dates present in daily_basic typed table.
+    pub async fn existing_daily_basic_dates(&self) -> Result<HashSet<String>> {
+        let rows = sqlx::query(
+            r#"select distinct trade_date from deep_value.tushare_daily_basic order by trade_date"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("查询 daily_basic 已有日期失败")?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>("trade_date").ok())
+            .collect())
+    }
+
+    /// Return all distinct end_dates present in income typed table.
+    pub async fn existing_income_periods(&self) -> Result<HashSet<String>> {
+        let rows = sqlx::query(
+            r#"select distinct end_date from deep_value.tushare_income order by end_date"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("查询 income 已有期间失败")?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>("end_date").ok())
+            .collect())
+    }
+
+    /// Return ts_codes that have fina_audit records for a given period.
+    pub async fn existing_audit_codes(&self, period: &str) -> Result<HashSet<String>> {
+        let rows = sqlx::query(
+            r#"select ts_code from deep_value.tushare_fina_audit where period = $1"#,
+        )
+        .bind(period)
+        .fetch_all(&self.pool)
+        .await
+        .context("查询 fina_audit 已有代码失败")?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>("ts_code").ok())
+            .collect())
+    }
+
+    /// Return ts_codes that have dividend records.
+    pub async fn existing_dividend_codes(&self) -> Result<HashSet<String>> {
+        let rows = sqlx::query(
+            r#"select distinct ts_code from deep_value.tushare_dividend"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("查询 dividend 已有代码失败")?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>("ts_code").ok())
+            .collect())
+    }
+
     /// Save supported Tushare responses into typed tables.
     pub async fn save_typed(
         &self,
@@ -152,9 +209,9 @@ impl PgCache {
             "trade_cal" => self.save_trade_cal(params, fields, items).await,
             "stock_basic" => self.save_stock_basic(params, fields, items).await,
             "daily_basic" => self.save_daily_basic(params, fields, items).await,
-            "income" => self.save_income(params, fields, items).await,
+            "income" | "income_vip" => self.save_income(params, fields, items).await,
             "dividend" => self.save_dividend(params, fields, items).await,
-            "balancesheet" => self.save_balancesheet(params, fields, items).await,
+            "balancesheet" | "balancesheet_vip" => self.save_balancesheet(params, fields, items).await,
             "fina_audit" => self.save_fina_audit(params, fields, items).await,
             "daily" => {
                 self.save_market_series("tushare_daily", "close", params, fields, items)
@@ -167,6 +224,9 @@ impl PgCache {
             "index_daily" => {
                 self.save_market_series("tushare_index_daily", "close", params, fields, items)
                     .await
+            }
+            "fina_indicator" | "fina_indicator_vip" => {
+                self.save_fina_indicator(params, fields, items).await
             }
             _ => Ok(()),
         }
@@ -183,9 +243,9 @@ impl PgCache {
             "trade_cal" => self.load_trade_cal(params, fields).await,
             "stock_basic" => self.load_stock_basic(params, fields).await,
             "daily_basic" => self.load_daily_basic(params, fields).await,
-            "income" => self.load_income(params, fields).await,
+            "income" | "income_vip" => self.load_income(params, fields).await,
             "dividend" => self.load_dividend(params, fields).await,
-            "balancesheet" => self.load_balancesheet(params, fields).await,
+            "balancesheet" | "balancesheet_vip" => self.load_balancesheet(params, fields).await,
             "fina_audit" => self.load_fina_audit(params, fields).await,
             "daily" => {
                 self.load_market_series(
@@ -216,6 +276,9 @@ impl PgCache {
                     &["trade_date", "close"],
                 )
                 .await
+            }
+            "fina_indicator" | "fina_indicator_vip" => {
+                self.load_fina_indicator(params, fields).await
             }
             _ => Ok(None),
         }
@@ -772,6 +835,108 @@ impl PgCache {
         )
     }
 
+    async fn save_fina_indicator(
+        &self,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
+    ) -> Result<()> {
+        let Some(ts_code_idx) = field_index(fields, "ts_code") else {
+            return Ok(());
+        };
+        let end_date_idx = field_index(fields, "end_date");
+
+        for row in items {
+            let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
+            let end_date = end_date_idx
+                .and_then(|idx| cell_string(row, idx))
+                .or_else(|| params.get("period").cloned());
+            let Some(end_date) = end_date else {
+                continue;
+            };
+
+            sqlx::query(
+                r#"
+                insert into deep_value.tushare_fina_indicator (
+                    ts_code, end_date, roe, roa, grossprofit_margin,
+                    netprofit_margin, debt_to_assets, current_ratio,
+                    bps, eps, cfps, or_yoy, profit_dedt
+                )
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                on conflict (ts_code, end_date) do update set
+                    roe = coalesce(excluded.roe, deep_value.tushare_fina_indicator.roe),
+                    roa = coalesce(excluded.roa, deep_value.tushare_fina_indicator.roa),
+                    grossprofit_margin = coalesce(excluded.grossprofit_margin, deep_value.tushare_fina_indicator.grossprofit_margin),
+                    netprofit_margin = coalesce(excluded.netprofit_margin, deep_value.tushare_fina_indicator.netprofit_margin),
+                    debt_to_assets = coalesce(excluded.debt_to_assets, deep_value.tushare_fina_indicator.debt_to_assets),
+                    current_ratio = coalesce(excluded.current_ratio, deep_value.tushare_fina_indicator.current_ratio),
+                    bps = coalesce(excluded.bps, deep_value.tushare_fina_indicator.bps),
+                    eps = coalesce(excluded.eps, deep_value.tushare_fina_indicator.eps),
+                    cfps = coalesce(excluded.cfps, deep_value.tushare_fina_indicator.cfps),
+                    or_yoy = coalesce(excluded.or_yoy, deep_value.tushare_fina_indicator.or_yoy),
+                    profit_dedt = coalesce(excluded.profit_dedt, deep_value.tushare_fina_indicator.profit_dedt),
+                    updated_at = now()
+                "#,
+            )
+            .bind(ts_code)
+            .bind(end_date)
+            .bind(field_f64_opt(fields, row, "roe"))
+            .bind(field_f64_opt(fields, row, "roa"))
+            .bind(field_f64_opt(fields, row, "grossprofit_margin"))
+            .bind(field_f64_opt(fields, row, "netprofit_margin"))
+            .bind(field_f64_opt(fields, row, "debt_to_assets"))
+            .bind(field_f64_opt(fields, row, "current_ratio"))
+            .bind(field_f64_opt(fields, row, "bps"))
+            .bind(field_f64_opt(fields, row, "eps"))
+            .bind(field_f64_opt(fields, row, "cfps"))
+            .bind(field_f64_opt(fields, row, "or_yoy"))
+            .bind(field_f64_opt(fields, row, "profit_dedt"))
+            .execute(&self.pool)
+            .await
+            .context("写入 tushare_fina_indicator 失败")?;
+        }
+
+        Ok(())
+    }
+
+    async fn load_fina_indicator(
+        &self,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        let Some(period) = params.get("period") else {
+            return Ok(None);
+        };
+        let rows = sqlx::query(
+            r#"
+            select ts_code, end_date, roe, roa, grossprofit_margin,
+                   netprofit_margin, debt_to_assets, current_ratio,
+                   bps, eps, cfps, or_yoy, profit_dedt
+            from deep_value.tushare_fina_indicator
+            where end_date = $1
+            order by ts_code
+            "#,
+        )
+        .bind(period)
+        .fetch_all(&self.pool)
+        .await
+        .context("读取 tushare_fina_indicator 失败")?;
+
+        rows_to_dataframe(
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code", "end_date", "roe", "roa", "grossprofit_margin",
+                    "netprofit_margin", "debt_to_assets", "current_ratio",
+                    "bps", "eps", "cfps", "or_yoy", "profit_dedt",
+                ],
+            ),
+            &rows,
+        )
+    }
+
     async fn save_market_series(
         &self,
         table: &str,
@@ -871,6 +1036,10 @@ fn cell_string(row: &[Value], idx: usize) -> Option<String> {
     }
 }
 
+fn field_f64_opt(fields: &[String], row: &[Value], name: &str) -> Option<f64> {
+    field_index(fields, name).and_then(|idx| cell_f64(row, idx))
+}
+
 fn cell_f64(row: &[Value], idx: usize) -> Option<f64> {
     match row.get(idx)? {
         Value::Null => None,
@@ -941,7 +1110,18 @@ fn row_value_as_string(row: &sqlx::postgres::PgRow, field: &str) -> Result<Optio
         | "stk_div"
         | "total_hldr_eqy_exc_min_int"
         | "close"
-        | "adj_factor" => row
+        | "adj_factor"
+        | "roe"
+        | "roa"
+        | "grossprofit_margin"
+        | "netprofit_margin"
+        | "debt_to_assets"
+        | "current_ratio"
+        | "bps"
+        | "eps"
+        | "cfps"
+        | "or_yoy"
+        | "profit_dedt" => row
             .try_get::<Option<f64>, _>(field)?
             .map(|value| trim_float_string(value)),
         _ => None,

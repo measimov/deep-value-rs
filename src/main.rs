@@ -14,7 +14,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use deep_value::config::AppConfig;
-use deep_value::data::{cross_section, financials};
+use deep_value::data::{cross_section, financials, local, sync};
 use deep_value::db;
 use deep_value::report::formatter;
 use deep_value::strategy::{
@@ -63,6 +63,37 @@ enum Commands {
         /// 跳过市场 PB 中位数建仓门槛检查
         #[arg(long)]
         skip_pb_check: bool,
+
+        /// 从本地 PostgreSQL typed 表读取，不调用 Tushare API
+        #[arg(long)]
+        local: bool,
+    },
+
+    /// 预取 Tushare 数据到 PostgreSQL typed 表
+    Sync {
+        /// 起始日期，格式 YYYYMMDD（全量模式）
+        #[arg(long, default_value = "20150101")]
+        start: String,
+
+        /// 结束日期，格式 YYYYMMDD（全量模式）
+        #[arg(long, default_value = "20250515")]
+        end: String,
+
+        /// 周年快照月日，格式 MMDD（默认使用 end 的 MMDD）
+        #[arg(long)]
+        anniversary: Option<String>,
+
+        /// API 最小调用间隔（毫秒）
+        #[arg(long, default_value_t = 120)]
+        delay_ms: u64,
+
+        /// 增量模式：只补缺失数据
+        #[arg(long)]
+        incremental: bool,
+
+        /// 增量模式类型: daily | financial | meta（仅 incremental 时有效）
+        #[arg(long, default_value = "daily")]
+        sync_mode: String,
     },
 }
 
@@ -98,11 +129,28 @@ async fn main() -> Result<()> {
         Commands::Db { action } => match action {
             DbAction::Ping => cmd_db_ping().await?,
         },
+        Commands::Sync {
+            start,
+            end,
+            anniversary,
+            delay_ms,
+            incremental,
+            sync_mode,
+        } => cmd_sync(
+            &start,
+            &end,
+            anniversary.as_deref(),
+            delay_ms,
+            incremental,
+            &sync_mode,
+        )
+        .await?,
         Commands::Snapshot {
             date,
             top,
             skip_pb_check,
-        } => cmd_snapshot(&date, top, skip_pb_check).await?,
+            local,
+        } => cmd_snapshot(&date, top, skip_pb_check, local).await?,
     }
 
     Ok(())
@@ -138,11 +186,55 @@ async fn cmd_db_ping() -> Result<()> {
     Ok(())
 }
 
-/// 单期真实选股快照。
-async fn cmd_snapshot(date: &str, top: usize, skip_pb_check: bool) -> Result<()> {
+/// 预取 Tushare 数据到 PostgreSQL typed 表。
+async fn cmd_sync(
+    start: &str,
+    end: &str,
+    anniversary: Option<&str>,
+    delay_ms: u64,
+    incremental: bool,
+    sync_mode: &str,
+) -> Result<()> {
     let config = AppConfig::load()?;
-    let client = TushareClient::new_with_pg(&config.tushare_token, &config.database_url).await?;
-    let result = run_ashare_snapshot(&client, date, top, skip_pb_check).await?;
+    let pool = db::connect(&config.database_url).await?;
+    db::init_schema(&pool).await?;
+    let cache = PgCache::new(pool);
+    let client = TushareClient::with_pg_cache(&config.tushare_token, cache);
+
+    let stats = if incremental {
+        sync::run_sync_incremental(&client, client.pg_cache().unwrap(), sync_mode, end, delay_ms)
+            .await?
+    } else {
+        let ann = anniversary.unwrap_or(&end[4..]);
+        sync::run_sync(&client, start, end, ann, delay_ms).await?
+    };
+
+    println!(
+        "Sync complete: {} calls, {} rows, {} skipped, {:.1}s, {} errors",
+        stats.total_calls,
+        stats.total_rows,
+        stats.skipped,
+        stats.elapsed_secs,
+        stats.errors
+    );
+    Ok(())
+}
+
+/// 单期真实选股快照。
+async fn cmd_snapshot(date: &str, top: usize, skip_pb_check: bool, local: bool) -> Result<()> {
+    let config = AppConfig::load()?;
+
+    let result = if local {
+        let pool = db::connect(&config.database_url).await?;
+        db::init_schema(&pool).await?;
+        let cache = PgCache::new(pool);
+        run_ashare_snapshot_local(&cache, date, top, skip_pb_check).await?
+    } else {
+        let client =
+            TushareClient::new_with_pg(&config.tushare_token, &config.database_url).await?;
+        run_ashare_snapshot(&client, date, top, skip_pb_check).await?
+    };
+
     println!("{}", formatter::format_snapshot(&result));
     Ok(())
 }
@@ -325,6 +417,262 @@ async fn run_ashare_snapshot(
     let anomaly_codes = ts_codes_from_df(&df)?;
     let (current_income, current_dividend, income_10y, dividend_10y) =
         load_anomaly_inputs(client, trade_date, config.lookback_years, &anomaly_codes).await?;
+    let anomaly_result = anomaly::remove_anomalies(
+        &df,
+        &current_income,
+        &current_dividend,
+        &income_10y,
+        &dividend_10y,
+    )?;
+    let eliminated = anomaly_result
+        .removed
+        .iter()
+        .map(|stock| EliminatedStock {
+            ts_code: stock.ts_code.clone(),
+            name: lookup_name(&df, &stock.ts_code).unwrap_or_else(|| stock.ts_code.clone()),
+            reason: stock.reason.clone(),
+        })
+        .collect();
+    df = anomaly_result.kept;
+    step_records.push(screening::make_step(
+        6,
+        "异常利润/分红排雷",
+        before,
+        df.height(),
+        false,
+        "",
+    ));
+
+    let before = df.height();
+    df = scoring::score_candidates(&df)?;
+    step_records.push(screening::make_step(
+        7,
+        "PB/PE/股息率打分",
+        before,
+        df.height(),
+        false,
+        "",
+    ));
+
+    let before = df.height();
+    df = screening::enforce_industry_cap(&df, config.industry_cap, config.top_n)?;
+    step_records.push(screening::make_step(
+        8,
+        "行业分散约束",
+        before,
+        df.height(),
+        false,
+        &format!("单行业上限 {:.0}%", config.industry_cap * 100.0),
+    ));
+
+    let before = df.height();
+    df = screening::build_portfolio(&df, config.target_equity_weight)?;
+    step_records.push(screening::make_step(
+        9,
+        "等权组合构建",
+        before,
+        df.height(),
+        false,
+        &format!("目标股票仓位 {:.0}%", config.target_equity_weight * 100.0),
+    ));
+
+    let holdings = dataframe_to_holdings(&df)?;
+    let industry_dist = industry_distribution(&holdings);
+
+    Ok(SnapshotResult {
+        trade_date: trade_date.to_string(),
+        market: config.market,
+        market_pb_map,
+        is_investable_map,
+        step_records,
+        holdings,
+        eliminated,
+        industry_dist,
+        data_warnings,
+    })
+}
+
+/// 从本地 PostgreSQL typed 表执行选股快照（无需 Tushare API）。
+async fn run_ashare_snapshot_local(
+    cache: &PgCache,
+    trade_date: &str,
+    top: usize,
+    skip_pb_check: bool,
+) -> Result<SnapshotResult> {
+    let mut config = DeepValueConfig {
+        top_n: top,
+        ..DeepValueConfig::default()
+    };
+    config.market = "ashare".to_string();
+
+    let mut step_records = Vec::new();
+    let mut data_warnings = Vec::new();
+    let mut market_pb_map = HashMap::new();
+    let mut is_investable_map = HashMap::new();
+
+    let market_pb = local::get_market_pb_median(cache, trade_date).await?;
+    let investable = market_pb.is_finite() && market_pb < config.market_pb_threshold;
+    market_pb_map.insert("ashare".to_string(), market_pb);
+    is_investable_map.insert("ashare".to_string(), investable);
+
+    if skip_pb_check {
+        data_warnings.push(format!(
+            "已按命令行参数跳过市场 PB 门槛检查：A 股 PB 中位数 {:.2}，默认阈值 {:.2}",
+            market_pb, config.market_pb_threshold
+        ));
+    }
+
+    if config.enforce_market_gate && !skip_pb_check && !investable {
+        data_warnings.push(format!(
+            "A 股 PB 中位数 {:.2} 高于阈值 {:.2}，按配置不建仓",
+            market_pb, config.market_pb_threshold
+        ));
+        return Ok(SnapshotResult {
+            trade_date: trade_date.to_string(),
+            market: config.market,
+            market_pb_map,
+            is_investable_map,
+            step_records,
+            holdings: Vec::new(),
+            eliminated: Vec::new(),
+            industry_dist: HashMap::new(),
+            data_warnings,
+        });
+    }
+
+    let mut df = local::build_cross_section(cache, trade_date).await?;
+
+    let before = df.height();
+    df = df
+        .lazy()
+        .filter(
+            col("pb")
+                .gt(lit(0.0))
+                .and(col("pb").lt_eq(lit(config.pb_max))),
+        )
+        .collect()?;
+    step_records.push(screening::make_step(
+        1,
+        &format!("PB <= {:.2}", config.pb_max),
+        before,
+        df.height(),
+        false,
+        "",
+    ));
+
+    let before = df.height();
+    let pb_10y = local::get_10y_pb_max(cache, trade_date, config.lookback_years).await?;
+    df = df
+        .lazy()
+        .join(
+            pb_10y.lazy(),
+            [col("ts_code")],
+            [col("ts_code")],
+            JoinArgs::new(JoinType::Left),
+        )
+        .filter(col("pb_10y_max").gt(lit(config.pb_10y_must_exceed)))
+        .collect()?;
+    step_records.push(screening::make_step(
+        2,
+        "十年 PB 高点检查",
+        before,
+        df.height(),
+        false,
+        &format!("十年 PB max > {:.2}", config.pb_10y_must_exceed),
+    ));
+
+    let financial_pool_size = (config.top_n * 10).max(config.top_n).min(df.height());
+    if df.height() > financial_pool_size {
+        let scored_pool = scoring::score_candidates(&df)?;
+        df = screening::enforce_industry_cap(
+            &scored_pool,
+            config.industry_cap,
+            financial_pool_size,
+        )?;
+        data_warnings.push(format!(
+            "逐只拉取财务/审计数据前，按初筛打分和行业分散保留前 {} 只候选",
+            financial_pool_size
+        ));
+    }
+
+    // Bulk load from typed tables (no per-stock API calls)
+    let net_equity = local::get_net_equity(cache, trade_date).await?;
+    df = df
+        .lazy()
+        .join(
+            net_equity.lazy(),
+            [col("ts_code")],
+            [col("ts_code")],
+            JoinArgs::new(JoinType::Left),
+        )
+        .collect()?;
+
+    let audit_info = local::get_audit_info(cache, trade_date).await?;
+    df = df
+        .lazy()
+        .join(
+            audit_info.lazy(),
+            [col("ts_code")],
+            [col("ts_code")],
+            JoinArgs::new(JoinType::Left),
+        )
+        .collect()?;
+
+    let before = df.height();
+    if config.audit_big4_required {
+        df = df
+            .lazy()
+            .filter(
+                col("is_big4")
+                    .eq(lit(true))
+                    .or(col("net_equity_bn").gt(lit(config.audit_exemption_equity_bn))),
+            )
+            .collect()?;
+    }
+    let audit_note = format!("净资产 > {:.0} 亿豁免", config.audit_exemption_equity_bn);
+    step_records.push(screening::make_step(
+        3,
+        "四大审计或大净资产豁免",
+        before,
+        df.height(),
+        false,
+        &audit_note,
+    ));
+
+    let before = df.height();
+    df = df
+        .lazy()
+        .filter(col("dv_ratio").gt_eq(lit(config.dv_ratio_min)))
+        .collect()?;
+    step_records.push(screening::make_step(
+        4,
+        &format!("股息率 >= {:.2}", config.dv_ratio_min),
+        before,
+        df.height(),
+        false,
+        "",
+    ));
+
+    let before = df.height();
+    df = df
+        .lazy()
+        .filter(col("net_equity_bn").gt_eq(lit(config.net_equity_min_bn)))
+        .collect()?;
+    step_records.push(screening::make_step(
+        5,
+        &format!("净资产 >= {:.0} 亿", config.net_equity_min_bn),
+        before,
+        df.height(),
+        false,
+        "",
+    ));
+
+    let before = df.height();
+    let _anomaly_codes = ts_codes_from_df(&df)?;
+    let current_income = local::get_current_year_income(cache, trade_date).await?;
+    let current_dividend = local::get_current_year_dividend(cache, trade_date).await?;
+    let income_10y = local::get_10y_income(cache, trade_date, config.lookback_years).await?;
+    let dividend_10y = local::get_10y_dividend(cache, trade_date, config.lookback_years).await?;
     let anomaly_result = anomaly::remove_anomalies(
         &df,
         &current_income,
@@ -587,14 +935,33 @@ async fn get_current_dividend_for_codes(
         let df = client
             .query(
                 "dividend",
-                &[("ts_code", code.as_str()), ("end_date", period.as_str())],
+                &[("ts_code", code.as_str())],
                 Some("ts_code,end_date,cash_div_tax"),
             )
             .await?;
+        let total = sum_div_for_period(&df, &period);
         out_codes.push(code.clone());
-        values.push(sum_f64_column(&df, "cash_div_tax"));
+        values.push(total);
     }
     Ok(df!("ts_code" => out_codes, "current_dividend_total" => values)?)
+}
+
+fn sum_div_for_period(df: &DataFrame, period: &str) -> f64 {
+    if df.height() == 0 {
+        return 0.0;
+    }
+    let dates = df.column("end_date").ok().and_then(|c| c.str().ok());
+    let divs = df.column("cash_div_tax").ok().and_then(|c| c.str().ok());
+    let (Some(dates), Some(divs)) = (dates, divs) else {
+        return 0.0;
+    };
+    let mut total = 0.0;
+    for i in 0..df.height() {
+        if dates.get(i) == Some(period) {
+            total += divs.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+        }
+    }
+    total
 }
 
 async fn get_10y_income_for_codes(
@@ -641,17 +1008,17 @@ async fn get_10y_dividend_for_codes(
     let mut out_codes = Vec::new();
     let mut values = Vec::new();
     for code in codes {
+        let df = client
+            .query(
+                "dividend",
+                &[("ts_code", code.as_str())],
+                Some("ts_code,end_date,cash_div_tax"),
+            )
+            .await?;
         let mut total = 0.0;
         for year in start_year..=safe_year {
             let period = format!("{year}1231");
-            let df = client
-                .query(
-                    "dividend",
-                    &[("ts_code", code.as_str()), ("end_date", period.as_str())],
-                    Some("ts_code,end_date,cash_div_tax"),
-                )
-                .await?;
-            total += sum_f64_column(&df, "cash_div_tax");
+            total += sum_div_for_period(&df, &period);
         }
         out_codes.push(code.clone());
         values.push(total);
@@ -677,26 +1044,6 @@ fn parse_f64_cell(df: &DataFrame, column: &str, row: usize) -> Option<f64> {
         return values.get(row);
     }
     col.str().ok()?.get(row)?.parse().ok()
-}
-
-fn sum_f64_column(df: &DataFrame, column: &str) -> f64 {
-    if df.height() == 0 {
-        return 0.0;
-    }
-    let Ok(col) = df.column(column) else {
-        return 0.0;
-    };
-    if let Ok(values) = col.f64() {
-        return values.into_iter().flatten().sum();
-    }
-    col.str()
-        .map(|values| {
-            values
-                .into_iter()
-                .filter_map(|value| value.and_then(|text| text.parse::<f64>().ok()))
-                .sum()
-        })
-        .unwrap_or(0.0)
 }
 
 fn industry_distribution(holdings: &[Holding]) -> HashMap<String, usize> {

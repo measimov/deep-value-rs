@@ -4,11 +4,13 @@
 //! 并将返回的 JSON 转换为 polars DataFrame。
 
 use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use polars::prelude::*;
 use reqwest::Client;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::db;
 
@@ -17,6 +19,34 @@ use super::types::{TushareRequest, TushareResponse};
 
 /// Tushare API 端点。
 const TUSHARE_API_URL: &str = "http://api.tushare.pro";
+
+/// 可配置的速率限制器。
+pub struct RateLimiter {
+    min_interval: Duration,
+    last_call: Mutex<Instant>,
+}
+
+impl RateLimiter {
+    pub fn new(min_interval_ms: u64) -> Self {
+        Self {
+            min_interval: Duration::from_millis(min_interval_ms),
+            last_call: Mutex::new(Instant::now()),
+        }
+    }
+
+    /// 如果距离上次调用不足 `min_interval`，则等待剩余时间。
+    pub async fn wait_if_needed(&self) {
+        let elapsed = {
+            let last = self.last_call.lock().unwrap();
+            last.elapsed()
+        };
+        if elapsed < self.min_interval {
+            tokio::time::sleep(self.min_interval - elapsed).await;
+        }
+        let mut last = self.last_call.lock().unwrap();
+        *last = Instant::now();
+    }
+}
 
 /// Tushare REST 客户端。
 ///
@@ -63,12 +93,14 @@ impl TushareClient {
         }
     }
 
+    /// 获取内部 PgCache 的引用。
+    pub fn pg_cache(&self) -> Option<&PgCache> {
+        self.pg_cache.as_ref()
+    }
+
     /// 通用查询：调用任意 Tushare API 并返回 DataFrame。
     ///
-    /// # Arguments
-    /// * `api_name` - 接口名称 (如 "daily_basic", "income" 等)
-    /// * `params` - 参数键值对
-    /// * `fields` - 可选，指定返回字段 (逗号分隔)
+    /// 优先从 PostgreSQL raw 缓存读取；未命中时发送 HTTP 请求并写入缓存。
     pub async fn query(
         &self,
         api_name: &str,
@@ -80,10 +112,9 @@ impl TushareClient {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
 
-        // 构建缓存 key
         let cache_key = Self::build_cache_key(api_name, &param_map, fields);
 
-        // 尝试读 PostgreSQL raw store；未配置 PostgreSQL 时不使用持久化缓存。
+        // 尝试读 PostgreSQL raw store
         if let Some(pg_cache) = &self.pg_cache {
             if let Some(raw) = pg_cache.load_raw(&cache_key).await? {
                 let df = self.response_to_dataframe(&raw.response_fields, &raw.response_items)?;
@@ -96,7 +127,35 @@ impl TushareClient {
             }
         }
 
-        // 构建请求
+        self.execute_and_cache(api_name, &param_map, fields).await
+    }
+
+    /// 强制调用 Tushare API（绕过 raw 缓存），仍会写入 raw + typed 缓存。
+    ///
+    /// 用于 `sync` 命令确保 typed 表始终被刷新。
+    pub async fn query_force(
+        &self,
+        api_name: &str,
+        params: &[(&str, &str)],
+        fields: Option<&str>,
+    ) -> Result<DataFrame> {
+        let param_map: HashMap<String, String> = params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+
+        self.execute_and_cache(api_name, &param_map, fields).await
+    }
+
+    /// 发送 HTTP 请求，反序列化，写入 raw + typed 缓存。
+    async fn execute_and_cache(
+        &self,
+        api_name: &str,
+        param_map: &HashMap<String, String>,
+        fields: Option<&str>,
+    ) -> Result<DataFrame> {
+        let cache_key = Self::build_cache_key(api_name, param_map, fields);
+
         let request = match fields {
             Some(f) => TushareRequest::with_fields(api_name, &self.token, param_map.clone(), f),
             None => TushareRequest::new(api_name, &self.token, param_map.clone()),
@@ -104,7 +163,6 @@ impl TushareClient {
 
         debug!(api = api_name, "发送请求...");
 
-        // 发送 HTTP POST
         let response = self
             .http
             .post(TUSHARE_API_URL)
@@ -124,25 +182,30 @@ impl TushareClient {
 
         let data = body.data.context("Tushare 返回数据为空")?;
 
-        // 转换为 DataFrame
+        if data.has_more.unwrap_or(false) {
+            warn!(
+                api = api_name,
+                "Tushare 返回 has_more=true，当前未实现分页，结果可能不完整"
+            );
+        }
+
         let df = self.response_to_dataframe(&data.fields, &data.items)?;
 
         info!(api = api_name, rows = df.height(), "请求完成");
 
-        // 写 PostgreSQL 缓存。raw store 保存所有成功响应，包括空结果。
         if let Some(pg_cache) = &self.pg_cache {
             pg_cache
                 .save_raw(
                     &cache_key,
                     api_name,
-                    &param_map,
+                    param_map,
                     fields,
                     &data.fields,
                     &data.items,
                 )
                 .await?;
             pg_cache
-                .save_typed(api_name, &param_map, &data.fields, &data.items)
+                .save_typed(api_name, param_map, &data.fields, &data.items)
                 .await?;
         }
 

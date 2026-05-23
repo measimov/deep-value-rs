@@ -45,7 +45,7 @@ pub async fn get_current_year_income(
 
     let df = client
         .query(
-            "income",
+            "income_vip",
             &[("period", period.as_str()), ("report_type", "1")],
             Some("ts_code,end_date,n_income"),
         )
@@ -74,45 +74,6 @@ pub async fn get_current_year_income(
     Ok(df)
 }
 
-/// 获取当年分红总额（用于排雷）。
-pub async fn get_current_year_dividend(
-    client: &TushareClient,
-    trade_date: &str,
-) -> Result<DataFrame> {
-    let safe_year = safe_financial_year(trade_date);
-    let period = format!("{}1231", safe_year);
-
-    info!(period = %period, "获取当年分红");
-
-    let df = client
-        .query(
-            "dividend",
-            &[("end_date", period.as_str())],
-            Some("ts_code,end_date,cash_div_tax,stk_div"),
-        )
-        .await
-        .context("获取分红失败")?;
-
-    if df.height() == 0 {
-        return Ok(df);
-    }
-
-    // 按 ts_code 汇总分红总额
-    let df = df
-        .lazy()
-        .with_column(
-            col("cash_div_tax")
-                .cast(DataType::Float64)
-                .fill_null(lit(0.0)),
-        )
-        .group_by([col("ts_code")])
-        .agg([col("cash_div_tax").sum().alias("current_dividend_total")])
-        .collect()?;
-
-    info!(rows = df.height(), period = %period, "当年分红完成");
-    Ok(df)
-}
-
 /// 获取十年净利润汇总。
 ///
 /// 返回 DataFrame 包含 `ts_code`, `sum_net_income_10y`。
@@ -132,7 +93,7 @@ pub async fn get_10y_income(
         let period = format!("{}1231", year);
         let df = client
             .query(
-                "income",
+                "income_vip",
                 &[("period", period.as_str()), ("report_type", "1")],
                 Some("ts_code,end_date,n_income"),
             )
@@ -178,74 +139,6 @@ pub async fn get_10y_income(
     Ok(result)
 }
 
-/// 获取十年分红汇总。
-///
-/// 返回 DataFrame 包含 `ts_code`, `sum_dividend_10y`。
-pub async fn get_10y_dividend(
-    client: &TushareClient,
-    trade_date: &str,
-    lookback_years: usize,
-) -> Result<DataFrame> {
-    let safe_year = safe_financial_year(trade_date);
-    let start_year = safe_year - lookback_years as i32 + 1;
-
-    info!(start_year, end_year = safe_year, "获取十年分红");
-
-    let mut all_frames: Vec<DataFrame> = Vec::new();
-
-    for year in start_year..=safe_year {
-        let period = format!("{}1231", year);
-        let df = client
-            .query(
-                "dividend",
-                &[("end_date", period.as_str())],
-                Some("ts_code,end_date,cash_div_tax"),
-            )
-            .await
-            .with_context(|| format!("获取{}年分红失败", year))?;
-
-        if df.height() > 0 {
-            let df = df
-                .lazy()
-                .with_column(
-                    col("cash_div_tax")
-                        .cast(DataType::Float64)
-                        .fill_null(lit(0.0)),
-                )
-                .group_by([col("ts_code")])
-                .agg([col("cash_div_tax").sum().alias("year_div")])
-                .collect()?;
-            all_frames.push(df);
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-
-    if all_frames.is_empty() {
-        let schema = Schema::from_iter([
-            Field::new("ts_code".into(), DataType::String),
-            Field::new("sum_dividend_10y".into(), DataType::Float64),
-        ]);
-        return Ok(DataFrame::empty_with_schema(&schema));
-    }
-
-    let combined = concat(
-        all_frames
-            .iter()
-            .map(|df| df.clone().lazy())
-            .collect::<Vec<_>>(),
-        Default::default(),
-    )?;
-
-    let result = combined
-        .group_by([col("ts_code")])
-        .agg([col("year_div").sum().alias("sum_dividend_10y")])
-        .collect()?;
-
-    info!(rows = result.height(), "十年分红汇总完成");
-    Ok(result)
-}
-
 /// 获取净资产数据（资产负债表）。
 pub async fn get_net_equity(client: &TushareClient, trade_date: &str) -> Result<DataFrame> {
     let safe_year = safe_financial_year(trade_date);
@@ -255,7 +148,7 @@ pub async fn get_net_equity(client: &TushareClient, trade_date: &str) -> Result<
 
     let df = client
         .query(
-            "balancesheet",
+            "balancesheet_vip",
             &[("period", period.as_str()), ("report_type", "1")],
             Some("ts_code,end_date,total_hldr_eqy_exc_min_int"),
         )
