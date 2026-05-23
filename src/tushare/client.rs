@@ -183,6 +183,7 @@ impl TushareClient {
         // 如 index_daily 同一标的跨日期范围，ts_code 不变但 trade_date 推进。
         let progress_keys: &[&str] = Self::progress_key_fields(api_name);
         let user_fields = fields.map(|f| f.to_string());
+        // fields=None 时 Tushare 返回全部默认列，已包含进度键，不注入字段列表。
         let effective_fields = if paginate.is_some() {
             Self::ensure_pagination_fields(user_fields.as_deref(), progress_keys)
         } else {
@@ -496,8 +497,12 @@ impl TushareClient {
     }
 
     /// 确保 fields 包含分页进度所需的键字段。
+    /// 当 fields=None 时返回 None（Tushare 默认返回全部列，已包含进度键）。
     fn ensure_pagination_fields(fields: Option<&str>, keys: &[&str]) -> Option<String> {
-        let base = fields.unwrap_or("");
+        let base = match fields {
+            Some(f) => f,
+            None => return None,
+        };
         let existing: Vec<&str> = base.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
         let mut out = base.to_string();
         for k in keys {
