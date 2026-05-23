@@ -183,6 +183,7 @@ impl TushareClient {
         let mut all_fields: Vec<String> = Vec::new();
         let mut all_items: Vec<Vec<serde_json::Value>> = Vec::new();
         let mut prev_first: String = String::new();
+        let mut guard_broken: Option<&str> = None;
         let mut offset = 0;
         let mut page = 0;
 
@@ -232,15 +233,10 @@ impl TushareClient {
                 break;
             }
 
-            // 进度守卫：比较本页首行与上页首行，相同则 offset 未生效
-            let this_first = Self::item_first_repr(&data.items[0]);
+            // 进度守卫：hash 整行比较，检测 offset 是否实际推进
+            let this_first = Self::row_hash_repr(&data.items[0]);
             if page > 0 && this_first == prev_first {
-                tracing::warn!(
-                    api = api_name,
-                    page,
-                    total = all_items.len(),
-                    "分页首行重复（offset 可能未被 endpoint 支持），停止分页"
-                );
+                guard_broken = Some("分页首行重复，offset 可能未被 endpoint 支持");
                 break;
             }
             prev_first = this_first;
@@ -260,13 +256,7 @@ impl TushareClient {
 
             if has_more {
                 if page >= MAX_PAGES {
-                    tracing::warn!(
-                        api = api_name,
-                        pages = page + 1,
-                        max_pages = MAX_PAGES,
-                        rows = all_items.len(),
-                        "超过最大分页数，停止分页"
-                    );
+                    guard_broken = Some("超过最大分页数");
                     break;
                 }
                 page += 1;
@@ -283,6 +273,16 @@ impl TushareClient {
             }
         }
 
+        if let Some(reason) = guard_broken {
+            bail!(
+                "Tushare 分页失败 ({}): {}（已累计 {} 行，page={}）。缓存未写入。",
+                api_name,
+                reason,
+                all_items.len(),
+                page
+            );
+        }
+
         let df = self.response_to_dataframe(&all_fields, &all_items)?;
 
         if page > 0 {
@@ -291,7 +291,7 @@ impl TushareClient {
             info!(api = api_name, rows = df.height(), "请求完成");
         }
 
-        // 保存合并后的完整结果
+        // 保存合并后的完整结果（仅分页成功时到达此处）
         if let Some(pg_cache) = &self.pg_cache {
             pg_cache
                 .save_raw(
@@ -434,22 +434,10 @@ impl TushareClient {
         Self::build_cache_key(api_name, &param_map, fields)
     }
 
-    /// 将 items 首行的前两个字段拼接为比较串，用于分页进度检测。
-    fn item_first_repr(row: &[serde_json::Value]) -> String {
-        let a = row.first().map(Self::value_str).unwrap_or_default();
-        let b = row.get(1).map(Self::value_str).unwrap_or_default();
-        format!("{a}|{b}")
-    }
-
-    /// serde_json::Value → 字符串表示
-    fn value_str(v: &serde_json::Value) -> String {
-        match v {
-            serde_json::Value::Null => String::new(),
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::Bool(b) => b.to_string(),
-            _ => v.to_string(),
-        }
+    /// 将整行序列化为字符串用于分页进度比较。
+    /// 无论调用方请求什么字段顺序，重复行会产生相同的序列化结果。
+    fn row_hash_repr(row: &[serde_json::Value]) -> String {
+        serde_json::to_string(row).unwrap_or_default()
     }
 
     fn build_cache_key(
