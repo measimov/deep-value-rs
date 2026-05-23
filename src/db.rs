@@ -66,6 +66,7 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
             name text,
             industry text,
             list_status text,
+            list_date text,
             updated_at timestamptz not null default now()
         )
         "#,
@@ -206,6 +207,34 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
         r#"
         create index if not exists idx_tushare_fina_indicator_end_date
             on deep_value.tushare_fina_indicator(end_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_cashflow (
+            ts_code text not null,
+            end_date text not null,
+            report_type text not null,
+            n_cashflow_act double precision,
+            updated_at timestamptz not null default now(),
+            primary key (ts_code, end_date, report_type)
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_cashflow_end_date
+            on deep_value.tushare_cashflow(end_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_disclosure_date (
+            ts_code text not null,
+            end_date text not null,
+            ann_date text,
+            actual_date text,
+            updated_at timestamptz not null default now(),
+            primary key (ts_code, end_date)
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_disclosure_date_end_date
+            on deep_value.tushare_disclosure_date(end_date)
         "#,
     ];
 

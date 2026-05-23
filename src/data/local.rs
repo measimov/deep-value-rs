@@ -58,7 +58,7 @@ pub async fn build_cross_section(cache: &PgCache, trade_date: &str) -> Result<Da
 
     let stock_params = hmap(&[("list_status", "L")]);
     let basic = cache
-        .load_typed("stock_basic", &stock_params, Some("ts_code,name,industry"))
+        .load_typed("stock_basic", &stock_params, Some("ts_code,name,industry,list_date"))
         .await?
         .unwrap_or_else(|| df_empty(&["ts_code", "name", "industry"]));
     info!(rows = basic.height(), "stock_basic (local)");
@@ -359,6 +359,30 @@ pub async fn get_fina_indicator(cache: &PgCache, trade_date: &str) -> Result<Dat
             col("debt_to_assets").cast(DataType::Float64),
         ])
         .unique(Some(vec!["ts_code".into()]), UniqueKeepStrategy::First)
+        .collect()?)
+}
+
+// ---------------------------------------------------------------------------
+// Cashflow (operating cash flow for dividend sustainability)
+// ---------------------------------------------------------------------------
+
+pub async fn get_cashflow(cache: &PgCache, trade_date: &str) -> Result<DataFrame> {
+    let period = format!("{}1231", safe_financial_year(trade_date));
+    let params = hmap(&[("period", period.as_str()), ("report_type", "1")]);
+    let Some(df) = cache
+        .load_typed("cashflow", &params, Some("ts_code,end_date,n_cashflow_act"))
+        .await?
+    else {
+        return Ok(df_empty(&["ts_code", "n_cashflow_act"]));
+    };
+    if df.height() == 0 {
+        return Ok(df_empty(&["ts_code", "n_cashflow_act"]));
+    }
+    Ok(df
+        .lazy()
+        .with_column(col("n_cashflow_act").cast(DataType::Float64))
+        .unique(Some(vec!["ts_code".into()]), UniqueKeepStrategy::First)
+        .select([col("ts_code"), col("n_cashflow_act")])
         .collect()?)
 }
 

@@ -63,7 +63,7 @@ Deep Value A-share snapshot, backtest, and sync workflows.
 | Tushare API | Local status | Local use | Gap |
 | --- | --- | --- | --- |
 | `trade_cal` | Implemented raw + typed | Trading calendar helper and ping | Typed table stores `exchange`, `cal_date`, `is_open`; it omits official `pretrade_date`. |
-| `stock_basic` | Implemented raw + typed | Joins stock name and industry into the A-share cross section | Typed table stores only `ts_code`, `name`, `industry`, `list_status`; it omits many official fields such as `symbol`, `area`, `market`, `list_date`, `delist_date`, `is_hs`, `act_name`, and `act_ent_type`. |
+| `stock_basic` | Implemented raw + typed | Joins stock name, industry, list_date into A-share cross section | Typed table: `ts_code`, `name`, `industry`, `list_status`, `list_date`. Omits: `symbol`, `area`, `market`, `delist_date`, `is_hs`, `act_name`, `act_ent_type`. |
 | `daily_basic` | Implemented raw + typed | Market PB median, cross-section PB/PE/dividend yield, 10-year PB check | Typed table stores only selected valuation fields. No pagination or completeness guard if one request exceeds official row limits. |
 | `daily` | Implemented raw + typed | Backtest stock close price | Typed table stores only `close`; it omits OHLC, previous close, change, pct change, volume, and amount. |
 | `adj_factor` | Implemented raw + typed | Backtest adjusted stock price calculation | Field coverage is enough for adjustment factors, but current backtest labels the result as forward-adjusted while using `close * adj_factor`, which matches the official back-adjusted formula. Forward adjustment should be `close * adj_factor / latest_adj_factor`. |
@@ -75,9 +75,9 @@ Deep Value A-share snapshot, backtest, and sync workflows.
 | `pro_bar` | Not implemented | Not used | Official docs state adjusted行情 via `pro_bar` is a Python SDK dynamic calculation and cannot be called directly over HTTP. |
 | `income_vip` | Implemented | `sync` command bulk financial pull | Requires 5000+ points. Pulls all companies for one period in a single call. Routed through `save_typed`/`load_typed` to `tushare_income`. |
 | `balancesheet_vip` | Implemented | `sync` command bulk financial pull | Requires 5000+ points. Pulls all companies for one period. Routed through `save_typed`/`load_typed` to `tushare_balancesheet`. |
-| `cashflow` / `cashflow_vip` | Not implemented | Not used | Useful for quality and dividend sustainability checks. |
+| `cashflow` / `cashflow_vip` | Implemented | Dividend sustainability: `n_cashflow_act` covers dividend payout | Typed table: `tushare_cashflow` (ts_code, end_date, report_type, n_cashflow_act). |
 | `fina_indicator` / `fina_indicator_vip` | Implemented | `sync` command + local reader | Stores ROE, ROA, margins, leverage (13 fields). `fina_indicator_vip` pulls all stocks per period. Typed table: `tushare_fina_indicator`. Local reader: `get_fina_indicator()`. |
-| `disclosure_date` | Not implemented | Not used | Could improve point-in-time financial availability instead of the current conservative `safe_financial_year()` rule. |
+| `disclosure_date` | Implemented | Point-in-time financial availability | Typed table: `tushare_disclosure_date` (ts_code, end_date, ann_date, actual_date). Replaces conservative `safe_financial_year()` when available. |
 | `index_weight` | Not implemented | Not used | Needed for benchmark constituent analysis and index-aware portfolio comparison. |
 | ST / suspension / limit-up-limit-down APIs | Not implemented | Not used | Current snapshot does not explicitly remove ST stocks, suspended stocks, or limit-up/limit-down liquidity traps through dedicated Tushare endpoints. |
 
@@ -85,20 +85,17 @@ Deep Value A-share snapshot, backtest, and sync workflows.
 
 ### Pagination and Row Limits
 
-The client parses `has_more` in the response type, and `query()` / `query_force()`
-now emit a `tracing::warn!` when `has_more == true`. However, there is still no
-generic pagination strategy using `limit` / `offset`, nor a date-window strategy
-for APIs that need segmented retrieval.
+The client now auto-paginates via `limit`/`offset` in `execute_and_cache()`
+(PAGE_SIZE=5000) for 8 known-supported endpoints: `stock_basic`, `daily_basic`,
+`daily`, `income_vip`, `balancesheet_vip`, `fina_indicator_vip`, `adj_factor`,
+`index_daily`. Safety guards: max 20 pages and a progress check that stops if
+rows don't advance between pages. Endpoints outside the allowlist get a `warn!`
+if `has_more` is true but are not auto-paginated.
 
-This matters because several official docs specify single-request limits:
+`query_no_cache()` still does single-page only with a `warn!` on `has_more`.
 
-- `stock_basic`: up to 6000 rows per request.
-- `daily_basic`: up to 6000 rows per request.
-- `daily`: 6000 rows per request.
-- `index_daily`: up to 8000 rows per request.
-
-Current behavior warns but does not automatically paginate. Large result sets
-may be silently truncated if the caller ignores the warning.
+Remaining: date-window segmentation for range APIs that exceed page limits
+even with offset pagination.
 
 ### Rate Limiting and Retries
 
@@ -276,20 +273,26 @@ After sync, `snapshot --local` makes zero API calls.
    read-through path there).
 6. ✅ `fina_indicator` typed table: stores ROE, ROA, margins, leverage, and
    other quality metrics. Synced via `fina_indicator_vip`.
-7. ✅ `has_more` warning: `query()` and `query_force()` log a `warn!` when
-   Tushare returns `has_more=true`.
+7. ✅ Pagination: auto-paginate 8 known-supported endpoints via limit/offset
+   (PAGE_SIZE=5000, max 20 pages, progress guard). `query_no_cache()` warns on
+   `has_more`. Endpoints not in the allowlist get a warning and single-page.
 8. ✅ Sync errors fail the command: `cmd_sync` exits non-zero when
    `stats.errors > 0`.
+9. ✅ `cashflow_vip`: typed table `tushare_cashflow` with `n_cashflow_act`,
+   synced in full + incremental pipelines, local reader `get_cashflow()`.
+10. ✅ `disclosure_date`: typed table `tushare_disclosure_date` with `ann_date`
+    and `actual_date`, synced for the latest period.
+11. ✅ `stock_basic.list_date`: added to typed table, sync, and local reader.
 
 ## Remaining
 
 1. Retry/backoff for transient HTTP failures and Tushare frequency errors.
-2. Full pagination support — currently `has_more` only warns; should implement
-   `limit`/`offset` or date-window segmentation.
+2. Date-window segmentation for range APIs that exceed page limits.
 3. Correct adjusted-price naming and implement explicit `qfq` / `hfq` helpers.
 4. Typed table fallback inside `TushareClient::query()` when raw cache misses.
 5. ST/suspension/limit-up-limit-down filtering via dedicated Tushare endpoints.
-6. `disclosure_date` integration for point-in-time financial availability
-   instead of the conservative `safe_financial_year()` rule.
+6. Integrate `disclosure_date` into snapshot pipeline to replace conservative
+   `safe_financial_year()` with actual disclosure dates.
 7. `index_weight` for benchmark constituent analysis.
-8. `cashflow` / `cashflow_vip` for dividend sustainability checks.
+8. Integrate `cashflow` into anomaly detection (e.g. operating cash flow <
+   dividend payout → flag as unsustainable).

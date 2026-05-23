@@ -48,7 +48,7 @@ pub async fn run_sync(
         &mut stats,
         "stock_basic",
         &[("list_status", "L")],
-        Some("ts_code,name,industry,list_status"),
+        Some("ts_code,name,industry,list_status,list_date"),
     )
     .await?;
 
@@ -90,7 +90,16 @@ pub async fn run_sync(
         force_step(client, &limiter, &mut stats, "fina_indicator_vip",
             &[("period", period.as_str()), ("report_type", "1")],
             Some("ts_code,end_date,roe,roa,grossprofit_margin,netprofit_margin,debt_to_assets,current_ratio,bps,eps,cfps,or_yoy,profit_dedt")).await?;
+        force_step(client, &limiter, &mut stats, "cashflow_vip",
+            &[("period", period.as_str()), ("report_type", "1")],
+            Some("ts_code,end_date,n_cashflow_act")).await?;
     }
+
+    // disclosure_date (latest period only)
+    let disc_period = format!("{}1231", fin_end);
+    force_step(client, &limiter, &mut stats, "disclosure_date",
+        &[("end_date", disc_period.as_str())],
+        Some("ts_code,end_date,ann_date,actual_date")).await?;
 
     // 6. fina_audit (per stock, latest period)
     let audit_period = format!("{}1231", fin_end);
@@ -252,6 +261,13 @@ async fn sync_financial_incremental(
         } else {
             stats.skipped += 1;
         }
+        if !income_periods.contains(&period) {
+            force_step(client, &limiter, &mut stats, "cashflow_vip",
+                &[("period", period.as_str()), ("report_type", "1")],
+                Some("ts_code,end_date,n_cashflow_act")).await?;
+        } else {
+            stats.skipped += 1;
+        }
     }
 
     // 新上市股票：fina_audit + dividend
@@ -295,7 +311,7 @@ async fn sync_meta_incremental(
 
     force_step(client, &limiter, &mut stats, "stock_basic",
         &[("list_status", "L")],
-        Some("ts_code,name,industry,list_status")).await?;
+        Some("ts_code,name,industry,list_status,list_date")).await?;
 
     force_step(client, &limiter, &mut stats, "trade_cal",
         &[("exchange", "SSE"),

@@ -148,6 +148,10 @@ impl TushareClient {
     }
 
     /// 发送 HTTP 请求，自动处理分页（has_more），写入 raw + typed 缓存。
+    ///
+    /// 仅对已知支持 limit/offset 的 endpoint 启用自动分页（已验证：
+    /// stock_basic, daily_basic, daily, balancesheet_vip, index_daily）。
+    /// 其他 endpoint 若返回 has_more 则仅 warn，不自动分页。
     async fn execute_and_cache(
         &self,
         api_name: &str,
@@ -155,17 +159,37 @@ impl TushareClient {
         fields: Option<&str>,
     ) -> Result<DataFrame> {
         const PAGE_SIZE: usize = 5000;
+        const MAX_PAGES: usize = 20;
 
+        /// 已知支持 limit/offset 分页的 Tushare endpoint。
+        fn pagination_supported(api: &str) -> bool {
+            matches!(
+                api,
+                "stock_basic"
+                    | "daily_basic"
+                    | "daily"
+                    | "balancesheet_vip"
+                    | "income_vip"
+                    | "fina_indicator_vip"
+                    | "adj_factor"
+                    | "index_daily"
+            )
+        }
+
+        let paginate = pagination_supported(api_name);
         let cache_key = Self::build_cache_key(api_name, param_map, fields);
         let mut all_fields: Vec<String> = Vec::new();
         let mut all_items: Vec<Vec<serde_json::Value>> = Vec::new();
+        let mut prev_count = 0;
         let mut offset = 0;
         let mut page = 0;
 
         loop {
             let mut paginated = param_map.clone();
-            paginated.insert("limit".to_string(), PAGE_SIZE.to_string());
-            paginated.insert("offset".to_string(), offset.to_string());
+            if paginate {
+                paginated.insert("limit".to_string(), PAGE_SIZE.to_string());
+                paginated.insert("offset".to_string(), offset.to_string());
+            }
 
             let request = match fields {
                 Some(f) => TushareRequest::with_fields(api_name, &self.token, paginated, f),
@@ -205,8 +229,38 @@ impl TushareClient {
             all_items.extend(data.items);
 
             let has_more = data.has_more.unwrap_or(false) && row_count > 0;
+
+            if !paginate && has_more {
+                tracing::warn!(
+                    api = api_name,
+                    rows = row_count,
+                    "Tushare 返回 has_more=true，但此 endpoint 不在分页白名单中，结果可能不完整"
+                );
+                break;
+            }
+
             if has_more {
+                // 安全守卫：如果本页没有新增行，说明 offset 未生效，停止
+                if all_items.len() == prev_count {
+                    tracing::warn!(
+                        api = api_name,
+                        total = all_items.len(),
+                        "分页未推进（offset 可能未被 endpoint 支持），停止分页"
+                    );
+                    break;
+                }
+                if page >= MAX_PAGES {
+                    tracing::warn!(
+                        api = api_name,
+                        pages = page + 1,
+                        max_pages = MAX_PAGES,
+                        rows = all_items.len(),
+                        "超过最大分页数，停止分页"
+                    );
+                    break;
+                }
                 page += 1;
+                prev_count = all_items.len();
                 offset += PAGE_SIZE;
                 info!(
                     api = api_name,
@@ -283,6 +337,13 @@ impl TushareClient {
         }
 
         let data = body.data.context("Tushare 返回数据为空")?;
+        if data.has_more.unwrap_or(false) {
+            tracing::warn!(
+                api = api_name,
+                rows = data.items.len(),
+                "query_no_cache: has_more=true，单页结果可能不完整。使用 query() 或 query_force() 以自动分页"
+            );
+        }
         self.response_to_dataframe(&data.fields, &data.items)
     }
 
