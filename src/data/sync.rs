@@ -237,6 +237,7 @@ async fn sync_financial_incremental(
     let income_periods = cache.existing_income_periods().await?;
     let balance_periods = cache.existing_balancesheet_periods().await?;
     let indicator_periods = cache.existing_fina_indicator_periods().await?;
+    let cashflow_periods = cache.existing_cashflow_periods().await?;
 
     for year in fin_start..=fin_end {
         let period = format!("{year}1231");
@@ -261,7 +262,7 @@ async fn sync_financial_incremental(
         } else {
             stats.skipped += 1;
         }
-        if !income_periods.contains(&period) {
+        if !cashflow_periods.contains(&period) {
             force_step(client, &limiter, &mut stats, "cashflow_vip",
                 &[("period", period.as_str()), ("report_type", "1")],
                 Some("ts_code,end_date,n_cashflow_act")).await?;

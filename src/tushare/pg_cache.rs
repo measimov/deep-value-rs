@@ -211,6 +211,20 @@ impl PgCache {
             .collect())
     }
 
+    /// Return all distinct end_dates present in cashflow typed table.
+    pub async fn existing_cashflow_periods(&self) -> Result<HashSet<String>> {
+        let rows = sqlx::query(
+            r#"select distinct end_date from deep_value.tushare_cashflow order by end_date"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("查询 cashflow 已有期间失败")?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>("end_date").ok())
+            .collect())
+    }
+
     /// Return ts_codes that have dividend records.
     pub async fn existing_dividend_codes(&self) -> Result<HashSet<String>> {
         let rows = sqlx::query(

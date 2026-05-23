@@ -77,7 +77,7 @@ Deep Value A-share snapshot, backtest, and sync workflows.
 | `balancesheet_vip` | Implemented | `sync` command bulk financial pull | Requires 5000+ points. Pulls all companies for one period. Routed through `save_typed`/`load_typed` to `tushare_balancesheet`. |
 | `cashflow` / `cashflow_vip` | Implemented | Dividend sustainability: `n_cashflow_act` covers dividend payout | Typed table: `tushare_cashflow` (ts_code, end_date, report_type, n_cashflow_act). |
 | `fina_indicator` / `fina_indicator_vip` | Implemented | `sync` command + local reader | Stores ROE, ROA, margins, leverage (13 fields). `fina_indicator_vip` pulls all stocks per period. Typed table: `tushare_fina_indicator`. Local reader: `get_fina_indicator()`. |
-| `disclosure_date` | Implemented | Point-in-time financial availability | Typed table: `tushare_disclosure_date` (ts_code, end_date, ann_date, actual_date). Replaces conservative `safe_financial_year()` when available. |
+| `disclosure_date` | Cached, not yet integrated | Point-in-time financial availability | Typed table: `tushare_disclosure_date` (ts_code, end_date, ann_date, actual_date). Data is synced but snapshot pipeline still uses `safe_financial_year()` — integration pending. |
 | `index_weight` | Not implemented | Not used | Needed for benchmark constituent analysis and index-aware portfolio comparison. |
 | ST / suspension / limit-up-limit-down APIs | Not implemented | Not used | Current snapshot does not explicitly remove ST stocks, suspended stocks, or limit-up/limit-down liquidity traps through dedicated Tushare endpoints. |
 

@@ -171,8 +171,10 @@ impl TushareClient {
                     | "balancesheet_vip"
                     | "income_vip"
                     | "fina_indicator_vip"
+                    | "cashflow_vip"
                     | "adj_factor"
                     | "index_daily"
+                    | "disclosure_date"
             )
         }
 
