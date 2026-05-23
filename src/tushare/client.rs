@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use polars::prelude::*;
 use reqwest::Client;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::db;
 
@@ -147,52 +147,88 @@ impl TushareClient {
         self.execute_and_cache(api_name, &param_map, fields).await
     }
 
-    /// 发送 HTTP 请求，反序列化，写入 raw + typed 缓存。
+    /// 发送 HTTP 请求，自动处理分页（has_more），写入 raw + typed 缓存。
     async fn execute_and_cache(
         &self,
         api_name: &str,
         param_map: &HashMap<String, String>,
         fields: Option<&str>,
     ) -> Result<DataFrame> {
+        const PAGE_SIZE: usize = 5000;
+
         let cache_key = Self::build_cache_key(api_name, param_map, fields);
+        let mut all_fields: Vec<String> = Vec::new();
+        let mut all_items: Vec<Vec<serde_json::Value>> = Vec::new();
+        let mut offset = 0;
+        let mut page = 0;
 
-        let request = match fields {
-            Some(f) => TushareRequest::with_fields(api_name, &self.token, param_map.clone(), f),
-            None => TushareRequest::new(api_name, &self.token, param_map.clone()),
-        };
+        loop {
+            let mut paginated = param_map.clone();
+            paginated.insert("limit".to_string(), PAGE_SIZE.to_string());
+            paginated.insert("offset".to_string(), offset.to_string());
 
-        debug!(api = api_name, "发送请求...");
+            let request = match fields {
+                Some(f) => TushareRequest::with_fields(api_name, &self.token, paginated, f),
+                None => TushareRequest::new(api_name, &self.token, paginated),
+            };
 
-        let response = self
-            .http
-            .post(TUSHARE_API_URL)
-            .json(&request)
-            .send()
-            .await
-            .context("HTTP 请求失败")?;
+            if page == 0 {
+                debug!(api = api_name, "发送请求...");
+            } else {
+                debug!(api = api_name, page, offset, "分页请求...");
+            }
 
-        let body = response
-            .json::<TushareResponse>()
-            .await
-            .context("JSON 解析失败")?;
+            let response = self
+                .http
+                .post(TUSHARE_API_URL)
+                .json(&request)
+                .send()
+                .await
+                .context("HTTP 请求失败")?;
 
-        if !body.is_ok() {
-            bail!("Tushare API 错误 ({}): {}", api_name, body.error_message());
+            let body = response
+                .json::<TushareResponse>()
+                .await
+                .context("JSON 解析失败")?;
+
+            if !body.is_ok() {
+                bail!("Tushare API 错误 ({}): {}", api_name, body.error_message());
+            }
+
+            let data = body.data.context("Tushare 返回数据为空")?;
+
+            if page == 0 {
+                all_fields = data.fields.clone();
+            }
+
+            let row_count = data.items.len();
+            all_items.extend(data.items);
+
+            let has_more = data.has_more.unwrap_or(false) && row_count > 0;
+            if has_more {
+                page += 1;
+                offset += PAGE_SIZE;
+                info!(
+                    api = api_name,
+                    page,
+                    offset,
+                    accumulated = all_items.len(),
+                    "分页继续"
+                );
+            } else {
+                break;
+            }
         }
 
-        let data = body.data.context("Tushare 返回数据为空")?;
+        let df = self.response_to_dataframe(&all_fields, &all_items)?;
 
-        if data.has_more.unwrap_or(false) {
-            warn!(
-                api = api_name,
-                "Tushare 返回 has_more=true，当前未实现分页，结果可能不完整"
-            );
+        if page > 0 {
+            info!(api = api_name, pages = page + 1, rows = df.height(), "分页请求完成");
+        } else {
+            info!(api = api_name, rows = df.height(), "请求完成");
         }
 
-        let df = self.response_to_dataframe(&data.fields, &data.items)?;
-
-        info!(api = api_name, rows = df.height(), "请求完成");
-
+        // 保存合并后的完整结果
         if let Some(pg_cache) = &self.pg_cache {
             pg_cache
                 .save_raw(
@@ -200,12 +236,12 @@ impl TushareClient {
                     api_name,
                     param_map,
                     fields,
-                    &data.fields,
-                    &data.items,
+                    &all_fields,
+                    &all_items,
                 )
                 .await?;
             pg_cache
-                .save_typed(api_name, param_map, &data.fields, &data.items)
+                .save_typed(api_name, param_map, &all_fields, &all_items)
                 .await?;
         }
 
