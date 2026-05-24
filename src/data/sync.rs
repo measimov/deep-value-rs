@@ -34,7 +34,7 @@ pub async fn run_sync(
     client: &TushareClient,
     start_date: &str,
     end_date: &str,
-    anniversary_mmdd: &str,
+    _anniversary_mmdd: &str,
     delay_ms: u64,
 ) -> Result<SyncStats> {
     let limiter = RateLimiter::new(delay_ms);
@@ -58,13 +58,22 @@ pub async fn run_sync(
         return Ok(stats);
     }
 
-    // 2. daily_basic (yearly anniversary snapshots for 10y PB max)
+    // 2. daily_basic (monthly snapshots for backtest rebalancing + 10y PB max)
     let start_year: i32 = start_date[..4].parse().unwrap_or(2015);
     let end_year: i32 = end_date[..4].parse().unwrap_or(2025);
     let pb_start_year = (start_year - 9).max(1990);
+    let mut daily_basic_dates: Vec<String> = Vec::new();
 
     for year in pb_start_year..=end_year {
-        let date = format!("{year}{anniversary_mmdd}");
+        for month in 1..=12 {
+            daily_basic_dates.push(format!("{year}{month:02}15"));
+        }
+    }
+    // dedup + sort
+    daily_basic_dates.sort();
+    daily_basic_dates.dedup();
+
+    for date in &daily_basic_dates {
         force_step(
             client,
             &limiter,
@@ -121,9 +130,8 @@ pub async fn run_sync(
         &[("exchange", "SSE"), ("start_date", start_date), ("end_date", end_date), ("is_open", "1")],
         Some("exchange,cal_date,is_open")).await?;
 
-    // 9. daily + adj_factor (most recent 60 trading days for backtest)
-    let trade_dates = get_trade_dates(client, &limiter, &mut stats, end_date, 60).await?;
-    for date in &trade_dates {
+    // 9. daily + adj_factor (monthly over full range for backtest pricing)
+    for date in &daily_basic_dates {
         force_step(client, &limiter, &mut stats, "daily",
             &[("trade_date", date.as_str())],
             Some("ts_code,trade_date,close")).await?;

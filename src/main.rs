@@ -441,18 +441,19 @@ async fn pick_available_rebalance_dates(
     start: &str,
     end: &str,
 ) -> Result<Vec<String>> {
-    let mut dates = Vec::new();
-    for year in start[..4].parse::<i32>()?..=end[..4].parse::<i32>()? {
-        let candidate = format!("{year}0520");
-        let params = std::collections::HashMap::from([("trade_date".to_string(), candidate.clone())]);
+    let trade_dates = local::get_trade_cal(cache, start, end).await?;
+    let mut dates: Vec<String> = Vec::new();
+    for d in &trade_dates {
+        if d.as_str() < start || d.as_str() >= end {
+            continue;
+        }
+        let params = std::collections::HashMap::from([("trade_date".to_string(), d.clone())]);
         if let Ok(Some(df)) = cache.load_typed("daily_basic", &params, Some("ts_code")).await {
-            if df.height() > 0 && candidate.as_str() >= start && candidate.as_str() <= end {
-                dates.push(candidate);
+            if df.height() > 0 {
+                dates.push(d.clone());
             }
         }
     }
-    // 去掉等于 end 的日期——end_date 用于最后净值计算，无需再平衡
-    dates.retain(|d| d.as_str() < end);
     Ok(dates)
 }
 
