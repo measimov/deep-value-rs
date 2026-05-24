@@ -237,7 +237,7 @@ async fn cmd_sync(
             .await?
     } else {
         let ann = anniversary.unwrap_or(&end[4..]);
-        sync::run_sync(&client, start, end, ann, delay_ms).await?
+        sync::run_sync(&client, client.pg_cache().unwrap(), start, end, ann, delay_ms).await?
     };
 
     println!(

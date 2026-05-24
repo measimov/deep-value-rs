@@ -30,8 +30,10 @@ pub struct SyncStats {
 // =========================================================================
 
 /// 全量同步：拉取 start..end 范围内所有数据到 typed 表。
+/// 已存在于 typed 表中的数据会被跳过（避免重复拉取）。
 pub async fn run_sync(
     client: &TushareClient,
+    cache: &PgCache,
     start_date: &str,
     end_date: &str,
     _anniversary_mmdd: &str,
@@ -41,16 +43,12 @@ pub async fn run_sync(
     let started = Instant::now();
     let mut stats = SyncStats::default();
 
-    // 1. stock_basic
+    // 1. stock_basic (always refresh — small, fast)
     force_step(
-        client,
-        &limiter,
-        &mut stats,
-        "stock_basic",
-        &[("list_status", "L")],
+        client, &limiter, &mut stats,
+        "stock_basic", &[("list_status", "L")],
         Some("ts_code,name,industry,list_status,list_date"),
-    )
-    .await?;
+    ).await?;
 
     let codes = fetch_listed_codes(client, &limiter, &mut stats).await?;
     if codes.is_empty() {
@@ -58,80 +56,105 @@ pub async fn run_sync(
         return Ok(stats);
     }
 
-    // 2. daily_basic (monthly snapshots for backtest rebalancing + 10y PB max)
+    // 2. daily_basic — skip dates already in typed table
     let start_year: i32 = start_date[..4].parse().unwrap_or(2015);
     let end_year: i32 = end_date[..4].parse().unwrap_or(2025);
     let pb_start_year = (start_year - 9).max(1990);
     let mut daily_basic_dates: Vec<String> = Vec::new();
-
     for year in pb_start_year..=end_year {
         for month in 1..=12 {
             daily_basic_dates.push(format!("{year}{month:02}15"));
         }
     }
-    // dedup + sort
     daily_basic_dates.sort();
     daily_basic_dates.dedup();
 
+    let existing_db = cache.existing_daily_basic_dates().await?;
     for date in &daily_basic_dates {
-        force_step(
-            client,
-            &limiter,
-            &mut stats,
-            "daily_basic",
-            &[("trade_date", date.as_str())],
+        if existing_db.contains(date) {
+            stats.skipped += 1;
+            continue;
+        }
+        force_step(client, &limiter, &mut stats,
+            "daily_basic", &[("trade_date", date.as_str())],
             Some("ts_code,pb,pe_ttm,dv_ratio,total_mv"),
-        )
-        .await?;
+        ).await?;
     }
 
-    // 3-5. income_vip, balancesheet_vip, fina_indicator_vip
+    // 3-6. VIP financials — skip periods already in typed tables
     let fin_start = safe_financial_year(start_date) - 9;
     let fin_end = safe_financial_year(end_date);
+    let existing_inc = cache.existing_income_periods().await?;
+    let existing_bs = cache.existing_balancesheet_periods().await?;
+    let existing_fi = cache.existing_fina_indicator_periods().await?;
+    let existing_cf = cache.existing_cashflow_periods().await?;
+
     for year in fin_start..=fin_end {
         let period = format!("{year}1231");
-        force_step(client, &limiter, &mut stats, "income_vip",
-            &[("period", period.as_str()), ("report_type", "1")],
-            Some("ts_code,end_date,n_income")).await?;
-        force_step(client, &limiter, &mut stats, "balancesheet_vip",
-            &[("period", period.as_str()), ("report_type", "1")],
-            Some("ts_code,end_date,total_hldr_eqy_exc_min_int")).await?;
-        force_step(client, &limiter, &mut stats, "fina_indicator_vip",
-            &[("period", period.as_str()), ("report_type", "1")],
-            Some("ts_code,end_date,roe,roa,grossprofit_margin,netprofit_margin,debt_to_assets,current_ratio,bps,eps,cfps,or_yoy,profit_dedt")).await?;
-        force_step(client, &limiter, &mut stats, "cashflow_vip",
-            &[("period", period.as_str()), ("report_type", "1")],
-            Some("ts_code,end_date,n_cashflow_act")).await?;
+        if !existing_inc.contains(&period) {
+            force_step(client, &limiter, &mut stats, "income_vip",
+                &[("period", period.as_str()), ("report_type", "1")],
+                Some("ts_code,end_date,n_income")).await?;
+        } else { stats.skipped += 1; }
+        if !existing_bs.contains(&period) {
+            force_step(client, &limiter, &mut stats, "balancesheet_vip",
+                &[("period", period.as_str()), ("report_type", "1")],
+                Some("ts_code,end_date,total_hldr_eqy_exc_min_int")).await?;
+        } else { stats.skipped += 1; }
+        if !existing_fi.contains(&period) {
+            force_step(client, &limiter, &mut stats, "fina_indicator_vip",
+                &[("period", period.as_str()), ("report_type", "1")],
+                Some("ts_code,end_date,roe,roa,grossprofit_margin,netprofit_margin,debt_to_assets,current_ratio,bps,eps,cfps,or_yoy,profit_dedt")).await?;
+        } else { stats.skipped += 1; }
+        if !existing_cf.contains(&period) {
+            force_step(client, &limiter, &mut stats, "cashflow_vip",
+                &[("period", period.as_str()), ("report_type", "1")],
+                Some("ts_code,end_date,n_cashflow_act")).await?;
+        } else { stats.skipped += 1; }
     }
 
-    // disclosure_date (latest period only)
+    // disclosure_date (latest period)
     let disc_period = format!("{}1231", fin_end);
     force_step(client, &limiter, &mut stats, "disclosure_date",
         &[("end_date", disc_period.as_str())],
         Some("ts_code,end_date,ann_date,actual_date")).await?;
 
-    // 6. fina_audit (per stock, latest period)
+    // 7. fina_audit — skip stocks already covered for this period
     let audit_period = format!("{}1231", fin_end);
+    let existing_audit = cache.existing_audit_codes(&audit_period).await?;
     for code in &codes {
+        if existing_audit.contains(code) {
+            stats.skipped += 1;
+            continue;
+        }
         force_step(client, &limiter, &mut stats, "fina_audit",
             &[("ts_code", code.as_str()), ("period", audit_period.as_str())],
             Some("ts_code,audit_agency")).await?;
     }
 
-    // 7. dividend (per stock, full history)
+    // 8. dividend — skip stocks already covered
+    let existing_div = cache.existing_dividend_codes().await?;
     for code in &codes {
+        if existing_div.contains(code) {
+            stats.skipped += 1;
+            continue;
+        }
         force_step(client, &limiter, &mut stats, "dividend",
             &[("ts_code", code.as_str())],
             Some("ts_code,end_date,cash_div_tax,stk_div")).await?;
     }
 
-    // 8. trade_cal
+    // 9. trade_cal
     force_step(client, &limiter, &mut stats, "trade_cal",
         &[("exchange", "SSE"), ("start_date", start_date), ("end_date", end_date), ("is_open", "1")],
         Some("exchange,cal_date,is_open")).await?;
 
-    // 9. daily + adj_factor (monthly over full range for backtest pricing)
+    // 10. daily + adj_factor — skip dates already covered
     for date in &daily_basic_dates {
+        if existing_db.contains(date) {
+            stats.skipped += 2;
+            continue;
+        }
         force_step(client, &limiter, &mut stats, "daily",
             &[("trade_date", date.as_str())],
             Some("ts_code,trade_date,close")).await?;
@@ -140,13 +163,13 @@ pub async fn run_sync(
             Some("ts_code,trade_date,adj_factor")).await?;
     }
 
-    // 10. index_daily (benchmark: 000300.SH)
+    // 11. index_daily
     force_step(client, &limiter, &mut stats, "index_daily",
         &[("ts_code", "000300.SH"), ("start_date", start_date), ("end_date", end_date)],
         Some("ts_code,trade_date,close")).await?;
 
     stats.elapsed_secs = started.elapsed().as_secs_f64();
-    info!(calls = stats.total_calls, rows = stats.total_rows, errors = stats.errors, elapsed = stats.elapsed_secs, "全量同步完成");
+    info!(calls = stats.total_calls, rows = stats.total_rows, skipped = stats.skipped, errors = stats.errors, elapsed = stats.elapsed_secs, "全量同步完成");
     Ok(stats)
 }
 
