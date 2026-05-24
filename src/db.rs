@@ -278,7 +278,7 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
         r#"alter table deep_value.tushare_balancesheet add column if not exists total_cur_liab double precision"#,
         r#"alter table deep_value.tushare_balancesheet add column if not exists total_liab double precision"#,
         r#"alter table deep_value.tushare_cashflow add column if not exists n_cashflow_inv_act double precision"#,
-        r#"alter table deep_value.tushare_cashflow add column if not exists n_cashflow_fin_act double precision"#,
+        r#"alter table deep_value.tushare_cashflow add column if not exists n_cash_flows_fnc_act double precision"#,
         r#"alter table deep_value.tushare_fina_audit add column if not exists ann_date text"#,
         r#"alter table deep_value.tushare_fina_audit add column if not exists end_date text"#,
         r#"alter table deep_value.tushare_fina_audit add column if not exists audit_result text"#,
@@ -286,7 +286,7 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
         r#"alter table deep_value.tushare_dividend add column if not exists record_date text"#,
         r#"alter table deep_value.tushare_dividend add column if not exists ex_date text"#,
         r#"alter table deep_value.tushare_dividend add column if not exists ann_date text"#,
-        r#"alter table deep_value.tushare_dividend add column if not exists div_progress text"#,
+        r#"alter table deep_value.tushare_dividend add column if not exists div_proc text"#,
     ];
 
     let mut tx = pool.begin().await.context("启动 schema 初始化事务失败")?;

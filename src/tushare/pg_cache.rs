@@ -154,6 +154,34 @@ impl PgCache {
             .collect())
     }
 
+    /// Return all distinct trade_dates present in daily typed table.
+    pub async fn existing_daily_dates(&self) -> Result<HashSet<String>> {
+        let rows = sqlx::query(
+            r#"select distinct trade_date from deep_value.tushare_daily order by trade_date"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("查询 daily 已有日期失败")?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>("trade_date").ok())
+            .collect())
+    }
+
+    /// Return all distinct trade_dates present in adj_factor typed table.
+    pub async fn existing_adj_factor_dates(&self) -> Result<HashSet<String>> {
+        let rows = sqlx::query(
+            r#"select distinct trade_date from deep_value.tushare_adj_factor order by trade_date"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("查询 adj_factor 已有日期失败")?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>("trade_date").ok())
+            .collect())
+    }
+
     /// Return all distinct end_dates present in income typed table.
     pub async fn existing_income_periods(&self) -> Result<HashSet<String>> {
         let rows = sqlx::query(
@@ -289,16 +317,7 @@ impl PgCache {
             "dividend" => self.load_dividend(params, fields).await,
             "balancesheet" | "balancesheet_vip" => self.load_balancesheet(params, fields).await,
             "fina_audit" => self.load_fina_audit(params, fields).await,
-            "daily" => {
-                self.load_market_series(
-                    "tushare_daily",
-                    "close",
-                    params,
-                    fields,
-                    &["ts_code", "trade_date", "close"],
-                )
-                .await
-            }
+            "daily" => self.load_daily_ohlc(params, fields).await,
             "adj_factor" => {
                 self.load_market_series(
                     "tushare_adj_factor",
@@ -309,16 +328,7 @@ impl PgCache {
                 )
                 .await
             }
-            "index_daily" => {
-                self.load_market_series(
-                    "tushare_index_daily",
-                    "close",
-                    params,
-                    fields,
-                    &["trade_date", "close"],
-                )
-                .await
-            }
+            "index_daily" => self.load_index_daily_ohlc(params, fields).await,
             "fina_indicator" | "fina_indicator_vip" => {
                 self.load_fina_indicator(params, fields).await
             }
@@ -496,7 +506,7 @@ impl PgCache {
         let list_status = params.get("list_status").map(String::as_str);
         let rows = sqlx::query(
             r#"
-            select ts_code, name, industry, list_status, list_date
+            select ts_code, symbol, name, area, industry, market, list_status, list_date, is_hs
             from deep_value.tushare_stock_basic
             where ($1::text is null or list_status = $1)
             order by ts_code
@@ -508,7 +518,7 @@ impl PgCache {
         .context("读取 tushare_stock_basic 失败")?;
 
         rows_to_dataframe(
-            &requested_fields(fields, &["ts_code", "name", "industry", "list_status", "list_date"]),
+            &requested_fields(fields, &["ts_code", "symbol", "name", "area", "industry", "market", "list_status", "list_date", "is_hs"]),
             &rows,
         )
     }
@@ -523,7 +533,7 @@ impl PgCache {
         };
         let rows = sqlx::query(
             r#"
-            select ts_code, trade_date, pb, pe, pe_ttm, dv_ratio, total_mv
+            select ts_code, trade_date, pb, pe, pe_ttm, dv_ratio, total_mv, close, turnover_rate, turnover_rate_f, volume_ratio, ps, ps_ttm, total_share, float_share, free_share, circ_mv
             from deep_value.tushare_daily_basic
             where trade_date = $1
             order by ts_code
@@ -535,18 +545,11 @@ impl PgCache {
         .context("读取 tushare_daily_basic 失败")?;
 
         rows_to_dataframe(
-            &requested_fields(
-                fields,
-                &[
-                    "ts_code",
-                    "trade_date",
-                    "pb",
-                    "pe",
-                    "pe_ttm",
-                    "dv_ratio",
-                    "total_mv",
-                ],
-            ),
+            &requested_fields(fields, &[
+                "ts_code", "trade_date", "pb", "pe", "pe_ttm", "dv_ratio", "total_mv",
+                "close", "turnover_rate", "turnover_rate_f", "volume_ratio",
+                "ps", "ps_ttm", "total_share", "float_share", "free_share", "circ_mv",
+            ]),
             &rows,
         )
     }
@@ -627,7 +630,7 @@ impl PgCache {
             let row_hash = stable_row_hash("dividend", fields, row);
 
             sqlx::query(r#"
-                insert into deep_value.tushare_dividend (row_hash, ts_code, end_date, cash_div_tax, stk_div, record_date, ex_date, ann_date, div_progress)
+                insert into deep_value.tushare_dividend (row_hash, ts_code, end_date, cash_div_tax, stk_div, record_date, ex_date, ann_date, div_proc)
                 values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
                 on conflict (row_hash) do update set
                     ts_code = excluded.ts_code, end_date = excluded.end_date,
@@ -635,14 +638,14 @@ impl PgCache {
                     record_date = coalesce(excluded.record_date, deep_value.tushare_dividend.record_date),
                     ex_date = coalesce(excluded.ex_date, deep_value.tushare_dividend.ex_date),
                     ann_date = coalesce(excluded.ann_date, deep_value.tushare_dividend.ann_date),
-                    div_progress = coalesce(excluded.div_progress, deep_value.tushare_dividend.div_progress),
+                    div_proc = coalesce(excluded.div_proc, deep_value.tushare_dividend.div_proc),
                     updated_at = now()
             "#)
             .bind(row_hash).bind(ts_code).bind(end_date).bind(cash_div_tax).bind(stk_div)
             .bind(field_str_opt(fields, row, "record_date"))
             .bind(field_str_opt(fields, row, "ex_date"))
             .bind(field_str_opt(fields, row, "ann_date"))
-            .bind(field_str_opt(fields, row, "div_progress"))
+            .bind(field_str_opt(fields, row, "div_proc"))
             .execute(&self.pool).await.context("写入 tushare_dividend 失败")?;
         }
 
@@ -763,7 +766,7 @@ impl PgCache {
         let report_type = params.get("report_type").map(String::as_str).unwrap_or("");
         let rows = sqlx::query(
             r#"
-            select ts_code, end_date, n_income
+            select ts_code, end_date, n_income, total_revenue, revenue, oper_cost, sell_exp, admin_exp, fin_exp
             from deep_value.tushare_income
             where end_date = $1 and report_type = $2
             order by ts_code
@@ -776,7 +779,7 @@ impl PgCache {
         .context("读取 tushare_income 失败")?;
 
         rows_to_dataframe(
-            &requested_fields(fields, &["ts_code", "end_date", "n_income"]),
+            &requested_fields(fields, &["ts_code", "end_date", "n_income", "total_revenue", "revenue", "oper_cost", "sell_exp", "admin_exp", "fin_exp"]),
             &rows,
         )
     }
@@ -791,7 +794,7 @@ impl PgCache {
         };
         let rows = sqlx::query(
             r#"
-            select ts_code, end_date, cash_div_tax, stk_div
+            select ts_code, end_date, cash_div_tax, stk_div, record_date, ex_date, ann_date, div_proc
             from deep_value.tushare_dividend
             where end_date = $1
             order by ts_code, row_hash
@@ -803,7 +806,7 @@ impl PgCache {
         .context("读取 tushare_dividend 失败")?;
 
         rows_to_dataframe(
-            &requested_fields(fields, &["ts_code", "end_date", "cash_div_tax", "stk_div"]),
+            &requested_fields(fields, &["ts_code", "end_date", "cash_div_tax", "stk_div", "record_date", "ex_date", "ann_date", "div_proc"]),
             &rows,
         )
     }
@@ -819,7 +822,7 @@ impl PgCache {
         let report_type = params.get("report_type").map(String::as_str).unwrap_or("");
         let rows = sqlx::query(
             r#"
-            select ts_code, end_date, total_hldr_eqy_exc_min_int
+            select ts_code, end_date, total_hldr_eqy_exc_min_int, total_assets, total_cur_assets, total_cur_liab, total_liab
             from deep_value.tushare_balancesheet
             where end_date = $1 and report_type = $2
             order by ts_code
@@ -832,10 +835,7 @@ impl PgCache {
         .context("读取 tushare_balancesheet 失败")?;
 
         rows_to_dataframe(
-            &requested_fields(
-                fields,
-                &["ts_code", "end_date", "total_hldr_eqy_exc_min_int"],
-            ),
+            &requested_fields(fields, &["ts_code", "end_date", "total_hldr_eqy_exc_min_int", "total_assets", "total_cur_assets", "total_cur_liab", "total_liab"]),
             &rows,
         )
     }
@@ -850,7 +850,7 @@ impl PgCache {
         };
         let rows = sqlx::query(
             r#"
-            select ts_code, audit_agency
+            select ts_code, audit_agency, ann_date, end_date, audit_result, audit_fees
             from deep_value.tushare_fina_audit
             where period = $1
             order by ts_code
@@ -862,7 +862,7 @@ impl PgCache {
         .context("读取 tushare_fina_audit 失败")?;
 
         rows_to_dataframe(
-            &requested_fields(fields, &["ts_code", "audit_agency"]),
+            &requested_fields(fields, &["ts_code", "audit_agency", "ann_date", "end_date", "audit_result", "audit_fees"]),
             &rows,
         )
     }
@@ -994,12 +994,12 @@ impl PgCache {
             };
             sqlx::query(
                 r#"
-                insert into deep_value.tushare_cashflow (ts_code, end_date, report_type, n_cashflow_act, n_cashflow_inv_act, n_cashflow_fin_act)
+                insert into deep_value.tushare_cashflow (ts_code, end_date, report_type, n_cashflow_act, n_cashflow_inv_act, n_cash_flows_fnc_act)
                 values ($1,$2,$3,$4,$5,$6)
                 on conflict (ts_code, end_date, report_type) do update set
                     n_cashflow_act = coalesce(excluded.n_cashflow_act, deep_value.tushare_cashflow.n_cashflow_act),
                     n_cashflow_inv_act = coalesce(excluded.n_cashflow_inv_act, deep_value.tushare_cashflow.n_cashflow_inv_act),
-                    n_cashflow_fin_act = coalesce(excluded.n_cashflow_fin_act, deep_value.tushare_cashflow.n_cashflow_fin_act),
+                    n_cash_flows_fnc_act = coalesce(excluded.n_cash_flows_fnc_act, deep_value.tushare_cashflow.n_cash_flows_fnc_act),
                     updated_at = now()
                 "#,
             )
@@ -1008,7 +1008,7 @@ impl PgCache {
             .bind(&report_type)
             .bind(field_f64_opt(fields, row, "n_cashflow_act"))
             .bind(field_f64_opt(fields, row, "n_cashflow_inv_act"))
-            .bind(field_f64_opt(fields, row, "n_cashflow_fin_act"))
+            .bind(field_f64_opt(fields, row, "n_cash_flows_fnc_act"))
             .execute(&self.pool)
             .await
             .context("写入 tushare_cashflow 失败")?;
@@ -1027,7 +1027,7 @@ impl PgCache {
         let report_type = params.get("report_type").map(String::as_str).unwrap_or("");
         let rows = sqlx::query(
             r#"
-            select ts_code, end_date, n_cashflow_act
+            select ts_code, end_date, n_cashflow_act, n_cashflow_inv_act, n_cash_flows_fnc_act
             from deep_value.tushare_cashflow
             where end_date = $1 and report_type = $2
             order by ts_code
@@ -1039,7 +1039,7 @@ impl PgCache {
         .await
         .context("读取 tushare_cashflow 失败")?;
         rows_to_dataframe(
-            &requested_fields(fields, &["ts_code", "end_date", "n_cashflow_act"]),
+            &requested_fields(fields, &["ts_code", "end_date", "n_cashflow_act", "n_cashflow_inv_act", "n_cash_flows_fnc_act"]),
             &rows,
         )
     }
@@ -1184,6 +1184,42 @@ impl PgCache {
             .execute(&self.pool).await.context("写入 tushare_index_daily 失败")?;
         }
         Ok(())
+    }
+
+    async fn load_daily_ohlc(
+        &self, params: &HashMap<String, String>, fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        let Some(ts_code) = params.get("ts_code") else { return Ok(None); };
+        let Some(start_date) = params.get("start_date") else { return Ok(None); };
+        let Some(end_date) = params.get("end_date") else { return Ok(None); };
+        let rows = sqlx::query(r#"
+            select ts_code, trade_date, open, high, low, close, pre_close, pct_chg, vol, amount
+            from deep_value.tushare_daily
+            where ts_code = $1 and trade_date >= $2 and trade_date <= $3
+            order by trade_date
+        "#).bind(ts_code).bind(start_date).bind(end_date)
+            .fetch_all(&self.pool).await.context("读取 tushare_daily 失败")?;
+        rows_to_dataframe(&requested_fields(fields, &[
+            "ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "pct_chg", "vol", "amount",
+        ]), &rows)
+    }
+
+    async fn load_index_daily_ohlc(
+        &self, params: &HashMap<String, String>, fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        let Some(ts_code) = params.get("ts_code") else { return Ok(None); };
+        let Some(start_date) = params.get("start_date") else { return Ok(None); };
+        let Some(end_date) = params.get("end_date") else { return Ok(None); };
+        let rows = sqlx::query(r#"
+            select ts_code, trade_date, open, high, low, close, pre_close, pct_chg, vol, amount
+            from deep_value.tushare_index_daily
+            where ts_code = $1 and trade_date >= $2 and trade_date <= $3
+            order by trade_date
+        "#).bind(ts_code).bind(start_date).bind(end_date)
+            .fetch_all(&self.pool).await.context("读取 tushare_index_daily 失败")?;
+        rows_to_dataframe(&requested_fields(fields, &[
+            "ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "pct_chg", "vol", "amount",
+        ]), &rows)
     }
 
     async fn save_market_series(
@@ -1354,7 +1390,7 @@ fn row_value_as_string(row: &sqlx::postgres::PgRow, field: &str) -> Result<Optio
         "exchange" | "cal_date" | "is_open" | "ts_code" | "trade_date" | "name" | "industry"
         | "list_status" | "list_date" | "end_date" | "audit_agency"
         | "ann_date" | "actual_date" | "symbol" | "area" | "market" | "is_hs"
-        | "record_date" | "ex_date" | "div_progress" | "audit_result" => row.try_get::<Option<String>, _>(field)?,
+        | "record_date" | "ex_date" | "div_proc" | "audit_result" => row.try_get::<Option<String>, _>(field)?,
         "pb"
         | "pe"
         | "pe_ttm"
@@ -1377,7 +1413,7 @@ fn row_value_as_string(row: &sqlx::postgres::PgRow, field: &str) -> Result<Optio
         | "cfps"
         | "or_yoy"
         | "profit_dedt"
-        | "n_cashflow_act" | "n_cashflow_inv_act" | "n_cashflow_fin_act"
+        | "n_cashflow_act" | "n_cashflow_inv_act" | "n_cash_flows_fnc_act"
         | "open" | "high" | "low" | "pre_close" | "pct_chg" | "vol" | "amount"
         | "turnover_rate" | "turnover_rate_f" | "volume_ratio" | "ps" | "ps_ttm"
         | "total_share" | "float_share" | "free_share" | "circ_mv"

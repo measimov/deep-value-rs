@@ -109,7 +109,7 @@ pub async fn run_sync(
         if !existing_cf.contains(&period) {
             force_step(client, &limiter, &mut stats, "cashflow_vip",
                 &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,n_cashflow_act,n_cashflow_inv_act,n_cashflow_fin_act")).await?;
+                Some("ts_code,end_date,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act")).await?;
         } else { stats.skipped += 1; }
     }
 
@@ -141,7 +141,7 @@ pub async fn run_sync(
         }
         force_step(client, &limiter, &mut stats, "dividend",
             &[("ts_code", code.as_str())],
-            Some("ts_code,end_date,cash_div_tax,stk_div,record_date,ex_date,ann_date,div_progress")).await?;
+            Some("ts_code,end_date,cash_div_tax,stk_div,record_date,ex_date,ann_date,div_proc")).await?;
     }
 
     // 9. trade_cal
@@ -149,18 +149,24 @@ pub async fn run_sync(
         &[("exchange", "SSE"), ("start_date", start_date), ("end_date", end_date), ("is_open", "1")],
         Some("exchange,cal_date,is_open")).await?;
 
-    // 10. daily + adj_factor — skip dates already covered
+    // 10. daily + adj_factor — independent coverage per table
+    let existing_daily = cache.existing_daily_dates().await?;
+    let existing_adj = cache.existing_adj_factor_dates().await?;
     for date in &daily_basic_dates {
-        if existing_db.contains(date) {
-            stats.skipped += 2;
-            continue;
+        if existing_daily.contains(date) {
+            stats.skipped += 1;
+        } else {
+            force_step(client, &limiter, &mut stats, "daily",
+                &[("trade_date", date.as_str())],
+                Some("ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount")).await?;
         }
-        force_step(client, &limiter, &mut stats, "daily",
-            &[("trade_date", date.as_str())],
-            Some("ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount")).await?;
-        force_step(client, &limiter, &mut stats, "adj_factor",
-            &[("trade_date", date.as_str())],
-            Some("ts_code,trade_date,adj_factor")).await?;
+        if existing_adj.contains(date) {
+            stats.skipped += 1;
+        } else {
+            force_step(client, &limiter, &mut stats, "adj_factor",
+                &[("trade_date", date.as_str())],
+                Some("ts_code,trade_date,adj_factor")).await?;
+        }
     }
 
     // 11. index_daily
@@ -296,7 +302,7 @@ async fn sync_financial_incremental(
         if !cashflow_periods.contains(&period) {
             force_step(client, &limiter, &mut stats, "cashflow_vip",
                 &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,n_cashflow_act,n_cashflow_inv_act,n_cashflow_fin_act")).await?;
+                Some("ts_code,end_date,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act")).await?;
         } else {
             stats.skipped += 1;
         }
@@ -319,7 +325,7 @@ async fn sync_financial_incremental(
         if !existing_div.contains(code) {
             force_step(client, &limiter, &mut stats, "dividend",
                 &[("ts_code", code.as_str())],
-                Some("ts_code,end_date,cash_div_tax,stk_div,record_date,ex_date,ann_date,div_progress")).await?;
+                Some("ts_code,end_date,cash_div_tax,stk_div,record_date,ex_date,ann_date,div_proc")).await?;
         } else {
             stats.skipped += 1;
         }
