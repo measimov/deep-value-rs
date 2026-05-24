@@ -155,15 +155,13 @@ pub async fn get_net_equity(cache: &PgCache, trade_date: &str) -> Result<DataFra
             .with_column(lit(NULL).cast(DataType::Float64).alias("net_equity_bn"))
             .collect()?);
     }
+    let raw = col("total_hldr_eqy_exc_min_int")
+        .cast(DataType::Float64)
+        .fill_null(lit(0.0));
     let out = df
         .lazy()
-        .with_column(
-            col("total_hldr_eqy_exc_min_int")
-                .cast(DataType::Float64)
-                .fill_null(lit(0.0))
-                / lit(1e8_f64)
-                .alias("net_equity_bn"),
-        )
+        .with_column(raw.clone())
+        .with_column((raw / lit(1e8_f64)).alias("net_equity_bn"))
         .unique(Some(vec!["ts_code".into()]), UniqueKeepStrategy::First)
         .select([col("ts_code"), col("net_equity_bn")])
         .collect()?;
