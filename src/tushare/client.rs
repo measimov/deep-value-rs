@@ -149,16 +149,16 @@ impl TushareClient {
 
     /// 发送 HTTP 请求，自动处理分页（has_more），写入 raw + typed 缓存。
     ///
-    /// 对 10 个已知支持 limit/offset 的 endpoint 启用自动分页，每页行数
-    /// 由 page_size() 按 endpoint 决定（5000 或 disclosure_date=3000）。
-    /// 其他 endpoint 若返回 has_more 则仅 warn，不自动分页。
+    /// 对已知支持 limit/offset 的 endpoint 启用自动分页，每页行数
+    /// 由 page_size() 按 endpoint 决定。
+    /// 其他 endpoint 若返回 has_more 则直接失败，避免缓存不完整结果。
     async fn execute_and_cache(
         &self,
         api_name: &str,
         param_map: &HashMap<String, String>,
         fields: Option<&str>,
     ) -> Result<DataFrame> {
-        const MAX_PAGES: usize = 20;
+        const MAX_PAGES: usize = 200;
 
         let paginate = pagination_page_size(api_name);
         let pg_size = paginate.unwrap_or(0);
@@ -238,12 +238,13 @@ impl TushareClient {
 
             let has_more = data.has_more.unwrap_or(false);
 
-            if paginate.is_none() && has_more {
-                tracing::warn!(
+            if unsupported_has_more(paginate, has_more) {
+                tracing::error!(
                     api = api_name,
                     rows = row_count,
-                    "Tushare 返回 has_more=true，但此 endpoint 不在分页白名单中，结果可能不完整"
+                    "Tushare 返回 has_more=true，但此 endpoint 不在分页白名单中，缓存未写入"
                 );
+                guard_broken = Some("非分页白名单 endpoint 返回 has_more=true");
                 break;
             }
 
@@ -278,7 +279,11 @@ impl TushareClient {
 
         // 移除内部分页追加的字段（若调用方未请求）
         if let Some(orig) = user_fields.as_deref() {
-            let orig_set: Vec<&str> = orig.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let orig_set: Vec<&str> = orig
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
             let strip: Vec<usize> = all_fields
                 .iter()
                 .enumerate()
@@ -297,7 +302,12 @@ impl TushareClient {
         let df = self.response_to_dataframe(&all_fields, &all_items)?;
 
         if page > 0 {
-            info!(api = api_name, pages = page + 1, rows = df.height(), "分页请求完成");
+            info!(
+                api = api_name,
+                pages = page + 1,
+                rows = df.height(),
+                "分页请求完成"
+            );
         } else {
             info!(api = api_name, rows = df.height(), "请求完成");
         }
@@ -476,28 +486,35 @@ impl TushareClient {
 fn pagination_page_size(api: &str) -> Option<usize> {
     match api {
         "disclosure_date" => Some(3000),
-        "stock_basic"
-        | "daily_basic"
-        | "daily"
-        | "balancesheet_vip"
-        | "income_vip"
-        | "fina_indicator_vip"
-        | "cashflow_vip"
-        | "adj_factor"
-        | "index_daily" => Some(5000),
+        "stock_basic" | "daily_basic" | "daily" | "balancesheet_vip" | "income_vip"
+        | "fina_indicator_vip" | "cashflow_vip" | "forecast_vip" | "express_vip"
+        | "index_weight" | "top10_holders" | "top10_floatholders" | "repurchase" | "adj_factor"
+        | "index_daily" | "stk_limit" => Some(5000),
+        "fina_mainbz_vip" => Some(100),
+        "pledge_stat" => Some(1000),
         _ => None,
     }
 }
 
 fn progress_key_fields(api: &str) -> &[&str] {
     match api {
-        "daily" | "daily_basic" | "adj_factor" | "index_daily" => &["ts_code", "trade_date"],
-        "income_vip" | "balancesheet_vip" | "cashflow_vip" | "fina_indicator_vip" => {
-            &["ts_code", "end_date"]
+        "daily" | "daily_basic" | "adj_factor" | "index_daily" | "stk_limit" => {
+            &["ts_code", "trade_date"]
         }
+        "income_vip" | "balancesheet_vip" | "cashflow_vip" | "fina_indicator_vip"
+        | "forecast_vip" | "express_vip" => &["ts_code", "end_date"],
+        "fina_mainbz_vip" => &["ts_code", "end_date", "bz_item"],
+        "index_weight" => &["index_code", "con_code", "trade_date"],
+        "top10_holders" | "top10_floatholders" => &["ts_code", "end_date", "holder_name"],
+        "pledge_stat" => &["ts_code", "end_date"],
+        "repurchase" => &["ts_code", "ann_date", "end_date"],
         "disclosure_date" => &["ts_code", "end_date"],
         _ => &["ts_code"],
     }
+}
+
+fn unsupported_has_more(paginate: Option<usize>, has_more: bool) -> bool {
+    paginate.is_none() && has_more
 }
 
 fn progress_key_str(row: &[serde_json::Value], resp_fields: &[String], keys: &[&str]) -> String {
@@ -518,7 +535,11 @@ fn ensure_pagination_fields(fields: Option<&str>, keys: &[&str]) -> Option<Strin
         Some(f) => f,
         None => return None,
     };
-    let existing: Vec<&str> = base.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let existing: Vec<&str> = base
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
     let mut out = base.to_string();
     for k in keys {
         if !existing.contains(k) {
@@ -551,6 +572,15 @@ mod tests {
         assert_eq!(pagination_page_size("daily"), Some(5000));
         assert_eq!(pagination_page_size("income_vip"), Some(5000));
         assert_eq!(pagination_page_size("cashflow_vip"), Some(5000));
+        assert_eq!(pagination_page_size("forecast_vip"), Some(5000));
+        assert_eq!(pagination_page_size("express_vip"), Some(5000));
+        assert_eq!(pagination_page_size("fina_mainbz_vip"), Some(100));
+        assert_eq!(pagination_page_size("index_weight"), Some(5000));
+        assert_eq!(pagination_page_size("top10_holders"), Some(5000));
+        assert_eq!(pagination_page_size("top10_floatholders"), Some(5000));
+        assert_eq!(pagination_page_size("pledge_stat"), Some(1000));
+        assert_eq!(pagination_page_size("repurchase"), Some(5000));
+        assert_eq!(pagination_page_size("stk_limit"), Some(5000));
         assert_eq!(pagination_page_size("fina_audit"), None); // non-paginated
     }
 
@@ -558,18 +588,56 @@ mod tests {
     fn test_progress_key_fields_per_endpoint() {
         // Market series: ts_code + trade_date
         assert_eq!(progress_key_fields("daily"), &["ts_code", "trade_date"]);
-        assert_eq!(progress_key_fields("daily_basic"), &["ts_code", "trade_date"]);
-        assert_eq!(progress_key_fields("index_daily"), &["ts_code", "trade_date"]);
+        assert_eq!(
+            progress_key_fields("daily_basic"),
+            &["ts_code", "trade_date"]
+        );
+        assert_eq!(
+            progress_key_fields("index_daily"),
+            &["ts_code", "trade_date"]
+        );
+        assert_eq!(progress_key_fields("stk_limit"), &["ts_code", "trade_date"]);
         // Financial VIP: ts_code + end_date
         assert_eq!(progress_key_fields("income_vip"), &["ts_code", "end_date"]);
-        assert_eq!(progress_key_fields("cashflow_vip"), &["ts_code", "end_date"]);
+        assert_eq!(
+            progress_key_fields("cashflow_vip"),
+            &["ts_code", "end_date"]
+        );
+        assert_eq!(
+            progress_key_fields("fina_mainbz_vip"),
+            &["ts_code", "end_date", "bz_item"]
+        );
+        assert_eq!(
+            progress_key_fields("index_weight"),
+            &["index_code", "con_code", "trade_date"]
+        );
+        assert_eq!(
+            progress_key_fields("top10_holders"),
+            &["ts_code", "end_date", "holder_name"]
+        );
+        assert_eq!(progress_key_fields("pledge_stat"), &["ts_code", "end_date"]);
+        assert_eq!(
+            progress_key_fields("repurchase"),
+            &["ts_code", "ann_date", "end_date"]
+        );
         // Unique per stock: ts_code only
         assert_eq!(progress_key_fields("stock_basic"), &["ts_code"]);
     }
 
     #[test]
+    fn test_unsupported_has_more() {
+        assert!(unsupported_has_more(None, true));
+        assert!(!unsupported_has_more(Some(5000), true));
+        assert!(!unsupported_has_more(None, false));
+    }
+
+    #[test]
     fn test_progress_key_str_compound() {
-        let fields = vec!["ts_code".to_string(), "trade_date".to_string(), "close".to_string()];
+        let fields = vec![
+            "ts_code".to_string(),
+            "trade_date".to_string(),
+            "close".to_string(),
+        ];
         let row = vec![json!("000001.SZ"), json!("20250515"), json!(12.5)];
         let keys: &[&str] = &["ts_code", "trade_date"];
         let key = progress_key_str(&row, &fields, keys);
@@ -600,7 +668,8 @@ mod tests {
 
     #[test]
     fn test_ensure_pagination_fields_all_present() {
-        let result = ensure_pagination_fields(Some("ts_code,end_date,n_income"), &["ts_code", "end_date"]);
+        let result =
+            ensure_pagination_fields(Some("ts_code,end_date,n_income"), &["ts_code", "end_date"]);
         assert_eq!(result.as_deref(), Some("ts_code,end_date,n_income"));
     }
 }

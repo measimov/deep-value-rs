@@ -108,8 +108,12 @@ enum Commands {
         anniversary: Option<String>,
 
         /// API 最小调用间隔（毫秒）
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 600)]
         delay_ms: u64,
+
+        /// full sync 为本地十年 PB 检查预取的历史年数
+        #[arg(long, default_value_t = 10)]
+        lookback_years: usize,
 
         /// 增量模式：只补缺失数据
         #[arg(long)]
@@ -165,17 +169,21 @@ async fn main() -> Result<()> {
             end,
             anniversary,
             delay_ms,
+            lookback_years,
             incremental,
             sync_mode,
-        } => cmd_sync(
-            &start,
-            &end,
-            anniversary.as_deref(),
-            delay_ms,
-            incremental,
-            &sync_mode,
-        )
-        .await?,
+        } => {
+            cmd_sync(
+                &start,
+                &end,
+                anniversary.as_deref(),
+                delay_ms,
+                lookback_years,
+                incremental,
+                &sync_mode,
+            )
+            .await?
+        }
         Commands::Snapshot {
             date,
             top,
@@ -223,6 +231,7 @@ async fn cmd_sync(
     end: &str,
     anniversary: Option<&str>,
     delay_ms: u64,
+    lookback_years: usize,
     incremental: bool,
     sync_mode: &str,
 ) -> Result<()> {
@@ -233,20 +242,31 @@ async fn cmd_sync(
     let client = TushareClient::with_pg_cache(&config.tushare_token, cache);
 
     let stats = if incremental {
-        sync::run_sync_incremental(&client, client.pg_cache().unwrap(), sync_mode, end, delay_ms)
-            .await?
+        sync::run_sync_incremental(
+            &client,
+            client.pg_cache().unwrap(),
+            sync_mode,
+            end,
+            delay_ms,
+        )
+        .await?
     } else {
         let ann = anniversary.unwrap_or(&end[4..]);
-        sync::run_sync(&client, client.pg_cache().unwrap(), start, end, ann, delay_ms).await?
+        sync::run_sync(
+            &client,
+            client.pg_cache().unwrap(),
+            start,
+            end,
+            ann,
+            lookback_years,
+            delay_ms,
+        )
+        .await?
     };
 
     println!(
         "Sync complete: {} calls, {} rows, {} skipped, {:.1}s, {} errors",
-        stats.total_calls,
-        stats.total_rows,
-        stats.skipped,
-        stats.elapsed_secs,
-        stats.errors
+        stats.total_calls, stats.total_rows, stats.skipped, stats.elapsed_secs, stats.errors
     );
     if stats.errors > 0 {
         anyhow::bail!(
@@ -330,8 +350,7 @@ async fn run_backtest_local(
             end_date.to_string()
         };
 
-        let (gross_ret, hrs) =
-            engine::compute_period_return(codes, &prices, p_start, &p_end)?;
+        let (gross_ret, hrs) = engine::compute_period_return(codes, &prices, p_start, &p_end)?;
         all_holding_returns.extend(hrs);
 
         let (added, removed) = if i == 0 {
@@ -382,10 +401,7 @@ async fn run_backtest_local(
 
     // 用实际日期间隔天数计算年化指标
     let total_days = days_between(start_date, end_date).max(1);
-    let ann_ret = metrics::annualized_return(
-        *nav_series.last().unwrap_or(&1.0) - 1.0,
-        total_days,
-    );
+    let ann_ret = metrics::annualized_return(*nav_series.last().unwrap_or(&1.0) - 1.0, total_days);
     let bm_total = *bm_nav.last().unwrap_or(&1.0) - 1.0;
     let bm_ann = metrics::annualized_return(bm_total, total_days);
 
@@ -394,8 +410,15 @@ async fn run_backtest_local(
     let sharpe = metrics::sharpe_ratio(&daily_returns, 0.03);
     let (max_dd, dd_start_idx, dd_end_idx) = metrics::max_drawdown(&nav_series);
     let calmar = metrics::calmar_ratio(ann_ret, max_dd);
-    let wins = all_holding_returns.iter().filter(|h| h.holding_return > 0.0).count();
-    let win_rate = if all_holding_returns.is_empty() { 0.0 } else { wins as f64 / all_holding_returns.len() as f64 };
+    let wins = all_holding_returns
+        .iter()
+        .filter(|h| h.holding_return > 0.0)
+        .count();
+    let win_rate = if all_holding_returns.is_empty() {
+        0.0
+    } else {
+        wins as f64 / all_holding_returns.len() as f64
+    };
     let total_turnover: f64 = period_returns.iter().map(|p| p.turnover).sum::<f64>() * 100.0;
     let total_cost: f64 = period_returns.iter().map(|p| p.cost).sum::<f64>() * 100.0;
 
@@ -448,7 +471,10 @@ async fn pick_available_rebalance_dates(
             continue;
         }
         let params = std::collections::HashMap::from([("trade_date".to_string(), d.clone())]);
-        if let Ok(Some(df)) = cache.load_typed("daily_basic", &params, Some("ts_code")).await {
+        if let Ok(Some(df)) = cache
+            .load_typed("daily_basic", &params, Some("ts_code"))
+            .await
+        {
             if df.height() > 0 {
                 dates.push(d.clone());
             }
@@ -1195,7 +1221,10 @@ fn sum_div_for_period(df: &DataFrame, period: &str) -> f64 {
     let mut total = 0.0;
     for i in 0..df.height() {
         if dates.get(i) == Some(period) {
-            total += divs.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+            total += divs
+                .get(i)
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.0);
         }
     }
     total

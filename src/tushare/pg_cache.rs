@@ -140,6 +140,110 @@ impl PgCache {
         Ok(result.rows_affected())
     }
 
+    /// Ensure a sync job exists and return whether it should be executed.
+    ///
+    /// Jobs marked `done` are skipped on subsequent runs. `pending`, `running`,
+    /// and `failed` jobs are executable, which makes interrupted runs resumable.
+    pub async fn ensure_sync_job(
+        &self,
+        job_key: &str,
+        api_name: &str,
+        params: &HashMap<String, String>,
+        requested_fields: Option<&str>,
+    ) -> Result<bool> {
+        let params_json = serde_json::to_value(params).context("序列化 sync job params 失败")?;
+        sqlx::query(
+            r#"
+            insert into deep_value.tushare_sync_jobs (
+                job_key, api_name, params, requested_fields, status
+            )
+            values ($1, $2, $3, $4, 'pending')
+            on conflict (job_key) do nothing
+            "#,
+        )
+        .bind(job_key)
+        .bind(api_name)
+        .bind(params_json)
+        .bind(requested_fields)
+        .execute(&self.pool)
+        .await
+        .context("创建 sync job 失败")?;
+
+        let row = sqlx::query(
+            r#"
+            select status from deep_value.tushare_sync_jobs where job_key = $1
+            "#,
+        )
+        .bind(job_key)
+        .fetch_one(&self.pool)
+        .await
+        .context("读取 sync job 状态失败")?;
+        let status: String = row.try_get("status")?;
+        Ok(status != "done")
+    }
+
+    /// Mark a sync job as running and increment its attempt counter.
+    pub async fn mark_sync_job_running(&self, job_key: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            update deep_value.tushare_sync_jobs
+            set status = 'running',
+                attempts = attempts + 1,
+                last_error = null,
+                updated_at = now(),
+                finished_at = null
+            where job_key = $1
+            "#,
+        )
+        .bind(job_key)
+        .execute(&self.pool)
+        .await
+        .context("标记 sync job running 失败")?;
+        Ok(())
+    }
+
+    /// Mark a sync job as successfully completed, including zero-row responses.
+    pub async fn mark_sync_job_done(&self, job_key: &str, row_count: usize) -> Result<()> {
+        let row_count = i32::try_from(row_count).context("sync job row_count 超出 i32")?;
+        sqlx::query(
+            r#"
+            update deep_value.tushare_sync_jobs
+            set status = 'done',
+                row_count = $2,
+                last_error = null,
+                updated_at = now(),
+                finished_at = now()
+            where job_key = $1
+            "#,
+        )
+        .bind(job_key)
+        .bind(row_count)
+        .execute(&self.pool)
+        .await
+        .context("标记 sync job done 失败")?;
+        Ok(())
+    }
+
+    /// Mark a sync job as failed. Failed jobs are retried by future sync runs.
+    pub async fn mark_sync_job_failed(&self, job_key: &str, error: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            update deep_value.tushare_sync_jobs
+            set status = 'failed',
+                last_error = $2,
+                updated_at = now(),
+                finished_at = now()
+            where job_key = $1
+            "#,
+        )
+        .bind(job_key)
+        .bind(error)
+        .execute(&self.pool)
+        .await
+        .context("标记 sync job failed 失败")?;
+        Ok(())
+    }
+
     /// Return all distinct trade_dates present in daily_basic typed table.
     pub async fn existing_daily_basic_dates(&self) -> Result<HashSet<String>> {
         let rows = sqlx::query(
@@ -152,6 +256,63 @@ impl PgCache {
             .iter()
             .filter_map(|r| r.try_get::<String, _>("trade_date").ok())
             .collect())
+    }
+
+    /// Load daily_basic for the nearest local trading day on or before target_date in the same year.
+    pub async fn load_daily_basic_on_or_before(
+        &self,
+        target_date: &str,
+        fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        if target_date.len() < 8 {
+            return Ok(None);
+        }
+        let year_start = format!("{}0101", &target_date[..4]);
+        let rows = sqlx::query(
+            r#"
+            with selected_date as (
+                select max(trade_date) as trade_date
+                from deep_value.tushare_daily_basic
+                where trade_date >= $1 and trade_date <= $2
+            )
+            select ts_code, trade_date, pb, pe, pe_ttm, dv_ratio, dv_ttm, total_mv, close, turnover_rate, turnover_rate_f, volume_ratio, ps, ps_ttm, total_share, float_share, free_share, circ_mv
+            from deep_value.tushare_daily_basic
+            where trade_date = (select trade_date from selected_date)
+            order by ts_code
+            "#,
+        )
+        .bind(year_start)
+        .bind(target_date)
+        .fetch_all(&self.pool)
+        .await
+        .context("读取 tushare_daily_basic 最近交易日失败")?;
+
+        rows_to_dataframe(
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "trade_date",
+                    "pb",
+                    "pe",
+                    "pe_ttm",
+                    "dv_ratio",
+                    "dv_ttm",
+                    "total_mv",
+                    "close",
+                    "turnover_rate",
+                    "turnover_rate_f",
+                    "volume_ratio",
+                    "ps",
+                    "ps_ttm",
+                    "total_share",
+                    "float_share",
+                    "free_share",
+                    "circ_mv",
+                ],
+            ),
+            &rows,
+        )
     }
 
     /// Return all distinct trade_dates present in daily typed table.
@@ -226,13 +387,12 @@ impl PgCache {
 
     /// Return ts_codes that have fina_audit records for a given period.
     pub async fn existing_audit_codes(&self, period: &str) -> Result<HashSet<String>> {
-        let rows = sqlx::query(
-            r#"select ts_code from deep_value.tushare_fina_audit where period = $1"#,
-        )
-        .bind(period)
-        .fetch_all(&self.pool)
-        .await
-        .context("查询 fina_audit 已有代码失败")?;
+        let rows =
+            sqlx::query(r#"select ts_code from deep_value.tushare_fina_audit where period = $1"#)
+                .bind(period)
+                .fetch_all(&self.pool)
+                .await
+                .context("查询 fina_audit 已有代码失败")?;
         Ok(rows
             .iter()
             .filter_map(|r| r.try_get::<String, _>("ts_code").ok())
@@ -255,12 +415,10 @@ impl PgCache {
 
     /// Return ts_codes that have dividend records.
     pub async fn existing_dividend_codes(&self) -> Result<HashSet<String>> {
-        let rows = sqlx::query(
-            r#"select distinct ts_code from deep_value.tushare_dividend"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .context("查询 dividend 已有代码失败")?;
+        let rows = sqlx::query(r#"select distinct ts_code from deep_value.tushare_dividend"#)
+            .fetch_all(&self.pool)
+            .await
+            .context("查询 dividend 已有代码失败")?;
         Ok(rows
             .iter()
             .filter_map(|r| r.try_get::<String, _>("ts_code").ok())
@@ -281,18 +439,16 @@ impl PgCache {
             "daily_basic" => self.save_daily_basic(params, fields, items).await,
             "income" | "income_vip" => self.save_income(params, fields, items).await,
             "dividend" => self.save_dividend(params, fields, items).await,
-            "balancesheet" | "balancesheet_vip" => self.save_balancesheet(params, fields, items).await,
-            "fina_audit" => self.save_fina_audit(params, fields, items).await,
-            "daily" => {
-                self.save_daily_ohlc(params, fields, items).await
+            "balancesheet" | "balancesheet_vip" => {
+                self.save_balancesheet(params, fields, items).await
             }
+            "fina_audit" => self.save_fina_audit(params, fields, items).await,
+            "daily" => self.save_daily_ohlc(params, fields, items).await,
             "adj_factor" => {
                 self.save_market_series("tushare_adj_factor", "adj_factor", params, fields, items)
                     .await
             }
-            "index_daily" => {
-                self.save_index_daily_ohlc(params, fields, items).await
-            }
+            "index_daily" => self.save_index_daily_ohlc(params, fields, items).await,
             "fina_indicator" | "fina_indicator_vip" => {
                 self.save_fina_indicator(params, fields, items).await
             }
@@ -300,7 +456,14 @@ impl PgCache {
             "disclosure_date" => self.save_disclosure_date(params, fields, items).await,
             "suspend_d" => self.save_suspend_d(params, fields, items).await,
             "stk_limit" => self.save_stk_limit(params, fields, items).await,
-            _ => Ok(()),
+            _ => {
+                if let Some((table, _, _)) = typed_json_endpoint(api_name) {
+                    self.save_json_rows(table, api_name, params, fields, items)
+                        .await
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -338,7 +501,14 @@ impl PgCache {
             "disclosure_date" => self.load_disclosure_date(params, fields).await,
             "suspend_d" => self.load_suspend_d(params, fields).await,
             "stk_limit" => self.load_stk_limit(params, fields).await,
-            _ => Ok(None),
+            _ => {
+                if let Some((table, default_fields, range_field)) = typed_json_endpoint(api_name) {
+                    self.load_json_rows(table, range_field, params, fields, default_fields)
+                        .await
+                } else {
+                    Ok(None)
+                }
+            }
         }
     }
 
@@ -392,45 +562,81 @@ impl PgCache {
         fields: &[String],
         items: &[Vec<Value>],
     ) -> Result<()> {
-        let Some(ts_code_idx) = field_index(fields, "ts_code") else { return Ok(()); };
+        let Some(ts_code_idx) = field_index(fields, "ts_code") else {
+            return Ok(());
+        };
         for row in items {
-            let Some(ts_code) = cell_string(row, ts_code_idx) else { continue; };
+            let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
             sqlx::query(r#"
-                insert into deep_value.tushare_stock_basic (ts_code, name, industry, list_status, list_date, symbol, area, market, is_hs)
-                values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                insert into deep_value.tushare_stock_basic (
+                    ts_code, symbol, name, area, industry, fullname, enname, cnspell,
+                    market, exchange, curr_type, list_status, list_date, delist_date,
+                    is_hs, act_name, act_ent_type
+                )
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                 on conflict (ts_code) do update set
+                    symbol = coalesce(excluded.symbol, deep_value.tushare_stock_basic.symbol),
                     name = coalesce(excluded.name, deep_value.tushare_stock_basic.name),
+                    area = coalesce(excluded.area, deep_value.tushare_stock_basic.area),
                     industry = coalesce(excluded.industry, deep_value.tushare_stock_basic.industry),
+                    fullname = coalesce(excluded.fullname, deep_value.tushare_stock_basic.fullname),
+                    enname = coalesce(excluded.enname, deep_value.tushare_stock_basic.enname),
+                    cnspell = coalesce(excluded.cnspell, deep_value.tushare_stock_basic.cnspell),
+                    market = coalesce(excluded.market, deep_value.tushare_stock_basic.market),
+                    exchange = coalesce(excluded.exchange, deep_value.tushare_stock_basic.exchange),
+                    curr_type = coalesce(excluded.curr_type, deep_value.tushare_stock_basic.curr_type),
                     list_status = coalesce(excluded.list_status, deep_value.tushare_stock_basic.list_status),
                     list_date = coalesce(excluded.list_date, deep_value.tushare_stock_basic.list_date),
-                    symbol = coalesce(excluded.symbol, deep_value.tushare_stock_basic.symbol),
-                    area = coalesce(excluded.area, deep_value.tushare_stock_basic.area),
-                    market = coalesce(excluded.market, deep_value.tushare_stock_basic.market),
+                    delist_date = coalesce(excluded.delist_date, deep_value.tushare_stock_basic.delist_date),
                     is_hs = coalesce(excluded.is_hs, deep_value.tushare_stock_basic.is_hs),
+                    act_name = coalesce(excluded.act_name, deep_value.tushare_stock_basic.act_name),
+                    act_ent_type = coalesce(excluded.act_ent_type, deep_value.tushare_stock_basic.act_ent_type),
                     updated_at = now()
             "#)
             .bind(ts_code)
+            .bind(field_str_opt(fields, row, "symbol"))
             .bind(field_str_opt(fields, row, "name"))
+            .bind(field_str_opt(fields, row, "area"))
             .bind(field_str_opt(fields, row, "industry"))
+            .bind(field_str_opt(fields, row, "fullname"))
+            .bind(field_str_opt(fields, row, "enname"))
+            .bind(field_str_opt(fields, row, "cnspell"))
+            .bind(field_str_opt(fields, row, "market"))
+            .bind(field_str_opt(fields, row, "exchange"))
+            .bind(field_str_opt(fields, row, "curr_type"))
             .bind(field_str_opt(fields, row, "list_status"))
             .bind(field_str_opt(fields, row, "list_date"))
-            .bind(field_str_opt(fields, row, "symbol"))
-            .bind(field_str_opt(fields, row, "area"))
-            .bind(field_str_opt(fields, row, "market"))
+            .bind(field_str_opt(fields, row, "delist_date"))
             .bind(field_str_opt(fields, row, "is_hs"))
+            .bind(field_str_opt(fields, row, "act_name"))
+            .bind(field_str_opt(fields, row, "act_ent_type"))
             .execute(&self.pool).await.context("写入 tushare_stock_basic 失败")?;
         }
         Ok(())
     }
 
     async fn save_daily_basic(
-        &self, params: &HashMap<String, String>, fields: &[String], items: &[Vec<Value>],
+        &self,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
     ) -> Result<()> {
-        let Some(ts_code_idx) = field_index(fields, "ts_code") else { return Ok(()); };
+        let Some(ts_code_idx) = field_index(fields, "ts_code") else {
+            return Ok(());
+        };
         let td = field_index(fields, "trade_date");
         for row in items {
-            let Some(ts_code) = cell_string(row, ts_code_idx) else { continue; };
-            let Some(trade_date) = td.and_then(|i| cell_string(row, i)).or_else(|| params.get("trade_date").cloned()) else { continue; };
+            let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
+            let Some(trade_date) = td
+                .and_then(|i| cell_string(row, i))
+                .or_else(|| params.get("trade_date").cloned())
+            else {
+                continue;
+            };
             sqlx::query(r#"
                 insert into deep_value.tushare_daily_basic (ts_code, trade_date, pb, pe, pe_ttm, dv_ratio, dv_ttm, total_mv, close, turnover_rate, turnover_rate_f, volume_ratio, ps, ps_ttm, total_share, float_share, free_share, circ_mv)
                 values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
@@ -501,7 +707,10 @@ impl PgCache {
         .context("读取 tushare_trade_cal 失败")?;
 
         rows_to_dataframe(
-            &requested_fields(fields, &["exchange", "cal_date", "is_open", "pretrade_date"]),
+            &requested_fields(
+                fields,
+                &["exchange", "cal_date", "is_open", "pretrade_date"],
+            ),
             &rows,
         )
     }
@@ -514,7 +723,9 @@ impl PgCache {
         let list_status = params.get("list_status").map(String::as_str);
         let rows = sqlx::query(
             r#"
-            select ts_code, symbol, name, area, industry, market, list_status, list_date, is_hs
+            select ts_code, symbol, name, area, industry, fullname, enname, cnspell,
+                   market, exchange, curr_type, list_status, list_date, delist_date,
+                   is_hs, act_name, act_ent_type
             from deep_value.tushare_stock_basic
             where ($1::text is null or list_status = $1)
             order by ts_code
@@ -526,7 +737,28 @@ impl PgCache {
         .context("读取 tushare_stock_basic 失败")?;
 
         rows_to_dataframe(
-            &requested_fields(fields, &["ts_code", "symbol", "name", "area", "industry", "market", "list_status", "list_date", "is_hs"]),
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "symbol",
+                    "name",
+                    "area",
+                    "industry",
+                    "fullname",
+                    "enname",
+                    "cnspell",
+                    "market",
+                    "exchange",
+                    "curr_type",
+                    "list_status",
+                    "list_date",
+                    "delist_date",
+                    "is_hs",
+                    "act_name",
+                    "act_ent_type",
+                ],
+            ),
             &rows,
         )
     }
@@ -553,11 +785,29 @@ impl PgCache {
         .context("读取 tushare_daily_basic 失败")?;
 
         rows_to_dataframe(
-            &requested_fields(fields, &[
-                "ts_code", "trade_date", "pb", "pe", "pe_ttm", "dv_ratio", "total_mv",
-                "close", "turnover_rate", "turnover_rate_f", "volume_ratio",
-                "ps", "ps_ttm", "total_share", "float_share", "free_share", "circ_mv", "dv_ttm",
-            ]),
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "trade_date",
+                    "pb",
+                    "pe",
+                    "pe_ttm",
+                    "dv_ratio",
+                    "total_mv",
+                    "close",
+                    "turnover_rate",
+                    "turnover_rate_f",
+                    "volume_ratio",
+                    "ps",
+                    "ps_ttm",
+                    "total_share",
+                    "float_share",
+                    "free_share",
+                    "circ_mv",
+                    "dv_ttm",
+                ],
+            ),
             &rows,
         )
     }
@@ -725,12 +975,16 @@ impl PgCache {
             return Ok(());
         };
         let audit_agency_idx = field_index(fields, "audit_agency");
-        let Some(period) = params.get("period") else {
-            return Ok(());
-        };
 
         for row in items {
             let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
+            let Some(period) = params
+                .get("period")
+                .cloned()
+                .or_else(|| field_str_opt(fields, row, "end_date"))
+            else {
                 continue;
             };
             let _audit_agency = audit_agency_idx.and_then(|idx| cell_string(row, idx));
@@ -750,7 +1004,7 @@ impl PgCache {
                 "#,
             )
             .bind(ts_code)
-            .bind(period)
+            .bind(&period)
             .bind(field_str_opt(fields, row, "audit_agency"))
             .bind(field_str_opt(fields, row, "ann_date"))
             .bind(field_str_opt(fields, row, "end_date"))
@@ -789,7 +1043,20 @@ impl PgCache {
         .context("读取 tushare_income 失败")?;
 
         rows_to_dataframe(
-            &requested_fields(fields, &["ts_code", "end_date", "n_income", "total_revenue", "revenue", "oper_cost", "sell_exp", "admin_exp", "fin_exp"]),
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "end_date",
+                    "n_income",
+                    "total_revenue",
+                    "revenue",
+                    "oper_cost",
+                    "sell_exp",
+                    "admin_exp",
+                    "fin_exp",
+                ],
+            ),
             &rows,
         )
     }
@@ -816,7 +1083,19 @@ impl PgCache {
         .context("读取 tushare_dividend 失败")?;
 
         rows_to_dataframe(
-            &requested_fields(fields, &["ts_code", "end_date", "cash_div_tax", "stk_div", "record_date", "ex_date", "ann_date", "div_proc"]),
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "end_date",
+                    "cash_div_tax",
+                    "stk_div",
+                    "record_date",
+                    "ex_date",
+                    "ann_date",
+                    "div_proc",
+                ],
+            ),
             &rows,
         )
     }
@@ -845,7 +1124,18 @@ impl PgCache {
         .context("读取 tushare_balancesheet 失败")?;
 
         rows_to_dataframe(
-            &requested_fields(fields, &["ts_code", "end_date", "total_hldr_eqy_exc_min_int", "total_assets", "total_cur_assets", "total_cur_liab", "total_liab"]),
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "end_date",
+                    "total_hldr_eqy_exc_min_int",
+                    "total_assets",
+                    "total_cur_assets",
+                    "total_cur_liab",
+                    "total_liab",
+                ],
+            ),
             &rows,
         )
     }
@@ -872,7 +1162,18 @@ impl PgCache {
         .context("读取 tushare_fina_audit 失败")?;
 
         rows_to_dataframe(
-            &requested_fields(fields, &["ts_code", "audit_agency", "ann_date", "end_date", "audit_result", "audit_fees", "audit_sign"]),
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "audit_agency",
+                    "ann_date",
+                    "end_date",
+                    "audit_result",
+                    "audit_fees",
+                    "audit_sign",
+                ],
+            ),
             &rows,
         )
     }
@@ -970,9 +1271,19 @@ impl PgCache {
             &requested_fields(
                 fields,
                 &[
-                    "ts_code", "end_date", "roe", "roa", "grossprofit_margin",
-                    "netprofit_margin", "debt_to_assets", "current_ratio",
-                    "bps", "eps", "cfps", "or_yoy", "profit_dedt",
+                    "ts_code",
+                    "end_date",
+                    "roe",
+                    "roa",
+                    "grossprofit_margin",
+                    "netprofit_margin",
+                    "debt_to_assets",
+                    "current_ratio",
+                    "bps",
+                    "eps",
+                    "cfps",
+                    "or_yoy",
+                    "profit_dedt",
                 ],
             ),
             &rows,
@@ -1049,7 +1360,16 @@ impl PgCache {
         .await
         .context("读取 tushare_cashflow 失败")?;
         rows_to_dataframe(
-            &requested_fields(fields, &["ts_code", "end_date", "n_cashflow_act", "n_cashflow_inv_act", "n_cash_flows_fnc_act"]),
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "end_date",
+                    "n_cashflow_act",
+                    "n_cashflow_inv_act",
+                    "n_cash_flows_fnc_act",
+                ],
+            ),
             &rows,
         )
     }
@@ -1093,6 +1413,8 @@ impl PgCache {
             .bind(end_date)
             .bind(ann_date_idx.and_then(|idx| cell_string(row, idx)))
             .bind(actual_date_idx.and_then(|idx| cell_string(row, idx)))
+            .bind(field_str_opt(fields, row, "pre_date"))
+            .bind(field_str_opt(fields, row, "modify_date"))
             .execute(&self.pool)
             .await
             .context("写入 tushare_disclosure_date 失败")?;
@@ -1121,19 +1443,41 @@ impl PgCache {
         .await
         .context("读取 tushare_disclosure_date 失败")?;
         rows_to_dataframe(
-            &requested_fields(fields, &["ts_code", "end_date", "ann_date", "actual_date", "pre_date", "modify_date"]),
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "end_date",
+                    "ann_date",
+                    "actual_date",
+                    "pre_date",
+                    "modify_date",
+                ],
+            ),
             &rows,
         )
     }
 
     async fn save_daily_ohlc(
-        &self, params: &HashMap<String, String>, fields: &[String], items: &[Vec<Value>],
+        &self,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
     ) -> Result<()> {
-        let Some(ts_code_idx) = field_index(fields, "ts_code") else { return Ok(()); };
+        let Some(ts_code_idx) = field_index(fields, "ts_code") else {
+            return Ok(());
+        };
         let td = field_index(fields, "trade_date");
         for row in items {
-            let Some(ts_code) = cell_string(row, ts_code_idx) else { continue; };
-            let Some(trade_date) = td.and_then(|i| cell_string(row, i)).or_else(|| params.get("trade_date").cloned()) else { continue; };
+            let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
+            let Some(trade_date) = td
+                .and_then(|i| cell_string(row, i))
+                .or_else(|| params.get("trade_date").cloned())
+            else {
+                continue;
+            };
             sqlx::query(r#"
                 insert into deep_value.tushare_daily (ts_code, trade_date, close, open, high, low, pre_close, pct_chg, change, vol, amount)
                 values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
@@ -1165,13 +1509,25 @@ impl PgCache {
     }
 
     async fn save_index_daily_ohlc(
-        &self, params: &HashMap<String, String>, fields: &[String], items: &[Vec<Value>],
+        &self,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
     ) -> Result<()> {
-        let Some(ts_code_idx) = field_index(fields, "ts_code") else { return Ok(()); };
+        let Some(ts_code_idx) = field_index(fields, "ts_code") else {
+            return Ok(());
+        };
         let td = field_index(fields, "trade_date");
         for row in items {
-            let Some(ts_code) = cell_string(row, ts_code_idx) else { continue; };
-            let Some(trade_date) = td.and_then(|i| cell_string(row, i)).or_else(|| params.get("trade_date").cloned()) else { continue; };
+            let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
+            let Some(trade_date) = td
+                .and_then(|i| cell_string(row, i))
+                .or_else(|| params.get("trade_date").cloned())
+            else {
+                continue;
+            };
             sqlx::query(r#"
                 insert into deep_value.tushare_index_daily (ts_code, trade_date, close, open, high, low, pre_close, pct_chg, change, vol, amount)
                 values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
@@ -1203,11 +1559,19 @@ impl PgCache {
     }
 
     async fn load_daily_ohlc(
-        &self, params: &HashMap<String, String>, fields: Option<&str>,
+        &self,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
     ) -> Result<Option<DataFrame>> {
-        let Some(ts_code) = params.get("ts_code") else { return Ok(None); };
-        let Some(start_date) = params.get("start_date") else { return Ok(None); };
-        let Some(end_date) = params.get("end_date") else { return Ok(None); };
+        let Some(ts_code) = params.get("ts_code") else {
+            return Ok(None);
+        };
+        let Some(start_date) = params.get("start_date") else {
+            return Ok(None);
+        };
+        let Some(end_date) = params.get("end_date") else {
+            return Ok(None);
+        };
         let rows = sqlx::query(r#"
             select ts_code, trade_date, open, high, low, close, pre_close, pct_chg, change, vol, amount
             from deep_value.tushare_daily
@@ -1215,17 +1579,41 @@ impl PgCache {
             order by trade_date
         "#).bind(ts_code).bind(start_date).bind(end_date)
             .fetch_all(&self.pool).await.context("读取 tushare_daily 失败")?;
-        rows_to_dataframe(&requested_fields(fields, &[
-            "ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "pct_chg", "change", "vol", "amount",
-        ]), &rows)
+        rows_to_dataframe(
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "trade_date",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "pre_close",
+                    "pct_chg",
+                    "change",
+                    "vol",
+                    "amount",
+                ],
+            ),
+            &rows,
+        )
     }
 
     async fn load_index_daily_ohlc(
-        &self, params: &HashMap<String, String>, fields: Option<&str>,
+        &self,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
     ) -> Result<Option<DataFrame>> {
-        let Some(ts_code) = params.get("ts_code") else { return Ok(None); };
-        let Some(start_date) = params.get("start_date") else { return Ok(None); };
-        let Some(end_date) = params.get("end_date") else { return Ok(None); };
+        let Some(ts_code) = params.get("ts_code") else {
+            return Ok(None);
+        };
+        let Some(start_date) = params.get("start_date") else {
+            return Ok(None);
+        };
+        let Some(end_date) = params.get("end_date") else {
+            return Ok(None);
+        };
         let rows = sqlx::query(r#"
             select ts_code, trade_date, open, high, low, close, pre_close, pct_chg, change, vol, amount
             from deep_value.tushare_index_daily
@@ -1233,19 +1621,47 @@ impl PgCache {
             order by trade_date
         "#).bind(ts_code).bind(start_date).bind(end_date)
             .fetch_all(&self.pool).await.context("读取 tushare_index_daily 失败")?;
-        rows_to_dataframe(&requested_fields(fields, &[
-            "ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "pct_chg", "change", "vol", "amount",
-        ]), &rows)
+        rows_to_dataframe(
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "trade_date",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "pre_close",
+                    "pct_chg",
+                    "change",
+                    "vol",
+                    "amount",
+                ],
+            ),
+            &rows,
+        )
     }
 
     async fn save_suspend_d(
-        &self, params: &HashMap<String, String>, fields: &[String], items: &[Vec<Value>],
+        &self,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
     ) -> Result<()> {
-        let Some(ts_code_idx) = field_index(fields, "ts_code") else { return Ok(()); };
+        let Some(ts_code_idx) = field_index(fields, "ts_code") else {
+            return Ok(());
+        };
         let td = field_index(fields, "trade_date");
         for row in items {
-            let Some(ts_code) = cell_string(row, ts_code_idx) else { continue; };
-            let Some(trade_date) = td.and_then(|i| cell_string(row, i)).or_else(|| params.get("trade_date").cloned()) else { continue; };
+            let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
+            let Some(trade_date) = td
+                .and_then(|i| cell_string(row, i))
+                .or_else(|| params.get("trade_date").cloned())
+            else {
+                continue;
+            };
             sqlx::query(r#"
                 insert into deep_value.tushare_suspend_d (ts_code, trade_date, suspend_type, suspend_timing)
                 values ($1,$2,$3,$4)
@@ -1261,47 +1677,226 @@ impl PgCache {
     }
 
     async fn load_suspend_d(
-        &self, params: &HashMap<String, String>, fields: Option<&str>,
+        &self,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
     ) -> Result<Option<DataFrame>> {
-        let Some(trade_date) = params.get("trade_date") else { return Ok(None); };
-        let rows = sqlx::query(r#"
+        let Some(trade_date) = params.get("trade_date") else {
+            return Ok(None);
+        };
+        let rows = sqlx::query(
+            r#"
             select ts_code, trade_date, suspend_type, suspend_timing
             from deep_value.tushare_suspend_d where trade_date = $1 order by ts_code
-        "#).bind(trade_date).fetch_all(&self.pool).await.context("读取 tushare_suspend_d 失败")?;
-        rows_to_dataframe(&requested_fields(fields, &["ts_code", "trade_date", "suspend_type", "suspend_timing"]), &rows)
+        "#,
+        )
+        .bind(trade_date)
+        .fetch_all(&self.pool)
+        .await
+        .context("读取 tushare_suspend_d 失败")?;
+        rows_to_dataframe(
+            &requested_fields(
+                fields,
+                &["ts_code", "trade_date", "suspend_type", "suspend_timing"],
+            ),
+            &rows,
+        )
     }
 
     async fn save_stk_limit(
-        &self, params: &HashMap<String, String>, fields: &[String], items: &[Vec<Value>],
+        &self,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
     ) -> Result<()> {
-        let Some(ts_code_idx) = field_index(fields, "ts_code") else { return Ok(()); };
+        let Some(ts_code_idx) = field_index(fields, "ts_code") else {
+            return Ok(());
+        };
         let td = field_index(fields, "trade_date");
         for row in items {
-            let Some(ts_code) = cell_string(row, ts_code_idx) else { continue; };
-            let Some(trade_date) = td.and_then(|i| cell_string(row, i)).or_else(|| params.get("trade_date").cloned()) else { continue; };
+            let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
+            let Some(trade_date) = td
+                .and_then(|i| cell_string(row, i))
+                .or_else(|| params.get("trade_date").cloned())
+            else {
+                continue;
+            };
             sqlx::query(r#"
-                insert into deep_value.tushare_stk_limit (ts_code, trade_date, up_limit, down_limit)
-                values ($1,$2,$3,$4)
+                insert into deep_value.tushare_stk_limit (ts_code, trade_date, pre_close, up_limit, down_limit)
+                values ($1,$2,$3,$4,$5)
                 on conflict (ts_code, trade_date) do update set
+                    pre_close = coalesce(excluded.pre_close, deep_value.tushare_stk_limit.pre_close),
                     up_limit = coalesce(excluded.up_limit, deep_value.tushare_stk_limit.up_limit),
                     down_limit = coalesce(excluded.down_limit, deep_value.tushare_stk_limit.down_limit),
                     updated_at = now()
             "#).bind(ts_code).bind(trade_date)
-            .bind(field_f64_opt(fields, row, "up_limit")).bind(field_f64_opt(fields, row, "down_limit"))
+            .bind(field_f64_opt(fields, row, "pre_close"))
+            .bind(field_f64_opt(fields, row, "up_limit"))
+            .bind(field_f64_opt(fields, row, "down_limit"))
             .execute(&self.pool).await.context("写入 tushare_stk_limit 失败")?;
         }
         Ok(())
     }
 
     async fn load_stk_limit(
-        &self, params: &HashMap<String, String>, fields: Option<&str>,
+        &self,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
     ) -> Result<Option<DataFrame>> {
-        let Some(trade_date) = params.get("trade_date") else { return Ok(None); };
-        let rows = sqlx::query(r#"
-            select ts_code, trade_date, up_limit, down_limit
+        let Some(trade_date) = params.get("trade_date") else {
+            return Ok(None);
+        };
+        let rows = sqlx::query(
+            r#"
+            select ts_code, trade_date, pre_close, up_limit, down_limit
             from deep_value.tushare_stk_limit where trade_date = $1 order by ts_code
-        "#).bind(trade_date).fetch_all(&self.pool).await.context("读取 tushare_stk_limit 失败")?;
-        rows_to_dataframe(&requested_fields(fields, &["ts_code", "trade_date", "up_limit", "down_limit"]), &rows)
+        "#,
+        )
+        .bind(trade_date)
+        .fetch_all(&self.pool)
+        .await
+        .context("读取 tushare_stk_limit 失败")?;
+        rows_to_dataframe(
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "trade_date",
+                    "pre_close",
+                    "up_limit",
+                    "down_limit",
+                ],
+            ),
+            &rows,
+        )
+    }
+
+    async fn save_json_rows(
+        &self,
+        table: &str,
+        api_name: &str,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
+    ) -> Result<()> {
+        let sql = format!(
+            r#"
+            insert into deep_value.{table} (row_hash, ts_code, end_date, ann_date, trade_date, payload)
+            values ($1, $2, $3, $4, $5, $6)
+            on conflict (row_hash) do update set
+                ts_code = coalesce(excluded.ts_code, deep_value.{table}.ts_code),
+                end_date = coalesce(excluded.end_date, deep_value.{table}.end_date),
+                ann_date = coalesce(excluded.ann_date, deep_value.{table}.ann_date),
+                trade_date = coalesce(excluded.trade_date, deep_value.{table}.trade_date),
+                payload = excluded.payload,
+                updated_at = now()
+            "#
+        );
+
+        for row in items {
+            let mut payload = serde_json::Map::new();
+            for (idx, field) in fields.iter().enumerate() {
+                payload.insert(field.clone(), row.get(idx).cloned().unwrap_or(Value::Null));
+            }
+
+            let ts_code = json_field_string(&payload, "ts_code")
+                .or_else(|| json_field_string(&payload, "index_code"))
+                .or_else(|| json_field_string(&payload, "con_code"))
+                .or_else(|| params.get("ts_code").cloned())
+                .or_else(|| params.get("index_code").cloned())
+                .or_else(|| params.get("con_code").cloned());
+            let end_date = json_field_string(&payload, "end_date")
+                .or_else(|| params.get("period").cloned())
+                .or_else(|| params.get("end_date").cloned());
+            let ann_date =
+                json_field_string(&payload, "ann_date").or_else(|| params.get("ann_date").cloned());
+            let trade_date = json_field_string(&payload, "trade_date")
+                .or_else(|| params.get("trade_date").cloned());
+            let row_hash = stable_row_hash(api_name, fields, row);
+
+            sqlx::query(&sql)
+                .bind(row_hash)
+                .bind(ts_code)
+                .bind(end_date)
+                .bind(ann_date)
+                .bind(trade_date)
+                .bind(Value::Object(payload))
+                .execute(&self.pool)
+                .await
+                .with_context(|| format!("写入 {table} 失败"))?;
+        }
+
+        Ok(())
+    }
+
+    async fn load_json_rows(
+        &self,
+        table: &str,
+        range_field: &str,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
+        default_fields: &[&str],
+    ) -> Result<Option<DataFrame>> {
+        let code = params
+            .get("ts_code")
+            .or_else(|| params.get("index_code"))
+            .or_else(|| params.get("con_code"))
+            .map(String::as_str);
+        let exact_end_date = params
+            .get("period")
+            .or_else(|| {
+                if params.contains_key("start_date") {
+                    None
+                } else {
+                    params.get("end_date")
+                }
+            })
+            .map(String::as_str);
+        let ann_date = params.get("ann_date").map(String::as_str);
+        let trade_date = params.get("trade_date").map(String::as_str);
+        let start_date = params.get("start_date").map(String::as_str);
+        let range_end_date = if params.contains_key("start_date") {
+            params.get("end_date").map(String::as_str)
+        } else {
+            None
+        };
+        let range_expr = match range_field {
+            "trade_date" => "trade_date",
+            "ann_date" => "ann_date",
+            _ => "end_date",
+        };
+        let sql = format!(
+            r#"
+            select payload
+            from deep_value.{table}
+            where ($1::text is null or ts_code = $1 or payload->>'index_code' = $1 or payload->>'con_code' = $1)
+              and ($2::text is null or end_date = $2)
+              and ($3::text is null or ann_date = $3)
+              and ($4::text is null or trade_date = $4)
+              and ($5::text is null or {range_expr} >= $5)
+              and ($6::text is null or {range_expr} <= $6)
+            order by {range_expr}, ts_code, row_hash
+            "#
+        );
+        let rows = sqlx::query(&sql)
+            .bind(code)
+            .bind(exact_end_date)
+            .bind(ann_date)
+            .bind(trade_date)
+            .bind(start_date)
+            .bind(range_end_date)
+            .fetch_all(&self.pool)
+            .await
+            .with_context(|| format!("读取 {table} 失败"))?;
+
+        let payloads: Vec<Value> = rows
+            .iter()
+            .map(|row| row.try_get("payload"))
+            .collect::<std::result::Result<_, sqlx::Error>>()
+            .with_context(|| format!("解析 {table} payload 失败"))?;
+        payloads_to_dataframe(&requested_fields(fields, default_fields), &payloads)
     }
 
     async fn save_market_series(
@@ -1389,6 +1984,148 @@ impl PgCache {
     }
 }
 
+fn typed_json_endpoint(
+    api_name: &str,
+) -> Option<(&'static str, &'static [&'static str], &'static str)> {
+    match api_name {
+        "forecast" | "forecast_vip" => Some((
+            "tushare_forecast",
+            &[
+                "ts_code",
+                "ann_date",
+                "end_date",
+                "type",
+                "p_change_min",
+                "p_change_max",
+                "net_profit_min",
+                "net_profit_max",
+                "last_parent_net",
+                "first_ann_date",
+                "summary",
+                "change_reason",
+            ],
+            "ann_date",
+        )),
+        "express" | "express_vip" => Some((
+            "tushare_express",
+            &[
+                "ts_code",
+                "ann_date",
+                "end_date",
+                "revenue",
+                "operate_profit",
+                "total_profit",
+                "n_income",
+                "total_assets",
+                "total_hldr_eqy_exc_min_int",
+                "diluted_eps",
+                "diluted_roe",
+                "yoy_net_profit",
+                "bps",
+                "yoy_sales",
+                "yoy_op",
+                "yoy_tp",
+                "yoy_dedu_np",
+                "yoy_eps",
+                "yoy_roe",
+                "growth_assets",
+                "yoy_equity",
+                "growth_bps",
+                "or_last_year",
+                "op_last_year",
+                "tp_last_year",
+                "np_last_year",
+                "eps_last_year",
+                "open_net_assets",
+                "open_bps",
+                "perf_summary",
+                "is_audit",
+                "remark",
+            ],
+            "ann_date",
+        )),
+        "fina_mainbz" | "fina_mainbz_vip" => Some((
+            "tushare_fina_mainbz",
+            &[
+                "ts_code",
+                "end_date",
+                "bz_item",
+                "bz_code",
+                "bz_sales",
+                "bz_profit",
+                "bz_cost",
+                "curr_type",
+                "update_flag",
+            ],
+            "end_date",
+        )),
+        "index_weight" => Some((
+            "tushare_index_weight",
+            &["index_code", "con_code", "trade_date", "weight"],
+            "trade_date",
+        )),
+        "top10_holders" => Some((
+            "tushare_top10_holders",
+            &[
+                "ts_code",
+                "ann_date",
+                "end_date",
+                "holder_name",
+                "hold_amount",
+                "hold_ratio",
+                "hold_float_ratio",
+                "hold_change",
+                "holder_type",
+            ],
+            "end_date",
+        )),
+        "top10_floatholders" => Some((
+            "tushare_top10_floatholders",
+            &[
+                "ts_code",
+                "ann_date",
+                "end_date",
+                "holder_name",
+                "hold_amount",
+                "hold_ratio",
+                "hold_float_ratio",
+                "hold_change",
+                "holder_type",
+            ],
+            "end_date",
+        )),
+        "pledge_stat" => Some((
+            "tushare_pledge_stat",
+            &[
+                "ts_code",
+                "end_date",
+                "pledge_count",
+                "unrest_pledge",
+                "rest_pledge",
+                "total_share",
+                "pledge_ratio",
+            ],
+            "end_date",
+        )),
+        "repurchase" => Some((
+            "tushare_repurchase",
+            &[
+                "ts_code",
+                "ann_date",
+                "end_date",
+                "proc",
+                "exp_date",
+                "vol",
+                "amount",
+                "high_limit",
+                "low_limit",
+            ],
+            "ann_date",
+        )),
+        _ => None,
+    }
+}
+
 fn field_index(fields: &[String], name: &str) -> Option<usize> {
     fields.iter().position(|field| field == name)
 }
@@ -1439,6 +2176,49 @@ fn requested_fields(fields: Option<&str>, default_fields: &[&str]) -> Vec<String
         })
 }
 
+fn payloads_to_dataframe(fields: &[String], payloads: &[Value]) -> Result<Option<DataFrame>> {
+    if payloads.is_empty() {
+        return Ok(None);
+    }
+
+    let columns: Vec<Column> = fields
+        .iter()
+        .map(|field| {
+            let values: Vec<Option<String>> = payloads
+                .iter()
+                .map(|payload| payload.get(field).and_then(json_value_as_string))
+                .collect();
+            Column::new(
+                PlSmallStr::from(field.as_str()),
+                values
+                    .iter()
+                    .map(|value| value.as_deref())
+                    .collect::<Vec<Option<&str>>>(),
+            )
+        })
+        .collect();
+
+    Ok(Some(DataFrame::new(columns)?))
+}
+
+fn json_field_string(payload: &serde_json::Map<String, Value>, field: &str) -> Option<String> {
+    payload.get(field).and_then(json_value_as_string)
+}
+
+fn json_value_as_string(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => value
+            .as_i64()
+            .map(|value| value.to_string())
+            .or_else(|| value.as_u64().map(|value| value.to_string()))
+            .or_else(|| value.as_f64().map(trim_float_string)),
+        Value::Bool(value) => Some(value.to_string()),
+        value => Some(value.to_string()),
+    }
+}
+
 fn rows_to_dataframe(
     fields: &[String],
     rows: &[sqlx::postgres::PgRow],
@@ -1470,10 +2250,13 @@ fn rows_to_dataframe(
 fn row_value_as_string(row: &sqlx::postgres::PgRow, field: &str) -> Result<Option<String>> {
     let value = match field {
         "exchange" | "cal_date" | "is_open" | "ts_code" | "trade_date" | "name" | "industry"
-        | "list_status" | "list_date" | "end_date" | "audit_agency"
-        | "ann_date" | "actual_date" | "symbol" | "area" | "market" | "is_hs"
-        | "record_date" | "ex_date" | "div_proc" | "audit_result" | "audit_sign"
-        | "suspend_type" | "suspend_timing" | "pre_date" | "modify_date" | "pretrade_date" => row.try_get::<Option<String>, _>(field)?,
+        | "list_status" | "list_date" | "end_date" | "audit_agency" | "ann_date"
+        | "actual_date" | "symbol" | "area" | "market" | "is_hs" | "fullname" | "enname"
+        | "cnspell" | "curr_type" | "delist_date" | "act_name" | "act_ent_type" | "record_date"
+        | "ex_date" | "div_proc" | "audit_result" | "audit_sign" | "suspend_type"
+        | "suspend_timing" | "pre_date" | "modify_date" | "pretrade_date" => {
+            row.try_get::<Option<String>, _>(field)?
+        }
         "pb"
         | "pe"
         | "pe_ttm"
@@ -1496,13 +2279,40 @@ fn row_value_as_string(row: &sqlx::postgres::PgRow, field: &str) -> Result<Optio
         | "cfps"
         | "or_yoy"
         | "profit_dedt"
-        | "n_cashflow_act" | "n_cashflow_inv_act" | "n_cash_flows_fnc_act"
-        | "open" | "high" | "low" | "pre_close" | "pct_chg" | "vol" | "amount"
-        | "turnover_rate" | "turnover_rate_f" | "volume_ratio" | "ps" | "ps_ttm"
-        | "total_share" | "float_share" | "free_share" | "circ_mv"
-        | "total_revenue" | "revenue" | "oper_cost" | "sell_exp" | "admin_exp" | "fin_exp"
-        | "total_assets" | "total_cur_assets" | "total_cur_liab" | "total_liab"
-        | "audit_fees" | "dv_ttm" | "change" | "up_limit" | "down_limit" => row
+        | "n_cashflow_act"
+        | "n_cashflow_inv_act"
+        | "n_cash_flows_fnc_act"
+        | "open"
+        | "high"
+        | "low"
+        | "pre_close"
+        | "pct_chg"
+        | "vol"
+        | "amount"
+        | "turnover_rate"
+        | "turnover_rate_f"
+        | "volume_ratio"
+        | "ps"
+        | "ps_ttm"
+        | "total_share"
+        | "float_share"
+        | "free_share"
+        | "circ_mv"
+        | "total_revenue"
+        | "revenue"
+        | "oper_cost"
+        | "sell_exp"
+        | "admin_exp"
+        | "fin_exp"
+        | "total_assets"
+        | "total_cur_assets"
+        | "total_cur_liab"
+        | "total_liab"
+        | "audit_fees"
+        | "dv_ttm"
+        | "change"
+        | "up_limit"
+        | "down_limit" => row
             .try_get::<Option<f64>, _>(field)?
             .map(|value| trim_float_string(value)),
         _ => None,

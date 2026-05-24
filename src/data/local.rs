@@ -76,7 +76,11 @@ pub async fn build_cross_section(cache: &PgCache, trade_date: &str) -> Result<Da
 
     let stock_params = hmap(&[("list_status", "L")]);
     let basic = cache
-        .load_typed("stock_basic", &stock_params, Some("ts_code,name,industry,list_date"))
+        .load_typed(
+            "stock_basic",
+            &stock_params,
+            Some("ts_code,name,industry,list_date"),
+        )
         .await?
         .unwrap_or_else(|| df_empty(&["ts_code", "name", "industry"]));
     info!(rows = basic.height(), "stock_basic (local)");
@@ -119,9 +123,8 @@ pub async fn get_10y_pb_max(
 
     for y in start_year..=year {
         let date = format!("{y}{month_day}");
-        let params = hmap(&[("trade_date", date.as_str())]);
         let Some(df) = cache
-            .load_typed("daily_basic", &params, Some("ts_code,pb"))
+            .load_daily_basic_on_or_before(date.as_str(), Some("ts_code,pb"))
             .await?
         else {
             continue;
@@ -169,7 +172,10 @@ pub async fn get_net_equity(cache: &PgCache, trade_date: &str) -> Result<DataFra
         return Ok(df_empty(&["ts_code", "net_equity_bn"]));
     };
     if df.height() == 0 {
-        return Ok(df.select(["ts_code"])?.clone().lazy()
+        return Ok(df
+            .select(["ts_code"])?
+            .clone()
+            .lazy()
             .with_column(lit(NULL).cast(DataType::Float64).alias("net_equity_bn"))
             .collect()?);
     }
@@ -203,7 +209,10 @@ pub async fn get_audit_info(cache: &PgCache, trade_date: &str) -> Result<DataFra
         return Ok(df_empty(&["ts_code", "is_big4"]));
     }
     let audit_col = df.column("audit_agency")?.str()?;
-    let big4_flags: BooleanChunked = audit_col.into_iter().map(|opt_val| opt_val.map(is_big4)).collect();
+    let big4_flags: BooleanChunked = audit_col
+        .into_iter()
+        .map(|opt_val| opt_val.map(is_big4))
+        .collect();
     let mut result = df.select(["ts_code"])?.clone();
     let _ = result.with_column(big4_flags.into_column().with_name("is_big4".into()));
     Ok(result
@@ -231,7 +240,11 @@ pub async fn get_current_year_income(cache: &PgCache, trade_date: &str) -> Resul
     }
     Ok(df
         .lazy()
-        .with_column(col("n_income").cast(DataType::Float64).alias("current_net_income"))
+        .with_column(
+            col("n_income")
+                .cast(DataType::Float64)
+                .alias("current_net_income"),
+        )
         .sort(["ts_code"], Default::default())
         .unique(Some(vec!["ts_code".into()]), UniqueKeepStrategy::First)
         .select([col("ts_code"), col("current_net_income")])
@@ -246,11 +259,7 @@ pub async fn get_current_year_dividend(cache: &PgCache, trade_date: &str) -> Res
     let period = format!("{}1231", safe_financial_year(trade_date));
     let params = hmap(&[("end_date", period.as_str())]);
     let Some(df) = cache
-        .load_typed(
-            "dividend",
-            &params,
-            Some("ts_code,end_date,cash_div_tax"),
-        )
+        .load_typed("dividend", &params, Some("ts_code,end_date,cash_div_tax"))
         .await?
     else {
         return Ok(df_empty(&["ts_code", "current_dividend_total"]));
@@ -360,10 +369,22 @@ pub async fn get_fina_indicator(cache: &PgCache, trade_date: &str) -> Result<Dat
         )
         .await?
     else {
-        return Ok(df_empty(&["ts_code", "roe", "grossprofit_margin", "netprofit_margin", "debt_to_assets"]));
+        return Ok(df_empty(&[
+            "ts_code",
+            "roe",
+            "grossprofit_margin",
+            "netprofit_margin",
+            "debt_to_assets",
+        ]));
     };
     if df.height() == 0 {
-        return Ok(df_empty(&["ts_code", "roe", "grossprofit_margin", "netprofit_margin", "debt_to_assets"]));
+        return Ok(df_empty(&[
+            "ts_code",
+            "roe",
+            "grossprofit_margin",
+            "netprofit_margin",
+            "debt_to_assets",
+        ]));
     }
     Ok(df
         .lazy()
@@ -465,14 +486,13 @@ pub async fn get_daily_prices(
             .lazy()
             .with_column(col("close").cast(DataType::Float64))
             .join(
-                adj.lazy().with_column(col("adj_factor").cast(DataType::Float64)),
+                adj.lazy()
+                    .with_column(col("adj_factor").cast(DataType::Float64)),
                 [col("ts_code"), col("trade_date")],
                 [col("ts_code"), col("trade_date")],
                 JoinArgs::new(JoinType::Left),
             )
-            .with_column(
-                (col("close") * col("adj_factor").fill_null(lit(1.0))).alias("close_adj"),
-            )
+            .with_column((col("close") * col("adj_factor").fill_null(lit(1.0))).alias("close_adj"))
             .select([col("ts_code"), col("trade_date"), col("close_adj")])
             .collect()?;
         frames.push(merged);
@@ -486,7 +506,10 @@ pub async fn get_daily_prices(
         return Ok(DataFrame::empty_with_schema(&schema));
     }
     concat(
-        frames.iter().map(|df| df.clone().lazy()).collect::<Vec<_>>(),
+        frames
+            .iter()
+            .map(|df| df.clone().lazy())
+            .collect::<Vec<_>>(),
         Default::default(),
     )?
     .sort(["ts_code", "trade_date"], Default::default())
@@ -559,7 +582,10 @@ fn aggregate_10y_sum(
         return Ok(DataFrame::empty_with_schema(&schema));
     }
     let combined = concat(
-        frames.iter().map(|df| df.clone().lazy()).collect::<Vec<_>>(),
+        frames
+            .iter()
+            .map(|df| df.clone().lazy())
+            .collect::<Vec<_>>(),
         Default::default(),
     )?;
     Ok(combined
