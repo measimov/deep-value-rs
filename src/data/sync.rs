@@ -43,12 +43,19 @@ pub async fn run_sync(
     let started = Instant::now();
     let mut stats = SyncStats::default();
 
-    // 1. stock_basic (always refresh — small, fast)
+    // 1. stock_basic (L — listed stocks for universe)
     force_step(
         client, &limiter, &mut stats,
         "stock_basic", &[("list_status", "L")],
         Some("ts_code,symbol,name,area,industry,market,list_status,list_date,is_hs"),
     ).await?;
+    // 1b. stock_basic (D+P — delisted/suspended for survivorship-bias correction)
+    for &st in &["D", "P"] {
+        force_step(client, &limiter, &mut stats,
+            "stock_basic", &[("list_status", st)],
+            Some("ts_code,symbol,name,area,industry,market,list_status,list_date,is_hs"),
+        ).await?;
+    }
 
     let codes = fetch_listed_codes(client, &limiter, &mut stats).await?;
     if codes.is_empty() {
@@ -90,27 +97,29 @@ pub async fn run_sync(
     let existing_cf = cache.existing_cashflow_periods().await?;
 
     for year in fin_start..=fin_end {
-        let period = format!("{year}1231");
-        if !existing_inc.contains(&period) {
-            force_step(client, &limiter, &mut stats, "income_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,n_income,total_revenue,revenue,oper_cost,sell_exp,admin_exp,fin_exp")).await?;
-        } else { stats.skipped += 1; }
-        if !existing_bs.contains(&period) {
-            force_step(client, &limiter, &mut stats, "balancesheet_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,total_hldr_eqy_exc_min_int,total_assets,total_cur_assets,total_cur_liab,total_liab")).await?;
-        } else { stats.skipped += 1; }
-        if !existing_fi.contains(&period) {
-            force_step(client, &limiter, &mut stats, "fina_indicator_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,roe,roa,grossprofit_margin,netprofit_margin,debt_to_assets,current_ratio,bps,eps,cfps,or_yoy,profit_dedt")).await?;
-        } else { stats.skipped += 1; }
-        if !existing_cf.contains(&period) {
-            force_step(client, &limiter, &mut stats, "cashflow_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act")).await?;
-        } else { stats.skipped += 1; }
+        for &qtr_end in &["0331", "0630", "0930", "1231"] {
+            let period = format!("{year}{qtr_end}");
+            if !existing_inc.contains(&period) {
+                force_step(client, &limiter, &mut stats, "income_vip",
+                    &[("period", period.as_str()), ("report_type", "1")],
+                    Some("ts_code,end_date,n_income,total_revenue,revenue,oper_cost,sell_exp,admin_exp,fin_exp")).await?;
+            } else { stats.skipped += 1; }
+            if !existing_bs.contains(&period) {
+                force_step(client, &limiter, &mut stats, "balancesheet_vip",
+                    &[("period", period.as_str()), ("report_type", "1")],
+                    Some("ts_code,end_date,total_hldr_eqy_exc_min_int,total_assets,total_cur_assets,total_cur_liab,total_liab")).await?;
+            } else { stats.skipped += 1; }
+            if !existing_fi.contains(&period) {
+                force_step(client, &limiter, &mut stats, "fina_indicator_vip",
+                    &[("period", period.as_str()), ("report_type", "1")],
+                    Some("ts_code,end_date,roe,roa,grossprofit_margin,netprofit_margin,debt_to_assets,current_ratio,bps,eps,cfps,or_yoy,profit_dedt")).await?;
+            } else { stats.skipped += 1; }
+            if !existing_cf.contains(&period) {
+                force_step(client, &limiter, &mut stats, "cashflow_vip",
+                    &[("period", period.as_str()), ("report_type", "1")],
+                    Some("ts_code,end_date,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act")).await?;
+            } else { stats.skipped += 1; }
+        }
     }
 
     // disclosure_date (latest period)
@@ -167,6 +176,14 @@ pub async fn run_sync(
                 &[("trade_date", date.as_str())],
                 Some("ts_code,trade_date,adj_factor")).await?;
         }
+        if !existing_db.contains(date) {
+            force_step(client, &limiter, &mut stats, "suspend_d",
+                &[("trade_date", date.as_str())],
+                Some("ts_code,trade_date,suspend_type,suspend_timing")).await?;
+            force_step(client, &limiter, &mut stats, "stk_limit",
+                &[("trade_date", date.as_str())],
+                Some("ts_code,trade_date,up_limit,down_limit")).await?;
+        } else { stats.skipped += 2; }
     }
 
     // 11. index_daily

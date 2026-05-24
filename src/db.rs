@@ -253,6 +253,12 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
         r#"alter table deep_value.tushare_daily_basic add column if not exists float_share double precision"#,
         r#"alter table deep_value.tushare_daily_basic add column if not exists free_share double precision"#,
         r#"alter table deep_value.tushare_daily_basic add column if not exists circ_mv double precision"#,
+        r#"alter table deep_value.tushare_daily_basic add column if not exists dv_ttm double precision"#,
+        r#"alter table deep_value.tushare_daily add column if not exists change double precision"#,
+        r#"alter table deep_value.tushare_index_daily add column if not exists change double precision"#,
+        r#"alter table deep_value.tushare_fina_audit add column if not exists audit_sign text"#,
+        r#"alter table deep_value.tushare_disclosure_date add column if not exists pre_date text"#,
+        r#"alter table deep_value.tushare_disclosure_date add column if not exists modify_date text"#,
         r#"alter table deep_value.tushare_daily add column if not exists open double precision"#,
         r#"alter table deep_value.tushare_daily add column if not exists high double precision"#,
         r#"alter table deep_value.tushare_daily add column if not exists low double precision"#,
@@ -287,6 +293,34 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
         r#"alter table deep_value.tushare_dividend add column if not exists ex_date text"#,
         r#"alter table deep_value.tushare_dividend add column if not exists ann_date text"#,
         r#"alter table deep_value.tushare_dividend add column if not exists div_proc text"#,
+        r#"
+        create table if not exists deep_value.tushare_suspend_d (
+            ts_code text not null,
+            trade_date text not null,
+            suspend_type text,
+            suspend_timing text,
+            updated_at timestamptz not null default now(),
+            primary key (ts_code, trade_date)
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_suspend_d_trade_date
+            on deep_value.tushare_suspend_d(trade_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_stk_limit (
+            ts_code text not null,
+            trade_date text not null,
+            up_limit double precision,
+            down_limit double precision,
+            updated_at timestamptz not null default now(),
+            primary key (ts_code, trade_date)
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_stk_limit_trade_date
+            on deep_value.tushare_stk_limit(trade_date)
+        "#,
     ];
 
     let mut tx = pool.begin().await.context("启动 schema 初始化事务失败")?;
