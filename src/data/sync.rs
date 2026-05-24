@@ -138,7 +138,7 @@ pub async fn run_sync(
         }
         force_step(client, &limiter, &mut stats, "fina_audit",
             &[("ts_code", code.as_str()), ("period", audit_period.as_str())],
-            Some("ts_code,audit_agency,ann_date,end_date,audit_result,audit_fees")).await?;
+            Some("ts_code,audit_agency,ann_date,end_date,audit_result,audit_fees,audit_sign")).await?;
     }
 
     // 8. dividend — skip stocks already covered
@@ -156,7 +156,7 @@ pub async fn run_sync(
     // 9. trade_cal
     force_step(client, &limiter, &mut stats, "trade_cal",
         &[("exchange", "SSE"), ("start_date", start_date), ("end_date", end_date), ("is_open", "1")],
-        Some("exchange,cal_date,is_open")).await?;
+        Some("exchange,cal_date,is_open,pretrade_date")).await?;
 
     // 10. daily + adj_factor — independent coverage per table
     let existing_daily = cache.existing_daily_dates().await?;
@@ -167,7 +167,7 @@ pub async fn run_sync(
         } else {
             force_step(client, &limiter, &mut stats, "daily",
                 &[("trade_date", date.as_str())],
-                Some("ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount")).await?;
+                Some("ts_code,trade_date,open,high,low,close,pre_close,pct_chg,change,vol,amount")).await?;
         }
         if existing_adj.contains(date) {
             stats.skipped += 1;
@@ -176,20 +176,18 @@ pub async fn run_sync(
                 &[("trade_date", date.as_str())],
                 Some("ts_code,trade_date,adj_factor")).await?;
         }
-        if !existing_db.contains(date) {
-            force_step(client, &limiter, &mut stats, "suspend_d",
-                &[("trade_date", date.as_str())],
-                Some("ts_code,trade_date,suspend_type,suspend_timing")).await?;
-            force_step(client, &limiter, &mut stats, "stk_limit",
-                &[("trade_date", date.as_str())],
-                Some("ts_code,trade_date,up_limit,down_limit")).await?;
-        } else { stats.skipped += 2; }
+        force_step(client, &limiter, &mut stats, "suspend_d",
+            &[("trade_date", date.as_str())],
+            Some("ts_code,trade_date,suspend_type,suspend_timing")).await?;
+        force_step(client, &limiter, &mut stats, "stk_limit",
+            &[("trade_date", date.as_str())],
+            Some("ts_code,trade_date,up_limit,down_limit")).await?;
     }
 
     // 11. index_daily
     force_step(client, &limiter, &mut stats, "index_daily",
         &[("ts_code", "000300.SH"), ("start_date", start_date), ("end_date", end_date)],
-        Some("ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount")).await?;
+        Some("ts_code,trade_date,open,high,low,close,pre_close,pct_chg,change,vol,amount")).await?;
 
     stats.elapsed_secs = started.elapsed().as_secs_f64();
     info!(calls = stats.total_calls, rows = stats.total_rows, skipped = stats.skipped, errors = stats.errors, elapsed = stats.elapsed_secs, "全量同步完成");
@@ -255,7 +253,7 @@ async fn sync_daily_incremental(
     for date in recent.iter().take(2) {
         force_step(client, &limiter, &mut stats, "daily",
             &[("trade_date", date.as_str())],
-            Some("ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount")).await?;
+            Some("ts_code,trade_date,open,high,low,close,pre_close,pct_chg,change,vol,amount")).await?;
         force_step(client, &limiter, &mut stats, "adj_factor",
             &[("trade_date", date.as_str())],
             Some("ts_code,trade_date,adj_factor")).await?;
@@ -265,7 +263,7 @@ async fn sync_daily_incremental(
     let first_date = recent.last().map(|s| s.to_string()).unwrap_or_default();
     force_step(client, &limiter, &mut stats, "index_daily",
         &[("ts_code", "000300.SH"), ("start_date", first_date.as_str()), ("end_date", end_date)],
-        Some("ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount")).await?;
+        Some("ts_code,trade_date,open,high,low,close,pre_close,pct_chg,change,vol,amount")).await?;
 
     stats.elapsed_secs = started.elapsed().as_secs_f64();
     info!(calls = stats.total_calls, skipped = stats.skipped, elapsed = stats.elapsed_secs, "daily 增量完成");
@@ -294,34 +292,28 @@ async fn sync_financial_incremental(
     let cashflow_periods = cache.existing_cashflow_periods().await?;
 
     for year in fin_start..=fin_end {
-        let period = format!("{year}1231");
-        if !income_periods.contains(&period) {
-            force_step(client, &limiter, &mut stats, "income_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,n_income,total_revenue,revenue,oper_cost,sell_exp,admin_exp,fin_exp")).await?;
-        } else {
-            stats.skipped += 1;
-        }
-        if !balance_periods.contains(&period) {
-            force_step(client, &limiter, &mut stats, "balancesheet_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,total_hldr_eqy_exc_min_int,total_assets,total_cur_assets,total_cur_liab,total_liab")).await?;
-        } else {
-            stats.skipped += 1;
-        }
-        if !indicator_periods.contains(&period) {
-            force_step(client, &limiter, &mut stats, "fina_indicator_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,roe,roa,grossprofit_margin,netprofit_margin,debt_to_assets")).await?;
-        } else {
-            stats.skipped += 1;
-        }
-        if !cashflow_periods.contains(&period) {
-            force_step(client, &limiter, &mut stats, "cashflow_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act")).await?;
-        } else {
-            stats.skipped += 1;
+        for &qtr_end in &["0331", "0630", "0930", "1231"] {
+            let period = format!("{year}{qtr_end}");
+            if !income_periods.contains(&period) {
+                force_step(client, &limiter, &mut stats, "income_vip",
+                    &[("period", period.as_str()), ("report_type", "1")],
+                    Some("ts_code,end_date,n_income,total_revenue,revenue,oper_cost,sell_exp,admin_exp,fin_exp")).await?;
+            } else { stats.skipped += 1; }
+            if !balance_periods.contains(&period) {
+                force_step(client, &limiter, &mut stats, "balancesheet_vip",
+                    &[("period", period.as_str()), ("report_type", "1")],
+                    Some("ts_code,end_date,total_hldr_eqy_exc_min_int,total_assets,total_cur_assets,total_cur_liab,total_liab")).await?;
+            } else { stats.skipped += 1; }
+            if !indicator_periods.contains(&period) {
+                force_step(client, &limiter, &mut stats, "fina_indicator_vip",
+                    &[("period", period.as_str()), ("report_type", "1")],
+                    Some("ts_code,end_date,roe,roa,grossprofit_margin,netprofit_margin,debt_to_assets")).await?;
+            } else { stats.skipped += 1; }
+            if !cashflow_periods.contains(&period) {
+                force_step(client, &limiter, &mut stats, "cashflow_vip",
+                    &[("period", period.as_str()), ("report_type", "1")],
+                    Some("ts_code,end_date,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act")).await?;
+            } else { stats.skipped += 1; }
         }
     }
 
@@ -335,7 +327,7 @@ async fn sync_financial_incremental(
         if !existing_audit.contains(code) {
             force_step(client, &limiter, &mut stats, "fina_audit",
                 &[("ts_code", code.as_str()), ("period", audit_period.as_str())],
-                Some("ts_code,audit_agency,ann_date,end_date,audit_result,audit_fees")).await?;
+                Some("ts_code,audit_agency,ann_date,end_date,audit_result,audit_fees,audit_sign")).await?;
         } else {
             stats.skipped += 1;
         }

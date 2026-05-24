@@ -259,6 +259,7 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
         r#"alter table deep_value.tushare_fina_audit add column if not exists audit_sign text"#,
         r#"alter table deep_value.tushare_disclosure_date add column if not exists pre_date text"#,
         r#"alter table deep_value.tushare_disclosure_date add column if not exists modify_date text"#,
+        r#"alter table deep_value.tushare_trade_cal add column if not exists pretrade_date text"#,
         r#"alter table deep_value.tushare_daily add column if not exists open double precision"#,
         r#"alter table deep_value.tushare_daily add column if not exists high double precision"#,
         r#"alter table deep_value.tushare_daily add column if not exists low double precision"#,

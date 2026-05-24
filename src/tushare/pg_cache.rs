@@ -366,16 +366,18 @@ impl PgCache {
 
             sqlx::query(
                 r#"
-                insert into deep_value.tushare_trade_cal (exchange, cal_date, is_open)
-                values ($1, $2, $3)
+                insert into deep_value.tushare_trade_cal (exchange, cal_date, is_open, pretrade_date)
+                values ($1, $2, $3, $4)
                 on conflict (exchange, cal_date) do update set
                     is_open = excluded.is_open,
+                    pretrade_date = coalesce(excluded.pretrade_date, deep_value.tushare_trade_cal.pretrade_date),
                     updated_at = now()
                 "#,
             )
             .bind(exchange)
             .bind(cal_date)
             .bind(is_open)
+            .bind(field_str_opt(fields, row, "pretrade_date"))
             .execute(&self.pool)
             .await
             .context("写入 tushare_trade_cal 失败")?;
@@ -481,7 +483,7 @@ impl PgCache {
 
         let rows = sqlx::query(
             r#"
-            select exchange, cal_date, is_open
+            select exchange, cal_date, is_open, pretrade_date
             from deep_value.tushare_trade_cal
             where exchange = $1
               and cal_date >= $2
@@ -499,7 +501,7 @@ impl PgCache {
         .context("读取 tushare_trade_cal 失败")?;
 
         rows_to_dataframe(
-            &requested_fields(fields, &["exchange", "cal_date", "is_open"]),
+            &requested_fields(fields, &["exchange", "cal_date", "is_open", "pretrade_date"]),
             &rows,
         )
     }
@@ -754,6 +756,7 @@ impl PgCache {
             .bind(field_str_opt(fields, row, "end_date"))
             .bind(field_str_opt(fields, row, "audit_result"))
             .bind(field_f64_opt(fields, row, "audit_fees"))
+            .bind(field_str_opt(fields, row, "audit_sign"))
             .execute(&self.pool)
             .await
             .context("写入 tushare_fina_audit 失败")?;
@@ -1470,7 +1473,7 @@ fn row_value_as_string(row: &sqlx::postgres::PgRow, field: &str) -> Result<Optio
         | "list_status" | "list_date" | "end_date" | "audit_agency"
         | "ann_date" | "actual_date" | "symbol" | "area" | "market" | "is_hs"
         | "record_date" | "ex_date" | "div_proc" | "audit_result" | "audit_sign"
-        | "suspend_type" | "suspend_timing" | "pre_date" | "modify_date" => row.try_get::<Option<String>, _>(field)?,
+        | "suspend_type" | "suspend_timing" | "pre_date" | "modify_date" | "pretrade_date" => row.try_get::<Option<String>, _>(field)?,
         "pb"
         | "pe"
         | "pe_ttm"
