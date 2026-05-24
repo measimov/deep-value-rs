@@ -1,5 +1,6 @@
 //! 中文格式化输出 — 对应 Python 版 `format_snapshot_result()`。
 
+use crate::backtest::engine::BacktestResult;
 use crate::strategy::domain::{Holding, SnapshotResult, StepRecord};
 
 /// 格式化快照结果为可打印的中文报告。
@@ -107,4 +108,56 @@ fn format_holding(out: &mut String, h: &Holding) {
         h.total_score,
         h.weight * 100.0
     ));
+}
+
+/// 格式化回测结果为中文报告。
+pub fn format_backtest(result: &BacktestResult) -> String {
+    let m = &result.metrics;
+    let sep = "=".repeat(60);
+    let mut out = String::with_capacity(4096);
+
+    out.push_str(&format!("{sep}\n"));
+    out.push_str("  低估分散不深研 — 季度再平衡回测报告\n");
+    out.push_str(&format!("{sep}\n\n"));
+
+    // 关键指标
+    out.push_str("【核心指标】\n");
+    out.push_str(&format!("  累计收益     {:.2}%\n", m.total_return * 100.0));
+    out.push_str(&format!("  年化收益     {:.2}%\n", m.annualized_return * 100.0));
+    out.push_str(&format!("  基准收益     {:.2}%\n", m.benchmark_total_return * 100.0));
+    out.push_str(&format!("  超额收益     {:.2}%\n", m.excess_return * 100.0));
+    out.push_str(&format!("  最大回撤     {:.2}%\n", m.max_drawdown * 100.0));
+    out.push_str(&format!("  回撤区间     {} .. {}\n", m.max_drawdown_start, m.max_drawdown_end));
+    out.push_str(&format!("  年化波动率   {:.2}%\n", m.volatility * 100.0));
+    out.push_str(&format!("  夏普比率     {:.2}\n", m.sharpe_ratio));
+    out.push_str(&format!("  卡尔马比率   {:.2}\n", m.calmar_ratio));
+    out.push_str(&format!("  胜率         {:.1}%\n", m.win_rate * 100.0));
+    out.push_str(&format!("  总换手率     {:.0}%\n", m.total_turnover));
+    out.push_str(&format!("  总交易成本   {:.2}%\n", m.total_cost));
+    out.push_str(&format!("  再平衡次数   {}\n", m.num_rebalances));
+    out.push('\n');
+
+    // 各期收益
+    out.push_str(&format!("【各期收益】共 {} 期\n", result.period_returns.len()));
+    out.push_str(&format!(
+        "  {:<12} {:<12} {:>8} {:>8} {:>8} {:>6} {:>5} {:>5}\n",
+        "起始", "结束", "总收益%", "净收益%", "换手%", "持仓", "新增", "退出"
+    ));
+    out.push_str(&format!("  {}\n", "-".repeat(75)));
+    for p in &result.period_returns {
+        out.push_str(&format!(
+            "  {:<12} {:<12} {:>7.2} {:>7.2} {:>7.1} {:>5} {:>5} {:>5}\n",
+            p.date,
+            p.end_date,
+            p.gross_return * 100.0,
+            p.net_return * 100.0,
+            p.turnover * 100.0,
+            p.holdings_count,
+            p.added,
+            p.removed,
+        ));
+    }
+
+    out.push_str(&format!("\n{sep}\n"));
+    out
 }

@@ -13,13 +13,14 @@ use polars::prelude::*;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+use deep_value::backtest::{engine, metrics};
 use deep_value::config::AppConfig;
 use deep_value::data::{cross_section, financials, local, sync};
 use deep_value::db;
 use deep_value::report::formatter;
 use deep_value::strategy::{
     anomaly,
-    domain::{DeepValueConfig, EliminatedStock, Holding, SnapshotResult},
+    domain::{CostConfig, DeepValueConfig, EliminatedStock, Holding, SnapshotResult},
     scoring, screening,
 };
 use deep_value::tushare::client::TushareClient;
@@ -67,6 +68,29 @@ enum Commands {
         /// 从本地 PostgreSQL typed 表读取，不调用 Tushare API
         #[arg(long)]
         local: bool,
+    },
+
+    /// 季度再平衡回测（离线）
+    Backtest {
+        /// 起始日期，格式 YYYYMMDD
+        #[arg(long, default_value = "20150101")]
+        start: String,
+
+        /// 结束日期，格式 YYYYMMDD
+        #[arg(long, default_value = "20250520")]
+        end: String,
+
+        /// 每期持仓数量
+        #[arg(long, default_value_t = 30)]
+        top: usize,
+
+        /// 从本地 PostgreSQL typed 表读取
+        #[arg(long)]
+        local: bool,
+
+        /// 跳过市场 PB 中位数建仓门槛检查
+        #[arg(long)]
+        skip_pb_check: bool,
     },
 
     /// 预取 Tushare 数据到 PostgreSQL typed 表
@@ -123,6 +147,13 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Ping => cmd_ping().await?,
+        Commands::Backtest {
+            start,
+            end,
+            top,
+            local,
+            skip_pb_check,
+        } => cmd_backtest(&start, &end, top, local, skip_pb_check).await?,
         Commands::Cache { action } => match action {
             CacheAction::Clear => cmd_cache_clear().await?,
         },
@@ -224,6 +255,205 @@ async fn cmd_sync(
         );
     }
     Ok(())
+}
+
+/// 季度再平衡回测。
+async fn cmd_backtest(
+    start: &str,
+    end: &str,
+    top: usize,
+    local: bool,
+    skip_pb_check: bool,
+) -> Result<()> {
+    let config = AppConfig::load()?;
+    let pool = db::connect(&config.database_url).await?;
+    db::init_schema(&pool).await?;
+    let cache = PgCache::new(pool);
+
+    if !local {
+        anyhow::bail!("回测目前仅支持 --local 模式。请先运行 sync 初始化数据。");
+    }
+
+    let result = run_backtest_local(&cache, start, end, top, skip_pb_check).await?;
+    println!("{}", formatter::format_backtest(&result));
+    Ok(())
+}
+
+async fn run_backtest_local(
+    cache: &PgCache,
+    start_date: &str,
+    end_date: &str,
+    top: usize,
+    skip_pb_check: bool,
+) -> Result<engine::BacktestResult> {
+    let cost = CostConfig::default();
+
+    // 使用已有的 daily_basic 周年日作为再平衡点
+    let rebalance_dates = pick_available_rebalance_dates(cache, start_date, end_date).await?;
+    info!(
+        count = rebalance_dates.len(),
+        first = rebalance_dates.first().map(|s| s.as_str()).unwrap_or(""),
+        last = rebalance_dates.last().map(|s| s.as_str()).unwrap_or(""),
+        "再平衡日期（daily_basic 可用日）"
+    );
+
+    // 每期选股
+    let mut period_holdings: Vec<(String, Vec<String>)> = Vec::new();
+    let mut all_codes: Vec<String> = Vec::new();
+    for date in &rebalance_dates {
+        let snap = run_ashare_snapshot_local(cache, date, top, skip_pb_check).await?;
+        let codes: Vec<String> = snap.holdings.iter().map(|h| h.ts_code.clone()).collect();
+        for c in &codes {
+            if !all_codes.contains(c) {
+                all_codes.push(c.clone());
+            }
+        }
+        period_holdings.push((date.clone(), codes));
+    }
+
+    // 加载全区间价格
+    let prices = local::get_daily_prices(cache, &all_codes, start_date, end_date).await?;
+    let benchmark = local::get_index_daily(cache, "000300.SH", start_date, end_date).await?;
+
+    // 逐期计算收益
+    let mut nav = 1.0;
+    let mut nav_series: Vec<f64> = vec![nav];
+    let mut nav_dates: Vec<String> = vec![rebalance_dates[0].clone()];
+    let mut period_returns: Vec<engine::PeriodReturn> = Vec::new();
+    let mut all_holding_returns: Vec<deep_value::strategy::domain::HoldingReturn> = Vec::new();
+
+    for i in 0..period_holdings.len() {
+        let (ref p_start, ref codes) = period_holdings[i];
+        let p_end: String = if i + 1 < period_holdings.len() {
+            period_holdings[i + 1].0.clone()
+        } else {
+            end_date.to_string()
+        };
+
+        let (gross_ret, hrs) =
+            engine::compute_period_return(codes, &prices, p_start, &p_end)?;
+        all_holding_returns.extend(hrs);
+
+        let (added, removed) = if i == 0 {
+            (codes.len(), 0)
+        } else {
+            let prev = &period_holdings[i - 1].1;
+            let added = codes.iter().filter(|c| !prev.contains(c)).count();
+            let removed = prev.iter().filter(|c| !codes.contains(c)).count();
+            (added, removed)
+        };
+        let turnover = metrics::turnover_ratio(added, removed, codes.len());
+        let cost_pct = metrics::transaction_cost(
+            added,
+            removed,
+            codes.len(),
+            cost.commission_rate,
+            cost.stamp_tax,
+            cost.slippage,
+        );
+        let net_ret = (1.0 + gross_ret) * (1.0 - cost_pct) - 1.0;
+
+        nav *= 1.0 + net_ret;
+        nav_series.push(nav);
+        nav_dates.push(p_end.clone());
+
+        period_returns.push(engine::PeriodReturn {
+            date: p_start.clone(),
+            end_date: p_end.clone(),
+            gross_return: gross_ret,
+            cost: cost_pct,
+            net_return: net_ret,
+            turnover,
+            holdings_count: codes.len(),
+            added,
+            removed,
+        });
+    }
+
+    // 基准净值
+    let bm_prices: Vec<f64> = benchmark
+        .column("benchmark_close")?
+        .f64()?
+        .into_iter()
+        .filter_map(|v| v)
+        .collect();
+    let bm_first = bm_prices.first().copied().unwrap_or(1.0);
+    let bm_nav: Vec<f64> = bm_prices.iter().map(|p| p / bm_first).collect();
+
+    // 用实际日期间隔天数计算年化指标
+    let total_days = days_between(start_date, end_date).max(1);
+    let ann_ret = metrics::annualized_return(
+        *nav_series.last().unwrap_or(&1.0) - 1.0,
+        total_days,
+    );
+    let bm_total = *bm_nav.last().unwrap_or(&1.0) - 1.0;
+    let bm_ann = metrics::annualized_return(bm_total, total_days);
+
+    let daily_returns: Vec<f64> = nav_series.windows(2).map(|w| w[1] / w[0] - 1.0).collect();
+    let vol = metrics::annualized_volatility(&daily_returns);
+    let sharpe = metrics::sharpe_ratio(&daily_returns, 0.03);
+    let (max_dd, dd_start_idx, dd_end_idx) = metrics::max_drawdown(&nav_series);
+    let calmar = metrics::calmar_ratio(ann_ret, max_dd);
+    let wins = all_holding_returns.iter().filter(|h| h.holding_return > 0.0).count();
+    let win_rate = if all_holding_returns.is_empty() { 0.0 } else { wins as f64 / all_holding_returns.len() as f64 };
+    let total_turnover: f64 = period_returns.iter().map(|p| p.turnover).sum::<f64>() * 100.0;
+    let total_cost: f64 = period_returns.iter().map(|p| p.cost).sum::<f64>() * 100.0;
+
+    let metrics = deep_value::strategy::domain::BacktestMetrics {
+        total_return: (*nav_series.last().unwrap_or(&1.0) - 1.0),
+        annualized_return: ann_ret,
+        benchmark_total_return: bm_total,
+        benchmark_annualized: bm_ann,
+        excess_return: ann_ret - bm_ann,
+        max_drawdown: max_dd,
+        max_drawdown_start: nav_dates.get(dd_start_idx).cloned().unwrap_or_default(),
+        max_drawdown_end: nav_dates.get(dd_end_idx).cloned().unwrap_or_default(),
+        sharpe_ratio: sharpe,
+        calmar_ratio: calmar,
+        volatility: vol,
+        win_rate,
+        total_turnover,
+        total_cost,
+        num_rebalances: period_holdings.len(),
+        avg_holding_days: 0.0,
+    };
+
+    Ok(engine::BacktestResult {
+        metrics,
+        nav_series: df!(
+            "date" => nav_dates,
+            "nav" => nav_series,
+        )?,
+        period_returns,
+        holding_returns: all_holding_returns,
+    })
+}
+
+fn days_between(start: &str, end: &str) -> usize {
+    use chrono::NaiveDate;
+    let s = NaiveDate::parse_from_str(start, "%Y%m%d").unwrap();
+    let e = NaiveDate::parse_from_str(end, "%Y%m%d").unwrap();
+    (e - s).num_days().max(1) as usize
+}
+
+async fn pick_available_rebalance_dates(
+    cache: &PgCache,
+    start: &str,
+    end: &str,
+) -> Result<Vec<String>> {
+    let mut dates = Vec::new();
+    for year in start[..4].parse::<i32>()?..=end[..4].parse::<i32>()? {
+        let candidate = format!("{year}0520");
+        let params = std::collections::HashMap::from([("trade_date".to_string(), candidate.clone())]);
+        if let Ok(Some(df)) = cache.load_typed("daily_basic", &params, Some("ts_code")).await {
+            if df.height() > 0 && candidate.as_str() >= start && candidate.as_str() <= end {
+                dates.push(candidate);
+            }
+        }
+    }
+    // 去掉等于 end 的日期——end_date 用于最后净值计算，无需再平衡
+    dates.retain(|d| d.as_str() < end);
+    Ok(dates)
 }
 
 /// 单期真实选股快照。

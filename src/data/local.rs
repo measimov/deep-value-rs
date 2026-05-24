@@ -46,6 +46,13 @@ pub async fn get_market_pb_median(cache: &PgCache, trade_date: &str) -> Result<f
 
 pub async fn build_cross_section(cache: &PgCache, trade_date: &str) -> Result<DataFrame> {
     let daily_params = hmap(&[("trade_date", trade_date)]);
+    let daily_schema = Schema::from_iter([
+        Field::new("ts_code".into(), DataType::String),
+        Field::new("pb".into(), DataType::Float64),
+        Field::new("pe_ttm".into(), DataType::Float64),
+        Field::new("dv_ratio".into(), DataType::Float64),
+        Field::new("total_mv".into(), DataType::Float64),
+    ]);
     let daily = cache
         .load_typed(
             "daily_basic",
@@ -53,7 +60,18 @@ pub async fn build_cross_section(cache: &PgCache, trade_date: &str) -> Result<Da
             Some("ts_code,pb,pe_ttm,dv_ratio,total_mv"),
         )
         .await?
-        .unwrap_or_else(|| df_empty(&["ts_code", "pb", "pe_ttm", "dv_ratio", "total_mv"]));
+        .map(|df| {
+            df.lazy()
+                .with_columns([
+                    col("pb").cast(DataType::Float64),
+                    col("pe_ttm").cast(DataType::Float64),
+                    col("dv_ratio").cast(DataType::Float64),
+                    col("total_mv").cast(DataType::Float64),
+                ])
+                .collect()
+        })
+        .transpose()?
+        .unwrap_or_else(|| DataFrame::empty_with_schema(&daily_schema));
     info!(rows = daily.height(), "daily_basic (local)");
 
     let stock_params = hmap(&[("list_status", "L")]);
@@ -381,6 +399,127 @@ pub async fn get_cashflow(cache: &PgCache, trade_date: &str) -> Result<DataFrame
         .with_column(col("n_cashflow_act").cast(DataType::Float64))
         .unique(Some(vec!["ts_code".into()]), UniqueKeepStrategy::First)
         .select([col("ts_code"), col("n_cashflow_act")])
+        .collect()?)
+}
+
+// ---------------------------------------------------------------------------
+// Backtest data: trade calendar, daily prices, index
+// ---------------------------------------------------------------------------
+
+pub async fn get_trade_cal(
+    cache: &PgCache,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<String>> {
+    let params = hmap(&[
+        ("exchange", "SSE"),
+        ("start_date", start_date),
+        ("end_date", end_date),
+        ("is_open", "1"),
+    ]);
+    let Some(df) = cache
+        .load_typed("trade_cal", &params, Some("cal_date"))
+        .await?
+    else {
+        return Ok(Vec::new());
+    };
+    let mut dates: Vec<String> = df
+        .column("cal_date")?
+        .str()?
+        .into_iter()
+        .filter_map(|v| v.map(|s| s.to_string()))
+        .collect();
+    dates.sort();
+    Ok(dates)
+}
+
+pub async fn get_daily_prices(
+    cache: &PgCache,
+    codes: &[String],
+    start_date: &str,
+    end_date: &str,
+) -> Result<DataFrame> {
+    let mut frames: Vec<DataFrame> = Vec::new();
+    for code in codes {
+        let params = hmap(&[
+            ("ts_code", code.as_str()),
+            ("start_date", start_date),
+            ("end_date", end_date),
+        ]);
+        let Some(daily) = cache
+            .load_typed("daily", &params, Some("ts_code,trade_date,close"))
+            .await?
+        else {
+            continue;
+        };
+        if daily.height() == 0 {
+            continue;
+        }
+        let Some(adj) = cache
+            .load_typed("adj_factor", &params, Some("ts_code,trade_date,adj_factor"))
+            .await?
+        else {
+            continue;
+        };
+        let merged = daily
+            .lazy()
+            .with_column(col("close").cast(DataType::Float64))
+            .join(
+                adj.lazy().with_column(col("adj_factor").cast(DataType::Float64)),
+                [col("ts_code"), col("trade_date")],
+                [col("ts_code"), col("trade_date")],
+                JoinArgs::new(JoinType::Left),
+            )
+            .with_column(
+                (col("close") * col("adj_factor").fill_null(lit(1.0))).alias("close_adj"),
+            )
+            .select([col("ts_code"), col("trade_date"), col("close_adj")])
+            .collect()?;
+        frames.push(merged);
+    }
+    if frames.is_empty() {
+        let schema = Schema::from_iter([
+            Field::new("ts_code".into(), DataType::String),
+            Field::new("trade_date".into(), DataType::String),
+            Field::new("close_adj".into(), DataType::Float64),
+        ]);
+        return Ok(DataFrame::empty_with_schema(&schema));
+    }
+    concat(
+        frames.iter().map(|df| df.clone().lazy()).collect::<Vec<_>>(),
+        Default::default(),
+    )?
+    .sort(["ts_code", "trade_date"], Default::default())
+    .collect()
+    .context("merge daily prices failed")
+}
+
+pub async fn get_index_daily(
+    cache: &PgCache,
+    code: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<DataFrame> {
+    let params = hmap(&[
+        ("ts_code", code),
+        ("start_date", start_date),
+        ("end_date", end_date),
+    ]);
+    let Some(df) = cache
+        .load_typed("index_daily", &params, Some("trade_date,close"))
+        .await?
+    else {
+        let schema = Schema::from_iter([
+            Field::new("trade_date".into(), DataType::String),
+            Field::new("benchmark_close".into(), DataType::Float64),
+        ]);
+        return Ok(DataFrame::empty_with_schema(&schema));
+    };
+    Ok(df
+        .lazy()
+        .rename(["close"], ["benchmark_close"], true)
+        .with_column(col("benchmark_close").cast(DataType::Float64))
+        .sort(["trade_date"], Default::default())
         .collect()?)
 }
 
