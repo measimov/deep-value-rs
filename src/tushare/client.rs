@@ -158,7 +158,7 @@ impl TushareClient {
         param_map: &HashMap<String, String>,
         fields: Option<&str>,
     ) -> Result<DataFrame> {
-        const MAX_PAGES: usize = 200;
+        let max_pages = pagination_max_pages(api_name);
 
         let paginate = pagination_page_size(api_name);
         let pg_size = paginate.unwrap_or(0);
@@ -249,7 +249,7 @@ impl TushareClient {
             }
 
             if has_more {
-                if page >= MAX_PAGES {
+                if page >= max_pages {
                     guard_broken = Some("超过最大分页数");
                     break;
                 }
@@ -496,6 +496,16 @@ fn pagination_page_size(api: &str) -> Option<usize> {
     }
 }
 
+fn pagination_max_pages(api: &str) -> usize {
+    match api {
+        // fina_mainbz_vip 单页上限为 100 行，但总量不限。
+        // 全市场季度主营构成可能超过 2 万行，所以保留复合进度键守卫，
+        // 同时允许更深的分页。
+        "fina_mainbz_vip" => 2_000,
+        _ => 200,
+    }
+}
+
 fn progress_key_fields(api: &str) -> &[&str] {
     match api {
         "daily" | "daily_basic" | "adj_factor" | "index_daily" | "stk_limit" => {
@@ -582,6 +592,13 @@ mod tests {
         assert_eq!(pagination_page_size("repurchase"), Some(5000));
         assert_eq!(pagination_page_size("stk_limit"), Some(5000));
         assert_eq!(pagination_page_size("fina_audit"), None); // non-paginated
+    }
+
+    #[test]
+    fn test_max_pages_endpoints() {
+        assert_eq!(pagination_max_pages("daily_basic"), 200);
+        assert_eq!(pagination_max_pages("stk_limit"), 200);
+        assert_eq!(pagination_max_pages("fina_mainbz_vip"), 2_000);
     }
 
     #[test]
