@@ -278,7 +278,10 @@ impl TushareClient {
         }
 
         // 移除内部分页追加的字段（若调用方未请求）
-        if let Some(orig) = user_fields.as_deref() {
+        if let Some(orig) = user_fields
+            .as_deref()
+            .filter(|fields| !fields.trim().is_empty())
+        {
             let orig_set: Vec<&str> = orig
                 .split(',')
                 .map(|s| s.trim())
@@ -545,6 +548,9 @@ fn ensure_pagination_fields(fields: Option<&str>, keys: &[&str]) -> Option<Strin
         Some(f) => f,
         None => return None,
     };
+    if base.trim().is_empty() {
+        return Some(base.to_string());
+    }
     let existing: Vec<&str> = base
         .split(',')
         .map(|s| s.trim())
@@ -675,6 +681,12 @@ mod tests {
         // fields=None → return None (Tushare defaults include key fields)
         let result = ensure_pagination_fields(None, &["ts_code"]);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_ensure_pagination_fields_blank_preserves_all_fields_request() {
+        let result = ensure_pagination_fields(Some(""), &["ts_code", "end_date"]);
+        assert_eq!(result.as_deref(), Some(""));
     }
 
     #[test]

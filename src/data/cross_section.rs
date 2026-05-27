@@ -67,10 +67,25 @@ pub async fn build_cross_section(client: &TushareClient, trade_date: &str) -> Re
         .query(
             "stock_basic",
             &[("list_status", "L")],
-            Some("ts_code,name,industry"),
+            Some("ts_code,name,industry,list_date,delist_date"),
         )
         .await
         .context("获取 stock_basic 失败")?;
+
+    let basic = basic
+        .lazy()
+        .filter(
+            col("list_date")
+                .is_null()
+                .or(col("list_date").lt_eq(lit(trade_date)))
+                .and(
+                    col("delist_date")
+                        .is_null()
+                        .or(col("delist_date").eq(lit("")))
+                        .or(col("delist_date").gt(lit(trade_date))),
+                ),
+        )
+        .collect()?;
 
     info!(rows = basic.height(), "stock_basic 获取完成");
 

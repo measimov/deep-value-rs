@@ -437,12 +437,22 @@ impl PgCache {
             "trade_cal" => self.save_trade_cal(params, fields, items).await,
             "stock_basic" => self.save_stock_basic(params, fields, items).await,
             "daily_basic" => self.save_daily_basic(params, fields, items).await,
-            "income" | "income_vip" => self.save_income(params, fields, items).await,
+            "income" | "income_vip" => {
+                self.save_financial_rows(api_name, params, fields, items)
+                    .await?;
+                self.save_income(params, fields, items).await
+            }
             "dividend" => self.save_dividend(params, fields, items).await,
             "balancesheet" | "balancesheet_vip" => {
+                self.save_financial_rows(api_name, params, fields, items)
+                    .await?;
                 self.save_balancesheet(params, fields, items).await
             }
-            "fina_audit" => self.save_fina_audit(params, fields, items).await,
+            "fina_audit" => {
+                self.save_financial_rows(api_name, params, fields, items)
+                    .await?;
+                self.save_fina_audit(params, fields, items).await
+            }
             "daily" => self.save_daily_ohlc(params, fields, items).await,
             "adj_factor" => {
                 self.save_market_series("tushare_adj_factor", "adj_factor", params, fields, items)
@@ -450,9 +460,15 @@ impl PgCache {
             }
             "index_daily" => self.save_index_daily_ohlc(params, fields, items).await,
             "fina_indicator" | "fina_indicator_vip" => {
+                self.save_financial_rows(api_name, params, fields, items)
+                    .await?;
                 self.save_fina_indicator(params, fields, items).await
             }
-            "cashflow" | "cashflow_vip" => self.save_cashflow(params, fields, items).await,
+            "cashflow" | "cashflow_vip" => {
+                self.save_financial_rows(api_name, params, fields, items)
+                    .await?;
+                self.save_cashflow(params, fields, items).await
+            }
             "disclosure_date" => self.save_disclosure_date(params, fields, items).await,
             "suspend_d" => self.save_suspend_d(params, fields, items).await,
             "stk_limit" => self.save_stk_limit(params, fields, items).await,
@@ -721,6 +737,7 @@ impl PgCache {
         fields: Option<&str>,
     ) -> Result<Option<DataFrame>> {
         let list_status = params.get("list_status").map(String::as_str);
+        let as_of_date = params.get("as_of_date").map(String::as_str);
         let rows = sqlx::query(
             r#"
             select ts_code, symbol, name, area, industry, fullname, enname, cnspell,
@@ -728,10 +745,13 @@ impl PgCache {
                    is_hs, act_name, act_ent_type
             from deep_value.tushare_stock_basic
             where ($1::text is null or list_status = $1)
+              and ($2::text is null or list_date is null or list_date <= $2)
+              and ($2::text is null or delist_date is null or delist_date = '' or delist_date > $2)
             order by ts_code
             "#,
         )
         .bind(list_status)
+        .bind(as_of_date)
         .fetch_all(&self.pool)
         .await
         .context("读取 tushare_stock_basic 失败")?;
@@ -1771,6 +1791,76 @@ impl PgCache {
             ),
             &rows,
         )
+    }
+
+    async fn save_financial_rows(
+        &self,
+        api_name: &str,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
+    ) -> Result<()> {
+        for row in items {
+            let mut payload = serde_json::Map::new();
+            for (idx, field) in fields.iter().enumerate() {
+                payload.insert(field.clone(), row.get(idx).cloned().unwrap_or(Value::Null));
+            }
+
+            let row_hash = stable_row_hash(api_name, fields, row);
+            let ts_code =
+                json_field_string(&payload, "ts_code").or_else(|| params.get("ts_code").cloned());
+            let end_date = json_field_string(&payload, "end_date")
+                .or_else(|| params.get("period").cloned())
+                .or_else(|| params.get("end_date").cloned());
+            let ann_date =
+                json_field_string(&payload, "ann_date").or_else(|| params.get("ann_date").cloned());
+            let f_ann_date = json_field_string(&payload, "f_ann_date")
+                .or_else(|| params.get("f_ann_date").cloned());
+            let report_type = json_field_string(&payload, "report_type")
+                .or_else(|| params.get("report_type").cloned());
+            let comp_type = json_field_string(&payload, "comp_type")
+                .or_else(|| params.get("comp_type").cloned());
+            let end_type = json_field_string(&payload, "end_type");
+            let update_flag = json_field_string(&payload, "update_flag")
+                .or_else(|| params.get("update_flag").cloned());
+
+            sqlx::query(
+                r#"
+                insert into deep_value.tushare_financial_rows (
+                    api_name, row_hash, ts_code, end_date, ann_date, f_ann_date,
+                    report_type, comp_type, end_type, update_flag, payload
+                )
+                values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                on conflict (api_name, row_hash) do update set
+                    ts_code = coalesce(excluded.ts_code, deep_value.tushare_financial_rows.ts_code),
+                    end_date = coalesce(excluded.end_date, deep_value.tushare_financial_rows.end_date),
+                    ann_date = coalesce(excluded.ann_date, deep_value.tushare_financial_rows.ann_date),
+                    f_ann_date = coalesce(excluded.f_ann_date, deep_value.tushare_financial_rows.f_ann_date),
+                    report_type = coalesce(excluded.report_type, deep_value.tushare_financial_rows.report_type),
+                    comp_type = coalesce(excluded.comp_type, deep_value.tushare_financial_rows.comp_type),
+                    end_type = coalesce(excluded.end_type, deep_value.tushare_financial_rows.end_type),
+                    update_flag = coalesce(excluded.update_flag, deep_value.tushare_financial_rows.update_flag),
+                    payload = excluded.payload,
+                    updated_at = now()
+                "#,
+            )
+            .bind(api_name)
+            .bind(row_hash)
+            .bind(ts_code)
+            .bind(end_date)
+            .bind(ann_date)
+            .bind(f_ann_date)
+            .bind(report_type)
+            .bind(comp_type)
+            .bind(end_type)
+            .bind(update_flag)
+            .bind(Value::Object(payload))
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("写入 {api_name} full-row 财务表失败"))?;
+        }
+
+        Ok(())
     }
 
     async fn save_json_rows(

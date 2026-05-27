@@ -74,12 +74,12 @@ pub async fn build_cross_section(cache: &PgCache, trade_date: &str) -> Result<Da
         .unwrap_or_else(|| DataFrame::empty_with_schema(&daily_schema));
     info!(rows = daily.height(), "daily_basic (local)");
 
-    let stock_params = hmap(&[("list_status", "L")]);
+    let stock_params = hmap(&[("list_status", "L"), ("as_of_date", trade_date)]);
     let basic = cache
         .load_typed(
             "stock_basic",
             &stock_params,
-            Some("ts_code,name,industry,list_date"),
+            Some("ts_code,name,industry,list_date,delist_date"),
         )
         .await?
         .unwrap_or_else(|| df_empty(&["ts_code", "name", "industry"]));

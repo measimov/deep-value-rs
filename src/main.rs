@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use polars::prelude::*;
+use sqlx::Row;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -93,6 +94,17 @@ enum Commands {
         skip_pb_check: bool,
     },
 
+    /// 检查 PostgreSQL 中 Tushare 数据完整性
+    DataQuality {
+        /// 起始日期，格式 YYYYMMDD
+        #[arg(long, default_value = "20150101")]
+        start: String,
+
+        /// 结束日期，格式 YYYYMMDD
+        #[arg(long, default_value = "20250520")]
+        end: String,
+    },
+
     /// 预取 Tushare 数据到 PostgreSQL typed 表
     Sync {
         /// 起始日期，格式 YYYYMMDD（全量模式）
@@ -164,6 +176,7 @@ async fn main() -> Result<()> {
         Commands::Db { action } => match action {
             DbAction::Ping => cmd_db_ping().await?,
         },
+        Commands::DataQuality { start, end } => cmd_data_quality(&start, &end).await?,
         Commands::Sync {
             start,
             end,
@@ -222,6 +235,126 @@ async fn cmd_db_ping() -> Result<()> {
     let pool = db::connect(&config.database_url).await?;
     db::health_check(&pool).await?;
     println!("✅ PostgreSQL 连接成功");
+    Ok(())
+}
+
+/// 检查本地 Tushare 数据完整性。
+async fn cmd_data_quality(start: &str, end: &str) -> Result<()> {
+    let config = AppConfig::load()?;
+    let pool = db::connect(&config.database_url).await?;
+    db::init_schema(&pool).await?;
+
+    println!("数据质量检查: {start}..{end}");
+
+    let job_rows = sqlx::query(
+        r#"
+        select status, count(*) as jobs
+        from deep_value.tushare_sync_jobs
+        group by status
+        order by status
+        "#,
+    )
+    .fetch_all(&pool)
+    .await?;
+    println!("\n同步任务状态:");
+    for row in job_rows {
+        let status: String = row.try_get("status")?;
+        let jobs: i64 = row.try_get("jobs")?;
+        println!("  {status}: {jobs}");
+    }
+
+    println!("\n日线类缺失开市日:");
+    for (name, table) in [
+        ("daily", "tushare_daily"),
+        ("adj_factor", "tushare_adj_factor"),
+        ("daily_basic", "tushare_daily_basic"),
+        ("stk_limit", "tushare_stk_limit"),
+        ("suspend_d", "tushare_suspend_d"),
+    ] {
+        let sql = format!(
+            r#"
+            with open_dates as (
+                select cal_date
+                from deep_value.tushare_trade_cal
+                where exchange = 'SSE'
+                  and is_open = '1'
+                  and cal_date between $1 and $2
+            )
+            select count(*) as missing_open_dates,
+                   min(cal_date) as first_missing,
+                   max(cal_date) as last_missing
+            from open_dates o
+            left join (select distinct trade_date from deep_value.{table}) d
+              on d.trade_date = o.cal_date
+            where d.trade_date is null
+            "#,
+        );
+        let row = sqlx::query(&sql)
+            .bind(start)
+            .bind(end)
+            .fetch_one(&pool)
+            .await?;
+        let missing: i64 = row.try_get("missing_open_dates")?;
+        let first: Option<String> = row.try_get("first_missing")?;
+        let last: Option<String> = row.try_get("last_missing")?;
+        println!("  {name}: missing={missing}, first={first:?}, last={last:?}");
+    }
+
+    let fin_rows = sqlx::query(
+        r#"
+        select 'income' as table_name, count(*) as rows, max(end_date) as max_end_date from deep_value.tushare_income
+        union all select 'balancesheet', count(*), max(end_date) from deep_value.tushare_balancesheet
+        union all select 'cashflow', count(*), max(end_date) from deep_value.tushare_cashflow
+        union all select 'fina_indicator', count(*), max(end_date) from deep_value.tushare_fina_indicator
+        union all select 'financial_rows:income_vip', count(*), max(end_date) from deep_value.tushare_financial_rows where api_name = 'income_vip'
+        union all select 'financial_rows:balancesheet_vip', count(*), max(end_date) from deep_value.tushare_financial_rows where api_name = 'balancesheet_vip'
+        union all select 'financial_rows:cashflow_vip', count(*), max(end_date) from deep_value.tushare_financial_rows where api_name = 'cashflow_vip'
+        union all select 'financial_rows:fina_indicator_vip', count(*), max(end_date) from deep_value.tushare_financial_rows where api_name = 'fina_indicator_vip'
+        order by table_name
+        "#,
+    )
+    .fetch_all(&pool)
+    .await?;
+    println!("\n财报覆盖:");
+    for row in fin_rows {
+        let table_name: String = row.try_get("table_name")?;
+        let rows: i64 = row.try_get("rows")?;
+        let max_end_date: Option<String> = row.try_get("max_end_date")?;
+        println!("  {table_name}: rows={rows}, max_end_date={max_end_date:?}");
+    }
+
+    let future_stock_row = sqlx::query(
+        r#"
+        select count(*) as rows, min(list_date) as min_list_date, max(list_date) as max_list_date
+        from deep_value.tushare_stock_basic
+        where list_date > $1
+        "#,
+    )
+    .bind(end)
+    .fetch_one(&pool)
+    .await?;
+    let future_rows: i64 = future_stock_row.try_get("rows")?;
+    let min_list_date: Option<String> = future_stock_row.try_get("min_list_date")?;
+    let max_list_date: Option<String> = future_stock_row.try_get("max_list_date")?;
+    println!("\nstock_basic 截面提示:");
+    println!(
+        "  list_date > {end}: rows={future_rows}, min={min_list_date:?}, max={max_list_date:?}"
+    );
+
+    let non_stock_limit_row = sqlx::query(
+        r#"
+        select count(distinct s.ts_code) as codes
+        from deep_value.tushare_stk_limit s
+        left join deep_value.tushare_stock_basic b on b.ts_code = s.ts_code
+        where b.ts_code is null
+        "#,
+    )
+    .fetch_one(&pool)
+    .await?;
+    let non_stock_limit_codes: i64 = non_stock_limit_row.try_get("codes")?;
+    println!("\nstk_limit 代码域提示:");
+    println!("  not_in_stock_basic_distinct_codes={non_stock_limit_codes}");
+
     Ok(())
 }
 

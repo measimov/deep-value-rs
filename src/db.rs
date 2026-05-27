@@ -48,6 +48,31 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
             on deep_value.tushare_raw_responses(updated_at)
         "#,
         r#"
+        create table if not exists deep_value.tushare_financial_rows (
+            api_name text not null,
+            row_hash text not null,
+            ts_code text,
+            end_date text,
+            ann_date text,
+            f_ann_date text,
+            report_type text,
+            comp_type text,
+            end_type text,
+            update_flag text,
+            payload jsonb not null,
+            updated_at timestamptz not null default now(),
+            primary key (api_name, row_hash)
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_financial_rows_api_end_date
+            on deep_value.tushare_financial_rows(api_name, end_date)
+        "#,
+        r#"
+        create index if not exists idx_tushare_financial_rows_ts_end_date
+            on deep_value.tushare_financial_rows(ts_code, end_date)
+        "#,
+        r#"
         create table if not exists deep_value.tushare_sync_jobs (
             job_key text primary key,
             api_name text not null,

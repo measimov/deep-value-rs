@@ -21,6 +21,11 @@ const DAILY_BASIC_FIELDS: &str = "ts_code,trade_date,close,turnover_rate,turnove
 const DISCLOSURE_DATE_FIELDS: &str = "ts_code,end_date,ann_date,actual_date,pre_date,modify_date";
 const TRADE_CAL_FIELDS: &str = "exchange,cal_date,is_open,pretrade_date";
 const STK_LIMIT_FIELDS: &str = "ts_code,trade_date,pre_close,up_limit,down_limit";
+const TUSHARE_ALL_FIELDS: &str = "";
+const INCOME_FIELDS: &str = TUSHARE_ALL_FIELDS;
+const BALANCESHEET_FIELDS: &str = TUSHARE_ALL_FIELDS;
+const CASHFLOW_FIELDS: &str = TUSHARE_ALL_FIELDS;
+const FINA_INDICATOR_FIELDS: &str = TUSHARE_ALL_FIELDS;
 const FORECAST_FIELDS: &str = "ts_code,ann_date,end_date,type,p_change_min,p_change_max,net_profit_min,net_profit_max,last_parent_net,first_ann_date,summary,change_reason";
 const EXPRESS_FIELDS: &str = "ts_code,ann_date,end_date,revenue,operate_profit,total_profit,n_income,total_assets,total_hldr_eqy_exc_min_int,diluted_eps,diluted_roe,yoy_net_profit,bps,yoy_sales,yoy_op,yoy_tp,yoy_dedu_np,yoy_eps,yoy_roe,growth_assets,yoy_equity,growth_bps,or_last_year,op_last_year,tp_last_year,np_last_year,eps_last_year,open_net_assets,open_bps,perf_summary,is_audit,remark";
 const FINA_MAINBZ_FIELDS: &str =
@@ -144,75 +149,90 @@ pub async fn run_sync(
     }
 
     // 4-7. VIP financials — every report period in the requested history window.
-    let fin_start = safe_financial_year(start_date) - 9;
-    let fin_end = safe_financial_year(end_date);
+    for period in full_sync_financial_periods(start_date, end_date, lookback_years) {
+        force_step(
+            client,
+            cache,
+            &limiter,
+            &mut stats,
+            "income_vip",
+            &[("period", period.as_str()), ("report_type", "1")],
+            Some(INCOME_FIELDS),
+        )
+        .await?;
+        force_step(
+            client,
+            cache,
+            &limiter,
+            &mut stats,
+            "balancesheet_vip",
+            &[("period", period.as_str()), ("report_type", "1")],
+            Some(BALANCESHEET_FIELDS),
+        )
+        .await?;
+        force_step(
+            client,
+            cache,
+            &limiter,
+            &mut stats,
+            "fina_indicator_vip",
+            &[("period", period.as_str()), ("report_type", "1")],
+            Some(FINA_INDICATOR_FIELDS),
+        )
+        .await?;
+        force_step(
+            client,
+            cache,
+            &limiter,
+            &mut stats,
+            "cashflow_vip",
+            &[("period", period.as_str()), ("report_type", "1")],
+            Some(CASHFLOW_FIELDS),
+        )
+        .await?;
 
-    for year in fin_start..=fin_end {
-        for &qtr_end in &["0331", "0630", "0930", "1231"] {
-            let period = format!("{year}{qtr_end}");
-            force_step(client, cache, &limiter, &mut stats, "income_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,n_income,total_revenue,revenue,oper_cost,sell_exp,admin_exp,fin_exp")).await?;
-            force_step(client, cache, &limiter, &mut stats, "balancesheet_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,total_hldr_eqy_exc_min_int,total_assets,total_cur_assets,total_cur_liab,total_liab")).await?;
-            force_step(client, cache, &limiter, &mut stats, "fina_indicator_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,roe,roa,grossprofit_margin,netprofit_margin,debt_to_assets,current_ratio,bps,eps,cfps,or_yoy,profit_dedt")).await?;
+        force_step(
+            client,
+            cache,
+            &limiter,
+            &mut stats,
+            "forecast_vip",
+            &[("period", period.as_str())],
+            Some(FORECAST_FIELDS),
+        )
+        .await?;
+        force_step(
+            client,
+            cache,
+            &limiter,
+            &mut stats,
+            "express_vip",
+            &[("period", period.as_str())],
+            Some(EXPRESS_FIELDS),
+        )
+        .await?;
+        for &bz_type in &["P", "D", "I"] {
             force_step(
                 client,
                 cache,
                 &limiter,
                 &mut stats,
-                "cashflow_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act"),
-            )
-            .await?;
-
-            force_step(
-                client,
-                cache,
-                &limiter,
-                &mut stats,
-                "forecast_vip",
-                &[("period", period.as_str())],
-                Some(FORECAST_FIELDS),
-            )
-            .await?;
-            force_step(
-                client,
-                cache,
-                &limiter,
-                &mut stats,
-                "express_vip",
-                &[("period", period.as_str())],
-                Some(EXPRESS_FIELDS),
-            )
-            .await?;
-            for &bz_type in &["P", "D", "I"] {
-                force_step(
-                    client,
-                    cache,
-                    &limiter,
-                    &mut stats,
-                    "fina_mainbz_vip",
-                    &[("period", period.as_str()), ("type", bz_type)],
-                    Some(FINA_MAINBZ_FIELDS),
-                )
-                .await?;
-            }
-            force_step(
-                client,
-                cache,
-                &limiter,
-                &mut stats,
-                "disclosure_date",
-                &[("end_date", period.as_str())],
-                Some(DISCLOSURE_DATE_FIELDS),
+                "fina_mainbz_vip",
+                &[("period", period.as_str()), ("type", bz_type)],
+                Some(FINA_MAINBZ_FIELDS),
             )
             .await?;
         }
+        force_step(
+            client,
+            cache,
+            &limiter,
+            &mut stats,
+            "disclosure_date",
+            &[("end_date", period.as_str())],
+            Some(DISCLOSURE_DATE_FIELDS),
+        )
+        .await?;
     }
 
     // 8. fina_audit — all history per stock; local period is derived from end_date.
@@ -546,35 +566,49 @@ async fn sync_financial_incremental(
     let started = Instant::now();
     let mut stats = SyncStats::default();
 
-    // 计算理论需要的 period 范围
-    let fin_end = safe_financial_year(end_date);
-    let fin_start = fin_end - 9;
-
     // 只依赖 sync job checkpoint 跳过，避免 typed 表局部写入导致断点续传误判。
 
-    for year in fin_start..=fin_end {
-        for &qtr_end in &["0331", "0630", "0930", "1231"] {
-            let period = format!("{year}{qtr_end}");
-            force_step(client, cache, &limiter, &mut stats, "income_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,n_income,total_revenue,revenue,oper_cost,sell_exp,admin_exp,fin_exp")).await?;
-            force_step(client, cache, &limiter, &mut stats, "balancesheet_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,total_hldr_eqy_exc_min_int,total_assets,total_cur_assets,total_cur_liab,total_liab")).await?;
-            force_step(client, cache, &limiter, &mut stats, "fina_indicator_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,roe,roa,grossprofit_margin,netprofit_margin,debt_to_assets,current_ratio,bps,eps,cfps,or_yoy,profit_dedt")).await?;
-            force_step(
-                client,
-                cache,
-                &limiter,
-                &mut stats,
-                "cashflow_vip",
-                &[("period", period.as_str()), ("report_type", "1")],
-                Some("ts_code,end_date,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act"),
-            )
-            .await?;
-        }
+    for period in incremental_financial_periods(end_date, 10) {
+        force_step(
+            client,
+            cache,
+            &limiter,
+            &mut stats,
+            "income_vip",
+            &[("period", period.as_str()), ("report_type", "1")],
+            Some(INCOME_FIELDS),
+        )
+        .await?;
+        force_step(
+            client,
+            cache,
+            &limiter,
+            &mut stats,
+            "balancesheet_vip",
+            &[("period", period.as_str()), ("report_type", "1")],
+            Some(BALANCESHEET_FIELDS),
+        )
+        .await?;
+        force_step(
+            client,
+            cache,
+            &limiter,
+            &mut stats,
+            "fina_indicator_vip",
+            &[("period", period.as_str()), ("report_type", "1")],
+            Some(FINA_INDICATOR_FIELDS),
+        )
+        .await?;
+        force_step(
+            client,
+            cache,
+            &limiter,
+            &mut stats,
+            "cashflow_vip",
+            &[("period", period.as_str()), ("report_type", "1")],
+            Some(CASHFLOW_FIELDS),
+        )
+        .await?;
     }
 
     // 新上市股票：fina_audit + dividend；是否已完成由 sync_jobs 判断。
@@ -783,6 +817,43 @@ fn daily_basic_lookback_start_date(start_date: &str, lookback_years: usize) -> S
     } else {
         candidate
     }
+}
+
+const FINANCIAL_QUARTER_ENDS: [&str; 4] = ["0331", "0630", "0930", "1231"];
+
+fn full_sync_financial_periods(
+    start_date: &str,
+    end_date: &str,
+    lookback_years: usize,
+) -> Vec<String> {
+    let lookback_years = lookback_years.max(1) as i32;
+    let start_year = safe_financial_year(start_date) - lookback_years + 1;
+    financial_periods_from_year(start_year, end_date)
+}
+
+fn incremental_financial_periods(end_date: &str, lookback_years: usize) -> Vec<String> {
+    let lookback_years = lookback_years.max(1) as i32;
+    let end_year = parse_year(end_date).unwrap_or_else(|| safe_financial_year(end_date));
+    let start_year = end_year - lookback_years + 1;
+    financial_periods_from_year(start_year, end_date)
+}
+
+fn financial_periods_from_year(start_year: i32, end_date: &str) -> Vec<String> {
+    let end_year = parse_year(end_date).unwrap_or_else(|| safe_financial_year(end_date));
+    let mut periods = Vec::new();
+    for year in start_year..=end_year {
+        for qtr_end in FINANCIAL_QUARTER_ENDS {
+            let period = format!("{year}{qtr_end}");
+            if period.as_str() <= end_date {
+                periods.push(period);
+            }
+        }
+    }
+    periods
+}
+
+fn parse_year(date: &str) -> Option<i32> {
+    date.get(..4)?.parse().ok()
 }
 
 fn month_window(year: i32, month: u32) -> (String, String) {
@@ -1001,6 +1072,29 @@ mod tests {
 
         let stk_limit = field_set(STK_LIMIT_FIELDS);
         assert!(stk_limit.contains("pre_close"));
+    }
+
+    #[test]
+    fn full_sync_financial_periods_include_current_available_quarter() {
+        let periods = full_sync_financial_periods("20150101", "20250520", 10);
+        assert!(periods.contains(&"20040331".to_string()));
+        assert!(periods.contains(&"20250331".to_string()));
+        assert!(!periods.contains(&"20250630".to_string()));
+    }
+
+    #[test]
+    fn full_sync_financial_periods_exclude_future_quarter() {
+        let periods = full_sync_financial_periods("20150101", "20250330", 10);
+        assert!(periods.contains(&"20241231".to_string()));
+        assert!(!periods.contains(&"20250331".to_string()));
+    }
+
+    #[test]
+    fn incremental_financial_periods_include_latest_quarter() {
+        let periods = incremental_financial_periods("20250520", 10);
+        assert_eq!(periods.first().map(String::as_str), Some("20160331"));
+        assert!(periods.contains(&"20250331".to_string()));
+        assert!(!periods.contains(&"20250630".to_string()));
     }
 
     #[test]
