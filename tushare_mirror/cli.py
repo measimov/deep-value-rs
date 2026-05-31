@@ -23,6 +23,7 @@ from .coverage import CoverageReporter
 from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
 from .hashing import token_hash
+from .missing_backfill import MissingBackfillPlanner
 from .planner import JobPlanner
 from .reader import LakeReader
 from .store import FileLakeStore
@@ -370,6 +371,101 @@ def cmd_coverage(args) -> int:
     return 0
 
 
+def _missing_backfill_max_jobs(args, execute: bool) -> int:
+    if args.max_jobs is None:
+        raise SystemExit('backfill-missing requires --max-jobs')
+    if args.max_jobs <= 0:
+        raise SystemExit('--max-jobs must be positive')
+    if execute and args.max_jobs > PHASE21_EXECUTE_MAX_JOBS:
+        raise SystemExit(f'Refusing to execute {args.max_jobs} jobs in Phase 2.7. max allowed: {PHASE21_EXECUTE_MAX_JOBS}.')
+    return args.max_jobs
+
+
+def _make_missing_backfill_plan(args, execute: bool):
+    root = Path(args.root)
+    catalog = _open_existing_catalog(root)
+    try:
+        plan = MissingBackfillPlanner(root, catalog).plan(
+            args.api,
+            dates=args.dates,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            trading_days_only=args.trading_days_only,
+            calendar_exchange=args.calendar_exchange,
+            max_jobs=_missing_backfill_max_jobs(args, execute),
+            retry_failed=args.retry_failed,
+            execute=execute,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    return root, catalog, plan
+
+
+def _print_missing_backfill_plan(plan, as_json: bool) -> None:
+    if as_json:
+        _print_json(plan.to_dict())
+        return
+    _print_table(
+        [item.to_dict() for item in plan.items],
+        ['date', 'existing_status', 'planned_action', 'will_execute', 'job_key', 'snapshot_id', 'record_count', 'raw_event_count', 'notes'],
+    )
+    _print_key_values(plan.summary())
+    if not plan.planned_jobs:
+        print('No missing jobs to backfill.')
+
+
+def _missing_execution_summary(plan, result) -> dict[str, Any]:
+    validation_status = (result.validation or {}).get('status') if result.validation else None
+    return {
+        'api_name': plan.api_name,
+        'candidate_jobs': plan.candidate_jobs,
+        'planned_jobs': plan.planned_jobs,
+        'executed_jobs': result.summary.get('executed_jobs'),
+        'skipped_jobs': result.summary.get('skipped_jobs'),
+        'succeeded_jobs': result.summary.get('succeeded_jobs'),
+        'failed_jobs': result.summary.get('failed_jobs'),
+        'blocked_jobs': int(result.summary.get('blocked_jobs') or 0) + plan.blocked_jobs,
+        'quarantined_jobs': int(result.summary.get('quarantined_jobs') or 0) + plan.coverage.get('quarantined_dates', 0),
+        'validate_latest_status': validation_status,
+        'dry_run': False,
+        'execute': True,
+        'retry_failed': plan.retry_failed,
+        'truncated_by_max_jobs': plan.truncated_by_max_jobs,
+        'warnings': plan.warnings,
+    }
+
+
+def cmd_backfill_missing(args) -> int:
+    execute = bool(args.execute)
+    root, catalog, plan = _make_missing_backfill_plan(args, execute=execute)
+    if not execute:
+        _print_missing_backfill_plan(plan, args.json)
+        return 0
+    if not plan.planned_jobs:
+        if args.json:
+            _print_json({'missing_plan': plan.to_dict(), 'execution': None, 'message': 'No missing jobs to backfill.'})
+        else:
+            _print_missing_backfill_plan(plan, False)
+        return 0
+    token = require_token()
+    result = BackfillExecutor(root, catalog, FileLakeStore(root, catalog)).execute(
+        plan.backfill_plan,
+        TushareClient(token),
+        validate_latest=args.validate_latest,
+        stop_on_error=args.stop_on_error,
+    )
+    if args.json:
+        _print_json({'missing_plan': plan.to_dict(), 'execution': result.to_dict(), 'summary': _missing_execution_summary(plan, result)})
+    else:
+        _print_table(execution_to_rows(result), ['date', 'job_key', 'action', 'status', 'record_count', 'raw_event_count', 'snapshot_id', 'error_type'])
+        _print_key_values(_missing_execution_summary(plan, result))
+        if result.validation:
+            _print_table([result.validation], ['validation_id', 'scope', 'api_name', 'snapshot_id', 'status', 'checked_file_count', 'failure_count', 'record_count', 'raw_event_count'])
+    nonfatal = {'permission_denied', 'empty_result'}
+    fatal_failures = [row for row in result.results if row.status in {'failed', 'blocked'} and row.error_type not in nonfatal]
+    return 1 if fatal_failures else 0
+
+
 def _print_validation_reports(reports: list[dict[str, Any]], overall_ok: bool, as_json: bool) -> None:
     if as_json:
         _print_json({'status': 'succeeded' if overall_ok else 'failed', 'results': reports})
@@ -659,6 +755,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--calendar-exchange', default='SSE')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_coverage)
+
+    p = sub.add_parser('backfill-missing')
+    p.add_argument('--api', required=True)
+    p.add_argument('--dates')
+    p.add_argument('--start-date')
+    p.add_argument('--end-date')
+    p.add_argument('--trading-days-only', action='store_true')
+    p.add_argument('--calendar-exchange', default='SSE')
+    p.add_argument('--max-jobs', type=int)
+    p.add_argument('--retry-failed', action='store_true')
+    p.add_argument('--execute', action='store_true')
+    p.add_argument('--stop-on-error', action='store_true')
+    p.add_argument('--validate-latest', action='store_true')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_backfill_missing)
 
     p = sub.add_parser('validate')
     p.add_argument('--snapshot', default='latest')

@@ -706,3 +706,55 @@ planned date with `job_key`, `snapshot_id`, `record_count`, `raw_event_count`,
 `file_count`, and the previous job status. Use this report to decide whether a
 small scoped backfill is needed; do not use it as an excuse to start a full
 mirror or broad historical loop.
+
+
+## Phase 2.7 Coverage-driven Missing Backfill
+
+`backfill-missing` turns a coverage report into a missing-only scoped backfill.
+It first computes coverage for the requested dates, then executes only dates with
+`existing_status=missing`. Dates already covered by active snapshots remain
+`skip_existing` and are not fetched again.
+
+Start with coverage:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill coverage   --api daily_basic   --start-date 20250101   --end-date 20250110   --trading-days-only   --calendar-exchange SSE
+```
+
+Then inspect the missing-only dry-run plan. This is still read-only and does not
+send Tushare requests:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill backfill-missing   --api daily_basic   --start-date 20250101   --end-date 20250110   --trading-days-only   --calendar-exchange SSE   --max-jobs 3
+```
+
+Execute only after reviewing the plan:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill backfill-missing   --api daily_basic   --start-date 20250101   --end-date 20250110   --trading-days-only   --calendar-exchange SSE   --max-jobs 3   --execute   --validate-latest
+```
+
+`--max-jobs` is required for `backfill-missing`. Execution still has the Phase
+2.x hard cap of 20 jobs. If no missing jobs remain, the command prints `No
+missing jobs to backfill.` and does not create a backfill run.
+
+Failed jobs are visible in the report, but they are not executed by default. Use
+`--retry-failed` when you explicitly want `failed_exists` dates to join the
+candidate set:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill backfill-missing   --api daily   --dates 20250102,20250103   --max-jobs 2   --retry-failed
+```
+
+Quarantined and staged dates remain blocked. They are shown in the plan so you
+can see the gap, but `backfill-missing` will not overwrite them automatically.
+Manual review is required before those dates can be retried safely.
+
+After execution, rerun `coverage` for the same range. The expected sign of a
+successful scoped run is that `coverage_ratio` increases and the executed dates
+move from `missing` to `active_exists`.
+
+`backfill-missing` does not infer full history, does not iterate stocks, does not
+iterate endpoints, and does not fetch `trade_cal` implicitly. Calendar-aware mode
+requires a local `trade_cal` latest snapshot, the same as `coverage` and
+`backfill-plan`.
