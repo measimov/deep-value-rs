@@ -257,8 +257,17 @@ class BackfillExecutor:
         for job in plan.planned_jobs:
             if job.planned_action == "skip_existing":
                 existing = self.catalog.get_job(job.job_key) or {}
+                snapshot = self.catalog.latest_snapshot(plan.api_name)
                 results.append(
-                    BackfillJobResult(job.date, job.job_key, job.planned_action, "skipped", existing.get("record_count"), existing.get("raw_event_count"), None)
+                    BackfillJobResult(
+                        job.date,
+                        job.job_key,
+                        job.planned_action,
+                        "skipped",
+                        existing.get("record_count"),
+                        existing.get("raw_event_count"),
+                        snapshot.get("snapshot_id") if snapshot else None,
+                    )
                 )
                 continue
             if job.planned_action == "blocked_quarantined":
@@ -306,28 +315,50 @@ class BackfillExecutor:
         validation_report = None
         if validate_latest:
             validation_report = Validator(self.root, self.catalog).validate_snapshot_report("latest", plan.api_name)
-        summary = self._summary(plan, results, started_at)
+        summary = self._summary(plan, results, started_at, validate_latest)
         status = "failed" if summary["failed_jobs"] or summary["blocked_jobs"] else "succeeded"
         self.catalog.finish_run(run_id, status, None if status == "succeeded" else "backfill had failed or blocked jobs", None, summary)
         return BackfillExecutionResult(run_id, status, results, summary, validation_report)
 
-    def _summary(self, plan: BackfillPlan, results: list[BackfillJobResult], started_at: str) -> dict[str, Any]:
+    def _summary(self, plan: BackfillPlan, results: list[BackfillJobResult], started_at: str, validate_latest: bool) -> dict[str, Any]:
         failed = [row for row in results if row.status == "failed"]
         blocked = [row for row in results if row.status == "blocked"]
         skipped = [row for row in results if row.status == "skipped"]
         succeeded = [row for row in results if row.status == "succeeded"]
         quarantined = [row for row in results if row.error_type == ErrorType.SCHEMA_INCOMPATIBLE.value or row.status == "blocked"]
+        jobs_by_key = {job.job_key: job for job in plan.planned_jobs}
+        items = []
+        for row in results:
+            planned = jobs_by_key.get(row.job_key)
+            items.append(
+                {
+                    "date": row.date,
+                    "job_key": row.job_key,
+                    "existing_status": planned.existing_status if planned else None,
+                    "planned_action": planned.planned_action if planned else row.action,
+                    "result_status": row.status,
+                    "snapshot_id": row.snapshot_id,
+                    "record_count": row.record_count,
+                    "raw_event_count": row.raw_event_count,
+                    "error_type": row.error_type,
+                }
+            )
         return {
             "api_name": plan.api_name,
             "date_field": plan.date_field,
             "requested_dates": plan.dates,
             "total_candidate_jobs": plan.total_candidate_jobs,
             "planned_jobs": len(plan.planned_jobs),
+            "executed_jobs": len(succeeded) + len(failed),
             "skipped_jobs": len(skipped),
             "succeeded_jobs": len(succeeded),
             "failed_jobs": len(failed),
             "blocked_jobs": len(blocked),
             "quarantined_jobs": len(quarantined),
+            "dry_run": False,
+            "execute": True,
+            "validate_latest": validate_latest,
+            "items": items,
             "started_at": started_at,
             "finished_at": now_utc(),
         }

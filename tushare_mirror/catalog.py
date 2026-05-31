@@ -597,11 +597,14 @@ class CatalogStore:
         self.init()
         latest = self.latest_snapshot()
         with self.connect() as conn:
+            latest_backfill = conn.execute("select run_id from ingestion_runs where run_type='backfill' order by started_at desc limit 1").fetchone()
             return {
                 "catalog_path": str(self.db_path),
                 "schema_version": self.schema_version(),
                 "endpoint_count": conn.execute("select count(*) from endpoints").fetchone()[0],
                 "run_count": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+                "backfill_run_count": conn.execute("select count(*) from ingestion_runs where run_type='backfill'").fetchone()[0],
+                "latest_backfill_run_id": latest_backfill[0] if latest_backfill else None,
                 "job_count": conn.execute("select count(*) from jobs").fetchone()[0],
                 "file_count": conn.execute("select count(*) from files").fetchone()[0],
                 "snapshot_count": conn.execute("select count(*) from snapshots").fetchone()[0],
@@ -610,12 +613,29 @@ class CatalogStore:
                 "quarantine_count": conn.execute("select count(*) from quarantine_files").fetchone()[0],
             }
 
+    def _decorate_run_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        d = dict(row)
+        summary = loads(d.pop("summary_json", None)) or {}
+        d["summary"] = summary
+        for key in [
+            "api_name",
+            "planned_jobs",
+            "executed_jobs",
+            "skipped_jobs",
+            "succeeded_jobs",
+            "failed_jobs",
+            "blocked_jobs",
+            "quarantined_jobs",
+        ]:
+            d[key] = summary.get(key)
+        return d
+
     def list_runs(self, api_name: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         where = ""
         args: list[Any] = []
         if api_name:
-            where = "where exists (select 1 from jobs j where j.run_id=r.run_id and j.api_name=?)"
-            args.append(api_name)
+            where = "where exists (select 1 from jobs j where j.run_id=r.run_id and j.api_name=?) or json_extract(r.summary_json, '$.api_name')=?"
+            args.extend([api_name, api_name])
         args.append(limit)
         sql = f"""
             select r.run_id,r.run_type,r.status,r.started_at,r.finished_at,r.last_error_type,r.error_message,r.summary_json,
@@ -625,12 +645,17 @@ class CatalogStore:
         """
         with self.connect() as conn:
             rows = conn.execute(sql, args).fetchall()
-        result = []
-        for row in rows:
-            d = dict(row)
-            d["summary"] = loads(d.pop("summary_json"))
-            result.append(d)
-        return result
+        return [self._decorate_run_row(dict(row)) for row in rows]
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        sql = """
+            select r.run_id,r.run_type,r.status,r.started_at,r.finished_at,r.last_error_type,r.error_message,r.summary_json,
+                   (select count(*) from jobs j where j.run_id=r.run_id) as job_count
+            from ingestion_runs r where r.run_id=?
+        """
+        with self.connect() as conn:
+            row = conn.execute(sql, (run_id,)).fetchone()
+        return self._decorate_run_row(dict(row)) if row else None
 
     def list_jobs(self, api_name: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         args: list[Any] = []

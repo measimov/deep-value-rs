@@ -461,6 +461,60 @@ python3 -m tushare_mirror --root /tmp/tushare-mirror-backfill-smoke backfill \
 Do not use Phase 2.1 commands to run a full mirror, loop all historical dates,
 loop all stocks, or run all endpoints.
 
+
+### Backfill Observability
+
+Use `show-runs` to inspect batch-level backfill counters. Backfill runs expose
+planning and result counters directly, so a skip-only idempotent rerun does not
+look like an empty run:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill show-runs --api daily --limit 20
+python3 -m tushare_mirror --root /tmp/tushare-backfill show-runs --api daily --json --limit 20
+```
+
+Important fields:
+
+- `planned_jobs`: jobs included in the scoped plan.
+- `executed_jobs`: jobs that actually called fetch/write paths.
+- `skipped_jobs`: jobs skipped because active data already exists.
+- `succeeded_jobs`: jobs newly fetched and committed successfully.
+- `failed_jobs`: jobs that failed during execution.
+- `blocked_jobs`: jobs blocked before execution, such as quarantined jobs.
+- `quarantined_jobs`: jobs that entered or matched quarantine state.
+
+A skip-only rerun can have `job_count=0` because existing jobs are not rebound to
+that run. That is expected. Check `planned_jobs` and `skipped_jobs`; they should
+show what the run considered and skipped without creating duplicate jobs, raw
+files, lake files, or snapshots.
+
+Use `show-run` for item-level detail:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill show-run --run-id <run_id>
+python3 -m tushare_mirror --root /tmp/tushare-backfill show-run --run-id <run_id> --json
+```
+
+For backfill runs, each item shows:
+
+- `date`
+- `job_key`
+- `existing_status`
+- `planned_action`
+- `result_status`
+- `snapshot_id`
+- `record_count`
+- `raw_event_count`
+- `error_type`
+
+To verify an idempotent rerun, compare catalog counters before and after the
+rerun. `run_count` may increase, but `job_count`, `file_count`, and
+`snapshot_count` should not grow when all jobs are `skip_existing`.
+
+Failed, blocked, or quarantined jobs should be investigated through `show-run`,
+`show-jobs`, `show-validations`, and the `_quarantine/` catalog records before
+rerunning. Do not override quarantine automatically.
+
 ## Real Smoke Script
 
 The repository includes an opt-in real smoke script. It is not run by unittest or

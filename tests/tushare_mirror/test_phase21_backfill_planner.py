@@ -177,17 +177,44 @@ class Phase21BackfillPlannerTests(unittest.TestCase):
         plan = planner.plan_date_backfill("daily", dates, max_jobs=2, dry_run=False)
         result = BackfillExecutor(self.root, self.catalog).execute(plan, EchoClient(), validate_latest=True)
         self.assertEqual(result.status, "succeeded")
-        self.assertEqual(result.summary["succeeded_jobs"], 2)
         self.assertEqual(result.summary["planned_jobs"], 2)
+        self.assertEqual(result.summary["executed_jobs"], 2)
+        self.assertEqual(result.summary["skipped_jobs"], 0)
+        self.assertEqual(result.summary["succeeded_jobs"], 2)
+        self.assertFalse(result.summary["dry_run"])
+        self.assertTrue(result.summary["execute"])
+        self.assertTrue(result.summary["validate_latest"])
+        self.assertEqual(len(result.summary["items"]), 2)
+        self.assertTrue(all(item["planned_action"] == "fetch" for item in result.summary["items"]))
         self.assertEqual(result.validation["api_name"], "daily")
         with sqlite3.connect(self.catalog.db_path) as conn:
             self.assertEqual(conn.execute("select count(*) from jobs where run_id=?", (result.run_id,)).fetchone()[0], 2)
             self.assertEqual(conn.execute("select count(*) from validation_runs where api_name='daily'").fetchone()[0], 1)
+            counts_before = {
+                "jobs": conn.execute("select count(*) from jobs").fetchone()[0],
+                "files": conn.execute("select count(*) from files").fetchone()[0],
+                "snapshots": conn.execute("select count(*) from snapshots").fetchone()[0],
+            }
 
         rerun_plan = planner.plan_date_backfill("daily", dates, max_jobs=2, dry_run=False)
         self.assertTrue(all(job.planned_action == "skip_existing" for job in rerun_plan.planned_jobs))
         rerun = BackfillExecutor(self.root, self.catalog).execute(rerun_plan, EchoClient())
+        self.assertEqual(rerun.summary["planned_jobs"], 2)
+        self.assertEqual(rerun.summary["executed_jobs"], 0)
         self.assertEqual(rerun.summary["skipped_jobs"], 2)
+        self.assertEqual(rerun.summary["succeeded_jobs"], 0)
+        self.assertEqual(len(rerun.summary["items"]), 2)
+        for item in rerun.summary["items"]:
+            self.assertEqual(item["existing_status"], "active_exists")
+            self.assertEqual(item["planned_action"], "skip_existing")
+            self.assertEqual(item["result_status"], "skipped")
+            self.assertTrue(item["job_key"].startswith("job_"))
+            self.assertTrue(item["snapshot_id"].startswith("snap_"))
+        with sqlite3.connect(self.catalog.db_path) as conn:
+            self.assertEqual(conn.execute("select count(*) from jobs").fetchone()[0], counts_before["jobs"])
+            self.assertEqual(conn.execute("select count(*) from files").fetchone()[0], counts_before["files"])
+            self.assertEqual(conn.execute("select count(*) from snapshots").fetchone()[0], counts_before["snapshots"])
+            self.assertEqual(conn.execute("select count(*) from ingestion_runs").fetchone()[0], 2)
         self.assertEqual(len(list((self.root / "lake").rglob("*.parquet"))), 2)
 
     def test_backfill_execute_rate_limit_retry_and_schema_quarantine(self):
@@ -211,6 +238,42 @@ class Phase21BackfillPlannerTests(unittest.TestCase):
         args = cli.build_parser().parse_args(["backfill", "--api", "daily", "--dates", "20250102,20250103", "--max-jobs", "2", "--execute"])
         self.assertTrue(args.execute)
         self.assertEqual(args.func, cli.cmd_backfill)
+
+    def test_cli_show_runs_and_show_run_details_for_skip_only_run(self):
+        dates = ["20250102", "20250103"]
+        planner = BackfillPlanner(self.root, self.catalog)
+        first = BackfillExecutor(self.root, self.catalog).execute(planner.plan_date_backfill("daily", dates, max_jobs=2, dry_run=False), EchoClient())
+        rerun = BackfillExecutor(self.root, self.catalog).execute(planner.plan_date_backfill("daily", dates, max_jobs=2, dry_run=False), EchoClient())
+
+        runs = json.loads(self.run_cli("show-runs", "--json").stdout)
+        skip_run = next(row for row in runs if row["run_id"] == rerun.run_id)
+        self.assertEqual(skip_run["run_type"], "backfill")
+        self.assertEqual(skip_run["api_name"], "daily")
+        self.assertEqual(skip_run["planned_jobs"], 2)
+        self.assertEqual(skip_run["executed_jobs"], 0)
+        self.assertEqual(skip_run["skipped_jobs"], 2)
+        self.assertEqual(skip_run["job_count"], 0)
+
+        table = self.run_cli("show-run", "--run-id", rerun.run_id).stdout
+        self.assertIn("skip_existing", table)
+        self.assertIn("active_exists", table)
+        detail = json.loads(self.run_cli("show-run", "--run-id", rerun.run_id, "--json").stdout)
+        self.assertEqual(detail["summary"]["skipped_jobs"], 2)
+        self.assertEqual(len(detail["summary"]["items"]), 2)
+        self.assertEqual(detail["summary"]["items"][0]["result_status"], "skipped")
+        self.assertNotIn("TUSHARE_TOKEN", str(detail))
+
+        first_detail = json.loads(self.run_cli("show-run", "--run-id", first.run_id, "--json").stdout)
+        self.assertEqual(first_detail["summary"]["executed_jobs"], 2)
+        missing = subprocess.run(
+            [sys.executable, "-m", "tushare_mirror", "--root", str(self.root), "show-run", "--run-id", "run_missing"],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("run not found", missing.stderr)
 
 
 if __name__ == "__main__":

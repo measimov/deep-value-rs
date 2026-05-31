@@ -347,7 +347,57 @@ def cmd_show_runs(args) -> int:
     if args.json:
         _print_json(rows)
     else:
-        _print_table(rows, ['run_id', 'run_type', 'status', 'started_at', 'finished_at', 'job_count', 'summary'])
+        _print_table(rows, [
+            'run_id',
+            'run_type',
+            'status',
+            'api_name',
+            'planned_jobs',
+            'executed_jobs',
+            'skipped_jobs',
+            'succeeded_jobs',
+            'failed_jobs',
+            'blocked_jobs',
+            'quarantined_jobs',
+            'started_at',
+            'finished_at',
+            'job_count',
+        ])
+    return 0
+
+
+def cmd_show_run(args) -> int:
+    catalog = _ensure_catalog(Path(args.root))
+    run = catalog.get_run(args.run_id)
+    if not run:
+        raise SystemExit(f'run not found: {args.run_id}')
+    if args.json:
+        _print_json(run)
+        return 0
+    summary = run.get('summary') or {}
+    _print_key_values({
+        'run_id': run.get('run_id'),
+        'run_type': run.get('run_type'),
+        'status': run.get('status'),
+        'api_name': run.get('api_name'),
+        'planned_jobs': run.get('planned_jobs'),
+        'executed_jobs': run.get('executed_jobs'),
+        'skipped_jobs': run.get('skipped_jobs'),
+        'succeeded_jobs': run.get('succeeded_jobs'),
+        'failed_jobs': run.get('failed_jobs'),
+        'blocked_jobs': run.get('blocked_jobs'),
+        'quarantined_jobs': run.get('quarantined_jobs'),
+        'job_count': run.get('job_count'),
+        'started_at': run.get('started_at'),
+        'finished_at': run.get('finished_at'),
+        'last_error_type': run.get('last_error_type'),
+        'error_message': run.get('error_message'),
+    })
+    items = summary.get('items') or []
+    if items:
+        _print_table(items, ['date', 'job_key', 'existing_status', 'planned_action', 'result_status', 'snapshot_id', 'record_count', 'raw_event_count', 'error_type'])
+    else:
+        _print_key_values({'summary': summary})
     return 0
 
 
@@ -472,6 +522,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser('show-runs')
     _add_observe_args(p)
     p.set_defaults(func=cmd_show_runs)
+
+    p = sub.add_parser('show-run')
+    p.add_argument('--run-id', required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_show_run)
 
     p = sub.add_parser('show-jobs')
     _add_observe_args(p)
