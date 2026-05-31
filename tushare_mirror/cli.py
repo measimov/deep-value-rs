@@ -195,28 +195,56 @@ def cmd_fetch(args) -> int:
     return 0 if result.snapshot_id or result.skipped else 1
 
 
+def _print_validation_reports(reports: list[dict[str, Any]], overall_ok: bool, as_json: bool) -> None:
+    if as_json:
+        _print_json({'status': 'succeeded' if overall_ok else 'failed', 'results': reports})
+    else:
+        _print_table(reports, ['validation_id', 'scope', 'api_name', 'snapshot_id', 'status', 'checked_file_count', 'failure_count', 'record_count', 'raw_event_count'])
+        print('overall_status=' + ('succeeded' if overall_ok else 'failed'))
+
+
 def cmd_validate(args) -> int:
     root = Path(args.root)
     catalog = _ensure_catalog(root)
     validator = Validator(root, catalog)
-    ok, validation_run_id = validator.validate_snapshot(args.snapshot, args.api)
-    output = {'validation_run_id': validation_run_id, 'status': 'succeeded' if ok else 'failed'}
-    if args.json:
-        _print_json(output)
-    else:
-        print(f"validation_run_id={validation_run_id}")
-        print(f"status={output['status']}")
+    latest_all = args.latest_all or args.all_active or (args.snapshot in (None, 'latest') and not args.api)
+    if latest_all:
+        ok, reports = validator.validate_latest_snapshots(args.api)
+        _print_validation_reports(reports, ok, args.json)
+        return 0 if ok else 1
+    report = validator.validate_snapshot_report(args.snapshot, args.api)
+    ok = report['status'] == 'succeeded'
+    _print_validation_reports([report], ok, args.json)
     return 0 if ok else 1
+
+
+def _visible_lake_files_for_snapshot(catalog: CatalogStore, snapshot_id: str) -> list[dict[str, Any]]:
+    blocked = {'quarantined', 'missing', 'deleted', 'deleted_pending', 'superseded', 'compacted'}
+    rows = catalog.files_for_snapshot(snapshot_id, content_type='lake')
+    out = []
+    for row in rows:
+        if row.get('status') not in blocked:
+            item = dict(row)
+            item['snapshot_id'] = snapshot_id
+            out.append(item)
+    return out
 
 
 def cmd_list_files(args) -> int:
     root = Path(args.root)
     catalog = _ensure_catalog(root)
-    files = LakeReader(root, catalog).list_active_files(args.api, args.snapshot)
+    if args.api:
+        files = LakeReader(root, catalog).list_active_files(args.api, args.snapshot)
+    else:
+        if args.snapshot not in (None, 'latest'):
+            raise SystemExit('list-files requires --api when --snapshot is not latest')
+        files = []
+        for snap in catalog.latest_snapshots():
+            files.extend(_visible_lake_files_for_snapshot(catalog, snap['snapshot_id']))
     if args.json:
         _print_json(files)
     else:
-        _print_table(files, ['file_id', 'content_type', 'record_count', 'status', 'relative_path'])
+        _print_table(files, ['snapshot_id', 'api_name', 'file_id', 'content_type', 'record_count', 'status', 'relative_path'])
     return 0
 
 
@@ -249,11 +277,11 @@ def cmd_show_jobs(args) -> int:
 
 
 def cmd_show_snapshots(args) -> int:
-    rows = _ensure_catalog(Path(args.root)).list_snapshots(args.api, args.limit)
+    rows = _ensure_catalog(Path(args.root)).list_snapshots(args.api, args.limit, latest=args.latest)
     if args.json:
         _print_json(rows)
     else:
-        _print_table(rows, ['snapshot_id', 'table_id', 'api_name', 'status', 'created_at', 'parent_snapshot_id', 'file_count', 'record_count'])
+        _print_table(rows, ['snapshot_id', 'table_id', 'api_name', 'status', 'created_at', 'parent_snapshot_id', 'file_count', 'record_count', 'raw_event_count'])
     return 0
 
 
@@ -262,7 +290,7 @@ def cmd_show_validations(args) -> int:
     if args.json:
         _print_json(rows)
     else:
-        _print_table(rows, ['validation_id', 'snapshot_id', 'status', 'started_at', 'finished_at', 'checked_file_count', 'failure_count'])
+        _print_table(rows, ['validation_id', 'api_name', 'snapshot_id', 'status', 'started_at', 'finished_at', 'checked_file_count', 'failure_count', 'record_count', 'raw_event_count'])
     return 0
 
 
@@ -320,11 +348,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--snapshot', default='latest')
     p.add_argument('--api')
     p.add_argument('--all-active', action='store_true')
+    p.add_argument('--latest-all', action='store_true')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_validate)
 
     p = sub.add_parser('list-files')
-    p.add_argument('--api', required=True)
+    p.add_argument('--api')
     p.add_argument('--snapshot', default='latest')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_list_files)
@@ -343,6 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser('show-snapshots')
     _add_observe_args(p)
+    p.add_argument('--latest', action='store_true')
     p.set_defaults(func=cmd_show_snapshots)
 
     p = sub.add_parser('show-validations')

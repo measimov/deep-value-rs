@@ -1,0 +1,43 @@
+{
+  "events": [
+    {
+      "code": 0,
+      "data": {
+        "fields": [
+          "ts_code",
+          "trade_date",
+          "adj_factor"
+        ],
+        "has_more": true,
+        "items": [
+          [
+            "000001.SZ",
+            "20250102",
+            123.45
+          ]
+        ]
+      },
+      "msg": null
+    },
+    {
+      "code": 0,
+      "data": {
+        "fields": [
+          "ts_code",
+          "trade_date",
+          "adj_factor"
+        ],
+        "has_more": false,
+        "items": [
+          [
+            "000002.SZ",
+            "20250102",
+            98.76
+          ]
+        ]
+      },
+      "msg": null
+    }
+  ],
+  "fixture_note": "Synthetic fixture matching observed Tushare response envelope; no secret included."
+}

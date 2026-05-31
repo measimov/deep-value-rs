@@ -48,16 +48,58 @@ class Validator:
                     failures.append((file_id, "raw_unreadable", str(e)))
         return not failures, failures
 
-    def validate_snapshot(self, snapshot_id: str | None = None, api_name: str | None = None) -> tuple[bool, str]:
+    def validate_snapshot_report(self, snapshot_id: str | None = None, api_name: str | None = None) -> dict[str, Any]:
         snapshot = None
         if snapshot_id in (None, "latest"):
             snapshot = self.catalog.latest_snapshot(api_name)
             if not snapshot:
-                run_id = self.catalog.record_validation(None, api_name, "failed", {"error": "snapshot_not_found"}, [(None, "snapshot_not_found", api_name)])
-                return False, run_id
+                validation_id = self.catalog.record_validation(None, api_name, "failed", {"error": "snapshot_not_found", "files": 0, "failures": 1, "record_count": 0, "raw_event_count": 0}, [(None, "snapshot_not_found", api_name)])
+                return {
+                    "validation_id": validation_id,
+                    "scope": "api_latest" if api_name else "snapshot",
+                    "api_name": api_name,
+                    "snapshot_id": None,
+                    "status": "failed",
+                    "checked_file_count": 0,
+                    "failure_count": 1,
+                    "record_count": 0,
+                    "raw_event_count": 0,
+                }
             snapshot_id = snapshot["snapshot_id"]
         rows = self.catalog.files_for_snapshot(str(snapshot_id))
+        resolved_api = api_name or (snapshot.get("api_name") if snapshot else None) or (rows[0].get("api_name") if rows else None)
         ok, failures = self.validate_file_rows(rows)
         status = "succeeded" if ok else "failed"
-        run_id = self.catalog.record_validation(str(snapshot_id), api_name, status, {"files": len(rows), "failures": len(failures)}, failures)
-        return ok, run_id
+        record_count = sum(int(row.get("record_count") or 0) for row in rows if row.get("content_type") == "lake")
+        raw_event_count = sum(int(row.get("raw_event_count") or 0) for row in rows if row.get("content_type") == "raw")
+        summary = {
+            "scope": "api_latest" if snapshot is not None and resolved_api else "snapshot",
+            "files": len(rows),
+            "failures": len(failures),
+            "record_count": record_count,
+            "raw_event_count": raw_event_count,
+        }
+        validation_id = self.catalog.record_validation(str(snapshot_id), resolved_api, status, summary, failures)
+        return {
+            "validation_id": validation_id,
+            "scope": summary["scope"],
+            "api_name": resolved_api,
+            "snapshot_id": str(snapshot_id),
+            "status": status,
+            "checked_file_count": len(rows),
+            "failure_count": len(failures),
+            "record_count": record_count,
+            "raw_event_count": raw_event_count,
+        }
+
+    def validate_snapshot(self, snapshot_id: str | None = None, api_name: str | None = None) -> tuple[bool, str]:
+        report = self.validate_snapshot_report(snapshot_id, api_name)
+        return report["status"] == "succeeded", str(report["validation_id"])
+
+    def validate_latest_snapshots(self, api_name: str | None = None) -> tuple[bool, list[dict[str, Any]]]:
+        snapshots = self.catalog.latest_snapshots(api_name)
+        if not snapshots:
+            report = self.validate_snapshot_report("latest", api_name)
+            return False, [report]
+        reports = [self.validate_snapshot_report(snap["snapshot_id"], snap.get("api_name")) for snap in snapshots]
+        return all(row["status"] == "succeeded" for row in reports), reports

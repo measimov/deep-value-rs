@@ -499,8 +499,20 @@ class CatalogStore:
             if api_name:
                 row = conn.execute("select * from snapshots where api_name=? and status='current' order by sequence_number desc, created_at desc limit 1", (api_name,)).fetchone()
             else:
-                row = conn.execute("select * from snapshots where status='current' order by sequence_number desc, created_at desc limit 1").fetchone()
+                # This is the latest created per-api snapshot, not a global snapshot.
+                row = conn.execute("select * from snapshots where status='current' order by created_at desc, sequence_number desc limit 1").fetchone()
         return dict(row) if row else None
+
+    def latest_snapshots(self, api_name: str | None = None) -> list[dict[str, Any]]:
+        sql = "select * from snapshots where status='current'"
+        args: list[Any] = []
+        if api_name:
+            sql += " and api_name=?"
+            args.append(api_name)
+        sql += " order by api_name, created_at desc"
+        with self.connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
 
     def files_for_snapshot(self, snapshot_id: str, content_type: str | None = None) -> list[dict[str, Any]]:
         sql = """
@@ -621,20 +633,28 @@ class CatalogStore:
             rows = conn.execute(sql, args).fetchall()
         return [dict(r) for r in rows]
 
-    def list_snapshots(self, api_name: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    def list_snapshots(self, api_name: str | None = None, limit: int = 20, latest: bool = False) -> list[dict[str, Any]]:
         args: list[Any] = []
         sql = """
             select s.snapshot_id,s.table_id,s.api_name,s.status,s.created_at,s.parent_snapshot_id,
                    count(sf.file_id) as file_count,
-                   coalesce(sum(case when f.content_type='lake' then f.record_count else 0 end), 0) as record_count
+                   coalesce(sum(case when f.content_type='lake' then f.record_count else 0 end), 0) as record_count,
+                   coalesce(sum(case when f.content_type='raw' then f.raw_event_count else 0 end), 0) as raw_event_count
             from snapshots s
             left join snapshot_files sf on sf.snapshot_id=s.snapshot_id
             left join files f on f.file_id=sf.file_id
         """
+        clauses: list[str] = []
+        if latest:
+            clauses.append("s.status='current'")
         if api_name:
-            sql += " where s.api_name=?"
+            clauses.append("s.api_name=?")
             args.append(api_name)
-        sql += " group by s.snapshot_id order by s.sequence_number desc limit ?"
+        if clauses:
+            sql += " where " + " and ".join(clauses)
+        sql += " group by s.snapshot_id"
+        sql += " order by s.api_name, s.created_at desc" if latest else " order by s.sequence_number desc, s.created_at desc"
+        sql += " limit ?"
         args.append(limit)
         with self.connect() as conn:
             rows = conn.execute(sql, args).fetchall()
@@ -646,6 +666,8 @@ class CatalogStore:
             select v.validation_run_id as validation_id,v.snapshot_id,v.status,v.started_at,v.finished_at,
                    json_extract(v.summary_json, '$.files') as checked_file_count,
                    json_extract(v.summary_json, '$.failures') as failure_count,
+                   json_extract(v.summary_json, '$.record_count') as record_count,
+                   json_extract(v.summary_json, '$.raw_event_count') as raw_event_count,
                    v.api_name
             from validation_runs v
         """

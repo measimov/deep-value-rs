@@ -1,0 +1,32 @@
+{
+  "events": [
+    {
+      "code": 0,
+      "data": {
+        "fields": [
+          "exchange",
+          "cal_date",
+          "is_open",
+          "pretrade_date"
+        ],
+        "has_more": false,
+        "items": [
+          [
+            "SSE",
+            "20250102",
+            1,
+            "20241231"
+          ],
+          [
+            "SSE",
+            "20250103",
+            1,
+            "20250102"
+          ]
+        ]
+      },
+      "msg": null
+    }
+  ],
+  "fixture_note": "Synthetic fixture matching observed Tushare response envelope; no secret included."
+}

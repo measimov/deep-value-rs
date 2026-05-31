@@ -1,0 +1,59 @@
+{
+  "events": [
+    {
+      "code": 0,
+      "data": {
+        "fields": [
+          "ts_code",
+          "symbol",
+          "name",
+          "area",
+          "industry",
+          "market",
+          "list_date"
+        ],
+        "has_more": true,
+        "items": [
+          [
+            "000001.SZ",
+            "000001",
+            "Ping An Bank",
+            "Shenzhen",
+            "Bank",
+            "Main",
+            "19910403"
+          ]
+        ]
+      },
+      "msg": null
+    },
+    {
+      "code": 0,
+      "data": {
+        "fields": [
+          "ts_code",
+          "symbol",
+          "name",
+          "area",
+          "industry",
+          "market",
+          "list_date"
+        ],
+        "has_more": false,
+        "items": [
+          [
+            "000002.SZ",
+            "000002",
+            "Vanke A",
+            "Shenzhen",
+            "Real Estate",
+            "Main",
+            "19910129"
+          ]
+        ]
+      },
+      "msg": null
+    }
+  ],
+  "fixture_note": "Synthetic fixture matching observed Tushare response envelope; no secret included."
+}

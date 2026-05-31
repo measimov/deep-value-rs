@@ -179,20 +179,44 @@ class Phase12EndpointTests(unittest.TestCase):
         self.assertTrue(ok)
 
 
-    def test_validate_latest_without_api_uses_most_recent_snapshot(self):
+    def test_snapshot_latest_semantics_across_multiple_apis(self):
         store = FileLakeStore(self.root, self.catalog)
+        daily_fields, daily_items, daily_params = FIXTURES["daily"]
         stock_fields, stock_items, stock_params = FIXTURES["stock_basic"]
-        cal_fields, cal_items, cal_params = FIXTURES["trade_cal"]
-        first = store.fetch("stock_basic", stock_params, ApiFakeClient(stock_fields, stock_items))
-        second = store.fetch("trade_cal", cal_params, ApiFakeClient(cal_fields, cal_items))
-        self.assertNotEqual(first.snapshot_id, second.snapshot_id)
-        latest = self.catalog.latest_snapshot()
-        self.assertEqual(latest["snapshot_id"], second.snapshot_id)
-        ok, validation_id = Validator(self.root, self.catalog).validate_snapshot("latest")
-        self.assertTrue(ok)
-        with sqlite3.connect(self.catalog.db_path) as conn:
-            row = conn.execute("select snapshot_id from validation_runs where validation_run_id=?", (validation_id,)).fetchone()
-        self.assertEqual(row[0], second.snapshot_id)
+        daily = store.fetch("daily", daily_params, ApiFakeClient(daily_fields, daily_items))
+        stock = store.fetch("stock_basic", stock_params, ApiFakeClient(stock_fields, stock_items))
+
+        self.assertEqual(self.catalog.latest_snapshot("daily")["snapshot_id"], daily.snapshot_id)
+        self.assertEqual(self.catalog.latest_snapshot("stock_basic")["snapshot_id"], stock.snapshot_id)
+        self.assertEqual(self.catalog.latest_snapshot()["snapshot_id"], stock.snapshot_id)
+
+        latest_all_ok, reports = Validator(self.root, self.catalog).validate_latest_snapshots()
+        self.assertTrue(latest_all_ok)
+        by_api = {row["api_name"]: row for row in reports}
+        self.assertEqual(by_api["daily"]["snapshot_id"], daily.snapshot_id)
+        self.assertEqual(by_api["stock_basic"]["snapshot_id"], stock.snapshot_id)
+
+        daily_validation = json.loads(self.run_cli("validate", "--api", "daily", "--snapshot", "latest", "--json").stdout)
+        self.assertEqual(daily_validation["status"], "succeeded")
+        self.assertEqual(len(daily_validation["results"]), 1)
+        self.assertEqual(daily_validation["results"][0]["snapshot_id"], daily.snapshot_id)
+
+        all_validation = json.loads(self.run_cli("validate", "--snapshot", "latest", "--json").stdout)
+        self.assertEqual(all_validation["status"], "succeeded")
+        self.assertTrue({row["api_name"] for row in all_validation["results"]} >= {"daily", "stock_basic"})
+
+        daily_files = json.loads(self.run_cli("list-files", "--api", "daily", "--snapshot", "latest", "--json").stdout)
+        self.assertEqual(len(daily_files), 1)
+        self.assertEqual(daily_files[0]["api_name"], "daily")
+
+        all_files = json.loads(self.run_cli("list-files", "--snapshot", "latest", "--json").stdout)
+        self.assertTrue({row["api_name"] for row in all_files} >= {"daily", "stock_basic"})
+
+        latest_snapshots = json.loads(self.run_cli("show-snapshots", "--latest", "--json").stdout)
+        self.assertTrue({row["api_name"] for row in latest_snapshots} >= {"daily", "stock_basic"})
+        stock_latest = json.loads(self.run_cli("show-snapshots", "--api", "stock_basic", "--latest", "--json").stdout)
+        self.assertEqual(len(stock_latest), 1)
+        self.assertEqual(stock_latest[0]["snapshot_id"], stock.snapshot_id)
 
     def test_cli_dry_run_show_permissions_and_list_files_for_stock_basic(self):
         self.catalog.record_probe(

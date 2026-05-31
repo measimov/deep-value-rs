@@ -157,6 +157,40 @@ The MVP SQLite catalog is a local single-writer catalog. Catalog mutations use
 SQLite transactions. The backup command uses the SQLite backup API rather than
 copying a live WAL database file directly.
 
+## Snapshot Semantics
+
+Phase 1.3 uses per-API table snapshots. Every successful fetch for one endpoint
+creates a snapshot for that endpoint with `api_name`, `table_id`, `snapshot_id`,
+`sequence_number`, `created_at`, `parent_snapshot_id`, and `status`.
+
+`latest` has these meanings:
+
+- `--api <api> --snapshot latest` resolves to that API/table's latest `current`
+  snapshot.
+- `validate --snapshot latest` without `--api` validates all APIs' latest
+  `current` snapshots. It is equivalent to `validate --latest-all`.
+- `list-files --api <api> --snapshot latest` lists that API's latest lake files.
+- `list-files --snapshot latest` without `--api` lists lake files from every
+  API's latest snapshot.
+- `show-snapshots --latest` shows each API's latest snapshot.
+- `show-snapshots --api <api> --latest` shows only that API's latest snapshot.
+
+Global snapshots are not implemented in Phase 1.3. The catalog has
+`snapshot_refs` as a compatibility placeholder for a future full-mirror or
+multi-endpoint batch snapshot, but current commands operate on per-API snapshots.
+
+Useful commands:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 validate --snapshot latest
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 validate --latest-all
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 validate --api daily --snapshot latest
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 list-files --snapshot latest
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 list-files --api daily --snapshot latest
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 show-snapshots --latest
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 show-snapshots --api daily --latest
+```
+
 ## Read Latest Snapshot
 
 Python example:
@@ -251,6 +285,31 @@ rm -rf /tmp/tushare-mirror-real
 
 Only clean explicit temporary roots. Do not delete `data/tushare/` unless you
 intend to remove local mirror data.
+
+## Real Smoke Script
+
+The repository includes an opt-in real smoke script. It is not run by unittest or
+CI by default because it sends real Tushare requests and consumes quota.
+
+```bash
+python3 scripts/tushare_real_smoke.py --help
+python3 scripts/tushare_real_smoke.py --root /tmp/tushare-mirror-real-smoke --reset-root --all-phase-1
+python3 scripts/tushare_real_smoke.py --root /tmp/tushare-mirror-real-smoke --reset-root --endpoint daily
+```
+
+The script requires `TUSHARE_TOKEN` from the environment or `.env`, but never
+prints the token. It runs only these endpoints: `daily`, `stock_basic`,
+`trade_cal`, `adj_factor`, and `daily_basic`. Each endpoint uses one minimal
+request; the script does not loop dates or stocks and does not perform a full
+mirror.
+
+`permission_denied` and `rate_limited` are reported as observable endpoint
+states. Response-shape errors, writer errors, validation failures, and reader
+failures should be treated as system failures. Clean temporary roots explicitly:
+
+```bash
+rm -rf /tmp/tushare-mirror-real-smoke
+```
 
 ## Real Tushare Smoke Test
 
