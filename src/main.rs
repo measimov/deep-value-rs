@@ -96,6 +96,10 @@ enum Commands {
 
     /// 检查 PostgreSQL 中 Tushare 数据完整性
     DataQuality {
+        /// 市场: a | hk | us
+        #[arg(long, default_value = "a")]
+        market: String,
+
         /// 起始日期，格式 YYYYMMDD
         #[arg(long, default_value = "20150101")]
         start: String,
@@ -107,6 +111,10 @@ enum Commands {
 
     /// 预取 Tushare 数据到 PostgreSQL typed 表
     Sync {
+        /// 市场: a | hk | us
+        #[arg(long, default_value = "a")]
+        market: String,
+
         /// 起始日期，格式 YYYYMMDD（全量模式）
         #[arg(long, default_value = "20150101")]
         start: String,
@@ -126,6 +134,14 @@ enum Commands {
         /// full sync 为本地十年 PB 检查预取的历史年数
         #[arg(long, default_value_t = 10)]
         lookback_years: usize,
+
+        /// HK/US 同步范围: all | meta | market | financial
+        #[arg(long, default_value = "all")]
+        scope: String,
+
+        /// HK/US 调试/分批同步时最多处理多少只股票；默认不限制
+        #[arg(long)]
+        max_codes: Option<usize>,
 
         /// 增量模式：只补缺失数据
         #[arg(long)]
@@ -176,22 +192,30 @@ async fn main() -> Result<()> {
         Commands::Db { action } => match action {
             DbAction::Ping => cmd_db_ping().await?,
         },
-        Commands::DataQuality { start, end } => cmd_data_quality(&start, &end).await?,
+        Commands::DataQuality { market, start, end } => {
+            cmd_data_quality(&market, &start, &end).await?
+        }
         Commands::Sync {
+            market,
             start,
             end,
             anniversary,
             delay_ms,
             lookback_years,
+            scope,
+            max_codes,
             incremental,
             sync_mode,
         } => {
             cmd_sync(
+                &market,
                 &start,
                 &end,
                 anniversary.as_deref(),
                 delay_ms,
                 lookback_years,
+                &scope,
+                max_codes,
                 incremental,
                 &sync_mode,
             )
@@ -239,10 +263,17 @@ async fn cmd_db_ping() -> Result<()> {
 }
 
 /// 检查本地 Tushare 数据完整性。
-async fn cmd_data_quality(start: &str, end: &str) -> Result<()> {
+async fn cmd_data_quality(market: &str, start: &str, end: &str) -> Result<()> {
     let config = AppConfig::load()?;
     let pool = db::connect(&config.database_url).await?;
     db::init_schema(&pool).await?;
+
+    if !matches!(
+        market.to_ascii_lowercase().as_str(),
+        "a" | "cn" | "ashare" | "a-share"
+    ) {
+        return cmd_global_data_quality(&pool, market, start, end).await;
+    }
 
     println!("数据质量检查: {start}..{end}");
 
@@ -358,13 +389,165 @@ async fn cmd_data_quality(start: &str, end: &str) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_global_data_quality(
+    pool: &sqlx::PgPool,
+    market: &str,
+    start: &str,
+    end: &str,
+) -> Result<()> {
+    let (prefix, cal_table, basic_table, daily_table, daily_adj_table, adjfactor_table, fin_table) =
+        match market.to_ascii_lowercase().as_str() {
+            "hk" | "h" | "hongkong" | "hong-kong" => (
+                "hk",
+                "tushare_hk_trade_cal",
+                "tushare_hk_basic",
+                "tushare_hk_daily",
+                "tushare_hk_daily_adj",
+                "tushare_hk_adjfactor",
+                "tushare_hk_financial_rows",
+            ),
+            "us" | "usa" | "u.s." => (
+                "us",
+                "tushare_us_trade_cal",
+                "tushare_us_basic",
+                "tushare_us_daily",
+                "tushare_us_daily_adj",
+                "tushare_us_adjfactor",
+                "tushare_us_financial_rows",
+            ),
+            _ => anyhow::bail!("未知数据质量检查市场: {market}，可选: a | hk | us"),
+        };
+
+    println!("{prefix} 数据质量检查: {start}..{end}");
+
+    let like_pattern = format!("{prefix}_%");
+    let job_rows = sqlx::query(
+        r#"
+        select status, count(*) as jobs
+        from deep_value.tushare_sync_jobs
+        where api_name like $1
+        group by status
+        order by status
+        "#,
+    )
+    .bind(like_pattern)
+    .fetch_all(pool)
+    .await?;
+    println!("\n同步任务状态:");
+    for row in job_rows {
+        let status: String = row.try_get("status")?;
+        let jobs: i64 = row.try_get("jobs")?;
+        println!("  {status}: {jobs}");
+    }
+
+    let basic_sql = format!(
+        r#"
+        select count(*) as rows,
+               count(ts_code) as non_null_codes,
+               min(nullif(list_date, 'NaT')) as min_list_date,
+               max(coalesce(nullif(nullif(delist_date,''), 'NaT'), nullif(list_date, 'NaT'))) as max_known_date
+        from deep_value.{basic_table}
+        "#
+    );
+    let basic = sqlx::query(&basic_sql).fetch_one(pool).await?;
+    println!("\n基础信息:");
+    println!(
+        "  rows={}, non_null_codes={}, min_list_date={:?}, max_known_date={:?}",
+        basic.try_get::<i64, _>("rows")?,
+        basic.try_get::<i64, _>("non_null_codes")?,
+        basic.try_get::<Option<String>, _>("min_list_date")?,
+        basic.try_get::<Option<String>, _>("max_known_date")?
+    );
+
+    println!("\n日线类缺失开市日:");
+    for (name, table) in [
+        ("daily", daily_table),
+        ("daily_adj", daily_adj_table),
+        ("adjfactor", adjfactor_table),
+    ] {
+        let sql = format!(
+            r#"
+            with open_dates as (
+                select cal_date
+                from deep_value.{cal_table}
+                where is_open = '1'
+                  and cal_date between $1 and $2
+            )
+            select count(*) as missing_open_dates,
+                   min(cal_date) as first_missing,
+                   max(cal_date) as last_missing
+            from open_dates o
+            left join (select distinct trade_date from deep_value.{table}) d
+              on d.trade_date = o.cal_date
+            where d.trade_date is null
+            "#,
+        );
+        let row = sqlx::query(&sql)
+            .bind(start)
+            .bind(end)
+            .fetch_one(pool)
+            .await?;
+        println!(
+            "  {name}: missing={}, first={:?}, last={:?}",
+            row.try_get::<i64, _>("missing_open_dates")?,
+            row.try_get::<Option<String>, _>("first_missing")?,
+            row.try_get::<Option<String>, _>("last_missing")?
+        );
+    }
+
+    let coverage_sql = format!(
+        r#"
+        select '{daily_table}' as table_name, count(*) as rows, min(trade_date) as min_date, max(trade_date) as max_date from deep_value.{daily_table}
+        union all select '{daily_adj_table}', count(*), min(trade_date), max(trade_date) from deep_value.{daily_adj_table}
+        union all select '{adjfactor_table}', count(*), min(trade_date), max(trade_date) from deep_value.{adjfactor_table}
+        order by table_name
+        "#
+    );
+    let coverage_rows = sqlx::query(&coverage_sql).fetch_all(pool).await?;
+    println!("\n行情覆盖:");
+    for row in coverage_rows {
+        println!(
+            "  {}: rows={}, min={:?}, max={:?}",
+            row.try_get::<String, _>("table_name")?,
+            row.try_get::<i64, _>("rows")?,
+            row.try_get::<Option<String>, _>("min_date")?,
+            row.try_get::<Option<String>, _>("max_date")?
+        );
+    }
+
+    let fin_sql = format!(
+        r#"
+        select api_name, count(*) as rows, min(end_date) as min_end_date, max(end_date) as max_end_date
+        from deep_value.{fin_table}
+        group by api_name
+        order by api_name
+        "#
+    );
+    let fin_rows = sqlx::query(&fin_sql).fetch_all(pool).await?;
+    println!("\n财务覆盖:");
+    for row in fin_rows {
+        println!(
+            "  {}: rows={}, min={:?}, max={:?}",
+            row.try_get::<String, _>("api_name")?,
+            row.try_get::<i64, _>("rows")?,
+            row.try_get::<Option<String>, _>("min_end_date")?,
+            row.try_get::<Option<String>, _>("max_end_date")?
+        );
+    }
+
+    Ok(())
+}
+
 /// 预取 Tushare 数据到 PostgreSQL typed 表。
 async fn cmd_sync(
+    market: &str,
     start: &str,
     end: &str,
     anniversary: Option<&str>,
     delay_ms: u64,
     lookback_years: usize,
+    scope: &str,
+    max_codes: Option<usize>,
     incremental: bool,
     sync_mode: &str,
 ) -> Result<()> {
@@ -374,25 +557,50 @@ async fn cmd_sync(
     let cache = PgCache::new(pool);
     let client = TushareClient::with_pg_cache(&config.tushare_token, cache);
 
-    let stats = if incremental {
-        sync::run_sync_incremental(
-            &client,
-            client.pg_cache().unwrap(),
-            sync_mode,
-            end,
-            delay_ms,
-        )
-        .await?
+    let normalized_market = market.to_ascii_lowercase();
+    let is_a_share = matches!(
+        normalized_market.as_str(),
+        "a" | "cn" | "ashare" | "a-share"
+    );
+
+    let stats = if is_a_share {
+        if incremental {
+            sync::run_sync_incremental(
+                &client,
+                client.pg_cache().unwrap(),
+                sync_mode,
+                end,
+                delay_ms,
+            )
+            .await?
+        } else {
+            let ann = anniversary.unwrap_or(&end[4..]);
+            sync::run_sync(
+                &client,
+                client.pg_cache().unwrap(),
+                start,
+                end,
+                ann,
+                lookback_years,
+                delay_ms,
+            )
+            .await?
+        }
     } else {
-        let ann = anniversary.unwrap_or(&end[4..]);
-        sync::run_sync(
+        if incremental {
+            anyhow::bail!(
+                "HK/US 暂不支持 --incremental，请使用 --scope meta|market|financial|all 断点续跑"
+            );
+        }
+        sync::run_global_sync(
             &client,
             client.pg_cache().unwrap(),
+            market,
+            scope,
             start,
             end,
-            ann,
-            lookback_years,
             delay_ms,
+            max_codes,
         )
         .await?
     };

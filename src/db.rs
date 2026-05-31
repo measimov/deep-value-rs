@@ -497,6 +497,221 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
         create index if not exists idx_tushare_repurchase_ann_date
             on deep_value.tushare_repurchase(ann_date)
         "#,
+        r#"
+        create table if not exists deep_value.tushare_hk_basic (
+            ts_code text primary key,
+            name text,
+            fullname text,
+            enname text,
+            cn_spell text,
+            market text,
+            list_status text,
+            list_date text,
+            delist_date text,
+            trade_unit double precision,
+            isin text,
+            curr_type text,
+            payload jsonb not null,
+            updated_at timestamptz not null default now()
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_hk_basic_list_status
+            on deep_value.tushare_hk_basic(list_status)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_us_basic (
+            row_hash text primary key,
+            ts_code text,
+            name text,
+            enname text,
+            classify text,
+            list_date text,
+            delist_date text,
+            payload jsonb not null,
+            updated_at timestamptz not null default now()
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_us_basic_ts_code
+            on deep_value.tushare_us_basic(ts_code)
+            where ts_code is not null
+        "#,
+        r#"
+        create index if not exists idx_tushare_us_basic_classify
+            on deep_value.tushare_us_basic(classify)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_hk_trade_cal (
+            cal_date text primary key,
+            is_open text,
+            pretrade_date text,
+            payload jsonb not null,
+            updated_at timestamptz not null default now()
+        )
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_us_trade_cal (
+            cal_date text primary key,
+            is_open text,
+            pretrade_date text,
+            payload jsonb not null,
+            updated_at timestamptz not null default now()
+        )
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_hk_daily (
+            row_hash text primary key,
+            ts_code text,
+            trade_date text,
+            payload jsonb not null,
+            updated_at timestamptz not null default now()
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_hk_daily_trade_date
+            on deep_value.tushare_hk_daily(trade_date)
+        "#,
+        r#"
+        create index if not exists idx_tushare_hk_daily_ts_date
+            on deep_value.tushare_hk_daily(ts_code, trade_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_hk_daily_adj (
+            row_hash text primary key,
+            ts_code text,
+            trade_date text,
+            payload jsonb not null,
+            updated_at timestamptz not null default now()
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_hk_daily_adj_trade_date
+            on deep_value.tushare_hk_daily_adj(trade_date)
+        "#,
+        r#"
+        create index if not exists idx_tushare_hk_daily_adj_ts_date
+            on deep_value.tushare_hk_daily_adj(ts_code, trade_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_hk_adjfactor (
+            row_hash text primary key,
+            ts_code text,
+            trade_date text,
+            payload jsonb not null,
+            updated_at timestamptz not null default now()
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_hk_adjfactor_trade_date
+            on deep_value.tushare_hk_adjfactor(trade_date)
+        "#,
+        r#"
+        create index if not exists idx_tushare_hk_adjfactor_ts_date
+            on deep_value.tushare_hk_adjfactor(ts_code, trade_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_us_daily (
+            row_hash text primary key,
+            ts_code text,
+            trade_date text,
+            payload jsonb not null,
+            updated_at timestamptz not null default now()
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_us_daily_trade_date
+            on deep_value.tushare_us_daily(trade_date)
+        "#,
+        r#"
+        create index if not exists idx_tushare_us_daily_ts_date
+            on deep_value.tushare_us_daily(ts_code, trade_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_us_daily_adj (
+            row_hash text primary key,
+            ts_code text,
+            trade_date text,
+            payload jsonb not null,
+            updated_at timestamptz not null default now()
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_us_daily_adj_trade_date
+            on deep_value.tushare_us_daily_adj(trade_date)
+        "#,
+        r#"
+        create index if not exists idx_tushare_us_daily_adj_ts_date
+            on deep_value.tushare_us_daily_adj(ts_code, trade_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_us_adjfactor (
+            row_hash text primary key,
+            ts_code text,
+            trade_date text,
+            exchange text,
+            payload jsonb not null,
+            updated_at timestamptz not null default now()
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_us_adjfactor_trade_date
+            on deep_value.tushare_us_adjfactor(trade_date)
+        "#,
+        r#"
+        create index if not exists idx_tushare_us_adjfactor_ts_date
+            on deep_value.tushare_us_adjfactor(ts_code, trade_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_hk_financial_rows (
+            api_name text not null,
+            row_hash text not null,
+            ts_code text,
+            end_date text,
+            start_date text,
+            ann_date text,
+            report_type text,
+            ind_type text,
+            ind_name text,
+            ind_value double precision,
+            payload jsonb not null,
+            updated_at timestamptz not null default now(),
+            primary key (api_name, row_hash)
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_hk_financial_rows_api_end_date
+            on deep_value.tushare_hk_financial_rows(api_name, end_date)
+        "#,
+        r#"
+        create index if not exists idx_tushare_hk_financial_rows_ts_end_date
+            on deep_value.tushare_hk_financial_rows(ts_code, end_date)
+        "#,
+        r#"
+        create table if not exists deep_value.tushare_us_financial_rows (
+            api_name text not null,
+            row_hash text not null,
+            ts_code text,
+            end_date text,
+            start_date text,
+            ann_date text,
+            report_type text,
+            ind_type text,
+            ind_name text,
+            ind_value double precision,
+            payload jsonb not null,
+            updated_at timestamptz not null default now(),
+            primary key (api_name, row_hash)
+        )
+        "#,
+        r#"
+        create index if not exists idx_tushare_us_financial_rows_api_end_date
+            on deep_value.tushare_us_financial_rows(api_name, end_date)
+        "#,
+        r#"
+        create index if not exists idx_tushare_us_financial_rows_ts_end_date
+            on deep_value.tushare_us_financial_rows(ts_code, end_date)
+        "#,
     ];
 
     let mut tx = pool.begin().await.context("启动 schema 初始化事务失败")?;

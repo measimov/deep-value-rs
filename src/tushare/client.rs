@@ -317,16 +317,18 @@ impl TushareClient {
 
         // 保存合并后的完整结果（仅分页成功时到达此处）
         if let Some(pg_cache) = &self.pg_cache {
-            pg_cache
-                .save_raw(
-                    &cache_key,
-                    api_name,
-                    param_map,
-                    fields,
-                    &all_fields,
-                    &all_items,
-                )
-                .await?;
+            if should_persist_raw_response(api_name) {
+                pg_cache
+                    .save_raw(
+                        &cache_key,
+                        api_name,
+                        param_map,
+                        fields,
+                        &all_fields,
+                        &all_items,
+                    )
+                    .await?;
+            }
             pg_cache
                 .save_typed(api_name, param_map, &all_fields, &all_items)
                 .await?;
@@ -492,7 +494,12 @@ fn pagination_page_size(api: &str) -> Option<usize> {
         "stock_basic" | "daily_basic" | "daily" | "balancesheet_vip" | "income_vip"
         | "fina_indicator_vip" | "cashflow_vip" | "forecast_vip" | "express_vip"
         | "index_weight" | "top10_holders" | "top10_floatholders" | "repurchase" | "adj_factor"
-        | "index_daily" | "stk_limit" => Some(5000),
+        | "index_daily" | "stk_limit" | "hk_daily" => Some(5000),
+        "us_basic" | "us_daily" | "hk_daily_adj" | "hk_adjfactor" => Some(6000),
+        "us_daily_adj" => Some(8000),
+        "us_adjfactor" => Some(15000),
+        "hk_income" | "hk_balancesheet" | "hk_cashflow" | "hk_fina_indicator" | "us_income"
+        | "us_balancesheet" | "us_cashflow" | "us_fina_indicator" => Some(10000),
         "fina_mainbz_vip" => Some(100),
         "pledge_stat" => Some(1000),
         _ => None,
@@ -511,23 +518,50 @@ fn pagination_max_pages(api: &str) -> usize {
 
 fn progress_key_fields(api: &str) -> &[&str] {
     match api {
-        "daily" | "daily_basic" | "adj_factor" | "index_daily" | "stk_limit" => {
+        "daily" | "daily_basic" | "adj_factor" | "index_daily" | "stk_limit" | "hk_daily"
+        | "hk_daily_adj" | "hk_adjfactor" | "us_daily" | "us_daily_adj" => {
             &["ts_code", "trade_date"]
         }
+        "us_adjfactor" => &["ts_code", "trade_date", "exchange"],
         "income_vip" | "balancesheet_vip" | "cashflow_vip" | "fina_indicator_vip"
         | "forecast_vip" | "express_vip" => &["ts_code", "end_date"],
+        "hk_income" | "hk_balancesheet" | "hk_cashflow" | "hk_fina_indicator" | "us_income"
+        | "us_balancesheet" | "us_cashflow" | "us_fina_indicator" => {
+            &["ts_code", "end_date", "ind_name", "report_type", "ind_type"]
+        }
         "fina_mainbz_vip" => &["ts_code", "end_date", "bz_item"],
         "index_weight" => &["index_code", "con_code", "trade_date"],
         "top10_holders" | "top10_floatholders" => &["ts_code", "end_date", "holder_name"],
         "pledge_stat" => &["ts_code", "end_date"],
         "repurchase" => &["ts_code", "ann_date", "end_date"],
         "disclosure_date" => &["ts_code", "end_date"],
+        "us_basic" => &["ts_code", "enname", "classify", "list_date"],
         _ => &["ts_code"],
     }
 }
 
 fn unsupported_has_more(paginate: Option<usize>, has_more: bool) -> bool {
     paginate.is_none() && has_more
+}
+
+fn should_persist_raw_response(api: &str) -> bool {
+    !matches!(
+        api,
+        "hk_daily"
+            | "hk_daily_adj"
+            | "hk_adjfactor"
+            | "hk_income"
+            | "hk_balancesheet"
+            | "hk_cashflow"
+            | "hk_fina_indicator"
+            | "us_daily"
+            | "us_daily_adj"
+            | "us_adjfactor"
+            | "us_income"
+            | "us_balancesheet"
+            | "us_cashflow"
+            | "us_fina_indicator"
+    )
 }
 
 fn progress_key_str(row: &[serde_json::Value], resp_fields: &[String], keys: &[&str]) -> String {
@@ -597,6 +631,14 @@ mod tests {
         assert_eq!(pagination_page_size("pledge_stat"), Some(1000));
         assert_eq!(pagination_page_size("repurchase"), Some(5000));
         assert_eq!(pagination_page_size("stk_limit"), Some(5000));
+        assert_eq!(pagination_page_size("hk_daily"), Some(5000));
+        assert_eq!(pagination_page_size("hk_daily_adj"), Some(6000));
+        assert_eq!(pagination_page_size("hk_adjfactor"), Some(6000));
+        assert_eq!(pagination_page_size("us_basic"), Some(6000));
+        assert_eq!(pagination_page_size("us_daily"), Some(6000));
+        assert_eq!(pagination_page_size("us_daily_adj"), Some(8000));
+        assert_eq!(pagination_page_size("us_adjfactor"), Some(15000));
+        assert_eq!(pagination_page_size("us_income"), Some(10000));
         assert_eq!(pagination_page_size("fina_audit"), None); // non-paginated
     }
 
@@ -645,6 +687,18 @@ mod tests {
         );
         // Unique per stock: ts_code only
         assert_eq!(progress_key_fields("stock_basic"), &["ts_code"]);
+        assert_eq!(
+            progress_key_fields("us_basic"),
+            &["ts_code", "enname", "classify", "list_date"]
+        );
+        assert_eq!(
+            progress_key_fields("us_adjfactor"),
+            &["ts_code", "trade_date", "exchange"]
+        );
+        assert_eq!(
+            progress_key_fields("us_income"),
+            &["ts_code", "end_date", "ind_name", "report_type", "ind_type"]
+        );
     }
 
     #[test]
@@ -652,6 +706,14 @@ mod tests {
         assert!(unsupported_has_more(None, true));
         assert!(!unsupported_has_more(Some(5000), true));
         assert!(!unsupported_has_more(None, false));
+    }
+
+    #[test]
+    fn test_should_persist_raw_response() {
+        assert!(should_persist_raw_response("daily"));
+        assert!(should_persist_raw_response("hk_basic"));
+        assert!(!should_persist_raw_response("hk_daily"));
+        assert!(!should_persist_raw_response("us_income"));
     }
 
     #[test]

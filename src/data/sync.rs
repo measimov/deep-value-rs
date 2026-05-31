@@ -38,6 +38,19 @@ const REPURCHASE_FIELDS: &str =
     "ts_code,ann_date,end_date,proc,exp_date,vol,amount,high_limit,low_limit";
 const INDEX_WEIGHT_CODES: &[&str] = &["000300.SH", "399300.SZ"];
 
+const HK_BASIC_FIELDS: &str =
+    "ts_code,name,fullname,enname,cn_spell,market,list_status,list_date,delist_date,trade_unit,isin,curr_type";
+const US_BASIC_FIELDS: &str = "ts_code,name,enname,classify,list_date,delist_date";
+const GLOBAL_TRADE_CAL_FIELDS: &str = "cal_date,is_open,pretrade_date";
+const HK_DAILY_FIELDS: &str =
+    "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount";
+const HK_DAILY_ADJ_FIELDS: &str = "ts_code,trade_date,close,open,high,low,pre_close,change,pct_change,vol,amount,vwap,adj_factor,turnover_ratio,free_share,total_share,free_mv,total_mv";
+const HK_ADJFACTOR_FIELDS: &str = "ts_code,trade_date,cum_adjfactor,close_price";
+const US_DAILY_FIELDS: &str = "ts_code,trade_date,close,open,high,low,pre_close,change,pct_change,vol,amount,vwap,turnover_ratio,total_mv,pe,pb";
+const US_DAILY_ADJ_FIELDS: &str = "ts_code,trade_date,close,open,high,low,pre_close,change,pct_change,vol,amount,vwap,adj_factor,turnover_ratio,free_share,total_share,free_mv,total_mv,exchange";
+const US_ADJFACTOR_FIELDS: &str = "ts_code,trade_date,exchange,cum_adjfactor,close_price";
+const GLOBAL_FINANCIAL_FIELDS: &str = TUSHARE_ALL_FIELDS;
+
 /// 同步统计。
 #[derive(Debug, Default)]
 pub struct SyncStats {
@@ -703,6 +716,332 @@ async fn sync_meta_incremental(
 }
 
 // =========================================================================
+// 港股 / 美股同步
+// =========================================================================
+
+/// 同步港股或美股数据。
+///
+/// `market`: `hk` | `us`。
+/// `scope`: `all` | `meta` | `market` | `financial`。
+/// `market` scope 会包含 basic + trade calendar，因为交易日和代码域是生成任务的基础。
+pub async fn run_global_sync(
+    client: &TushareClient,
+    cache: &PgCache,
+    market: &str,
+    scope: &str,
+    start_date: &str,
+    end_date: &str,
+    delay_ms: u64,
+    max_codes: Option<usize>,
+) -> Result<SyncStats> {
+    validate_global_scope(scope)?;
+    match normalize_market(market) {
+        Some("hk") => {
+            run_hk_sync(
+                client, cache, scope, start_date, end_date, delay_ms, max_codes,
+            )
+            .await
+        }
+        Some("us") => {
+            run_us_sync(
+                client, cache, scope, start_date, end_date, delay_ms, max_codes,
+            )
+            .await
+        }
+        _ => anyhow::bail!("未知市场: {market}，可选: hk | us"),
+    }
+}
+
+async fn run_hk_sync(
+    client: &TushareClient,
+    cache: &PgCache,
+    scope: &str,
+    start_date: &str,
+    end_date: &str,
+    delay_ms: u64,
+    max_codes: Option<usize>,
+) -> Result<SyncStats> {
+    let limiter = RateLimiter::new(delay_ms);
+    let started = Instant::now();
+    let mut stats = SyncStats::default();
+
+    if sync_scope_includes_meta(scope) {
+        for &status in &["L", "D", "P"] {
+            force_step(
+                client,
+                cache,
+                &limiter,
+                &mut stats,
+                "hk_basic",
+                &[("list_status", status)],
+                Some(HK_BASIC_FIELDS),
+            )
+            .await?;
+        }
+
+        force_step(
+            client,
+            cache,
+            &limiter,
+            &mut stats,
+            "hk_tradecal",
+            &[
+                ("start_date", start_date),
+                ("end_date", end_date),
+                ("is_open", "1"),
+            ],
+            Some(GLOBAL_TRADE_CAL_FIELDS),
+        )
+        .await?;
+    }
+
+    if sync_scope_includes_market(scope) {
+        let trade_dates =
+            load_global_trade_dates(cache, "hk_tradecal", start_date, end_date).await?;
+        if trade_dates.is_empty() {
+            anyhow::bail!("未能加载港股 {start_date}..{end_date} 交易日历，无法生成日频任务");
+        }
+        for date in &trade_dates {
+            force_step(
+                client,
+                cache,
+                &limiter,
+                &mut stats,
+                "hk_daily",
+                &[("trade_date", date.as_str())],
+                Some(HK_DAILY_FIELDS),
+            )
+            .await?;
+            force_step(
+                client,
+                cache,
+                &limiter,
+                &mut stats,
+                "hk_daily_adj",
+                &[("trade_date", date.as_str())],
+                Some(HK_DAILY_ADJ_FIELDS),
+            )
+            .await?;
+            force_step(
+                client,
+                cache,
+                &limiter,
+                &mut stats,
+                "hk_adjfactor",
+                &[("trade_date", date.as_str())],
+                Some(HK_ADJFACTOR_FIELDS),
+            )
+            .await?;
+        }
+    }
+
+    if sync_scope_includes_financial(scope) {
+        let mut codes = load_global_stock_codes(cache, "hk_basic").await?;
+        if let Some(max_codes) = max_codes {
+            codes.truncate(max_codes);
+        }
+        if codes.is_empty() {
+            anyhow::bail!("未能加载港股代码列表，无法生成财务任务");
+        }
+        for code in &codes {
+            for &api_name in &[
+                "hk_income",
+                "hk_balancesheet",
+                "hk_cashflow",
+                "hk_fina_indicator",
+            ] {
+                force_step(
+                    client,
+                    cache,
+                    &limiter,
+                    &mut stats,
+                    api_name,
+                    &[
+                        ("ts_code", code.as_str()),
+                        ("start_date", start_date),
+                        ("end_date", end_date),
+                    ],
+                    Some(GLOBAL_FINANCIAL_FIELDS),
+                )
+                .await?;
+            }
+        }
+    }
+
+    stats.elapsed_secs = started.elapsed().as_secs_f64();
+    info!(
+        calls = stats.total_calls,
+        rows = stats.total_rows,
+        skipped = stats.skipped,
+        errors = stats.errors,
+        elapsed = stats.elapsed_secs,
+        "港股同步完成"
+    );
+    Ok(stats)
+}
+
+async fn run_us_sync(
+    client: &TushareClient,
+    cache: &PgCache,
+    scope: &str,
+    start_date: &str,
+    end_date: &str,
+    delay_ms: u64,
+    max_codes: Option<usize>,
+) -> Result<SyncStats> {
+    let limiter = RateLimiter::new(delay_ms);
+    let started = Instant::now();
+    let mut stats = SyncStats::default();
+
+    if sync_scope_includes_meta(scope) {
+        force_step(
+            client,
+            cache,
+            &limiter,
+            &mut stats,
+            "us_basic",
+            &[],
+            Some(US_BASIC_FIELDS),
+        )
+        .await?;
+
+        force_step(
+            client,
+            cache,
+            &limiter,
+            &mut stats,
+            "us_tradecal",
+            &[
+                ("start_date", start_date),
+                ("end_date", end_date),
+                ("is_open", "1"),
+            ],
+            Some(GLOBAL_TRADE_CAL_FIELDS),
+        )
+        .await?;
+    }
+
+    if sync_scope_includes_market(scope) {
+        let trade_dates =
+            load_global_trade_dates(cache, "us_tradecal", start_date, end_date).await?;
+        if trade_dates.is_empty() {
+            anyhow::bail!("未能加载美股 {start_date}..{end_date} 交易日历，无法生成日频任务");
+        }
+        for date in &trade_dates {
+            force_step(
+                client,
+                cache,
+                &limiter,
+                &mut stats,
+                "us_daily",
+                &[("trade_date", date.as_str())],
+                Some(US_DAILY_FIELDS),
+            )
+            .await?;
+            force_step(
+                client,
+                cache,
+                &limiter,
+                &mut stats,
+                "us_daily_adj",
+                &[("trade_date", date.as_str())],
+                Some(US_DAILY_ADJ_FIELDS),
+            )
+            .await?;
+            force_step(
+                client,
+                cache,
+                &limiter,
+                &mut stats,
+                "us_adjfactor",
+                &[("trade_date", date.as_str())],
+                Some(US_ADJFACTOR_FIELDS),
+            )
+            .await?;
+        }
+    }
+
+    if sync_scope_includes_financial(scope) {
+        let mut codes = load_global_stock_codes(cache, "us_basic").await?;
+        if let Some(max_codes) = max_codes {
+            codes.truncate(max_codes);
+        }
+        if codes.is_empty() {
+            anyhow::bail!("未能加载美股代码列表，无法生成财务任务");
+        }
+        for code in &codes {
+            for &api_name in &[
+                "us_income",
+                "us_balancesheet",
+                "us_cashflow",
+                "us_fina_indicator",
+            ] {
+                force_step(
+                    client,
+                    cache,
+                    &limiter,
+                    &mut stats,
+                    api_name,
+                    &[
+                        ("ts_code", code.as_str()),
+                        ("start_date", start_date),
+                        ("end_date", end_date),
+                    ],
+                    Some(GLOBAL_FINANCIAL_FIELDS),
+                )
+                .await?;
+            }
+        }
+    }
+
+    stats.elapsed_secs = started.elapsed().as_secs_f64();
+    info!(
+        calls = stats.total_calls,
+        rows = stats.total_rows,
+        skipped = stats.skipped,
+        errors = stats.errors,
+        elapsed = stats.elapsed_secs,
+        "美股同步完成"
+    );
+    Ok(stats)
+}
+
+fn normalize_market(market: &str) -> Option<&'static str> {
+    match market.to_ascii_lowercase().as_str() {
+        "a" | "cn" | "ashare" | "a-share" => Some("a"),
+        "hk" | "h" | "hongkong" | "hong-kong" => Some("hk"),
+        "us" | "usa" | "u.s." => Some("us"),
+        _ => None,
+    }
+}
+
+fn validate_global_scope(scope: &str) -> Result<()> {
+    if matches!(
+        scope.to_ascii_lowercase().as_str(),
+        "all" | "meta" | "market" | "financial"
+    ) {
+        Ok(())
+    } else {
+        anyhow::bail!("未知 HK/US 同步范围: {scope}，可选: all | meta | market | financial")
+    }
+}
+
+fn sync_scope_includes_meta(scope: &str) -> bool {
+    matches!(
+        scope.to_ascii_lowercase().as_str(),
+        "all" | "meta" | "market" | "financial"
+    )
+}
+
+fn sync_scope_includes_market(scope: &str) -> bool {
+    matches!(scope.to_ascii_lowercase().as_str(), "all" | "market")
+}
+
+fn sync_scope_includes_financial(scope: &str) -> bool {
+    matches!(scope.to_ascii_lowercase().as_str(), "all" | "financial")
+}
+
+// =========================================================================
 // Helpers
 // =========================================================================
 
@@ -898,6 +1237,34 @@ async fn load_trade_dates(
     ]);
     let Some(df) = cache
         .load_typed("trade_cal", &params, Some("cal_date"))
+        .await?
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(unique_sorted_column(&df, "cal_date"))
+}
+
+async fn load_global_stock_codes(cache: &PgCache, api_name: &str) -> Result<Vec<String>> {
+    let params = HashMap::new();
+    let Some(df) = cache.load_typed(api_name, &params, Some("ts_code")).await? else {
+        return Ok(Vec::new());
+    };
+    Ok(unique_sorted_column(&df, "ts_code"))
+}
+
+async fn load_global_trade_dates(
+    cache: &PgCache,
+    api_name: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<String>> {
+    let params = HashMap::from([
+        ("start_date".to_string(), start_date.to_string()),
+        ("end_date".to_string(), end_date.to_string()),
+        ("is_open".to_string(), "1".to_string()),
+    ]);
+    let Some(df) = cache
+        .load_typed(api_name, &params, Some("cal_date"))
         .await?
     else {
         return Ok(Vec::new());

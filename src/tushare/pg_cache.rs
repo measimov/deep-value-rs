@@ -436,6 +436,16 @@ impl PgCache {
         match api_name {
             "trade_cal" => self.save_trade_cal(params, fields, items).await,
             "stock_basic" => self.save_stock_basic(params, fields, items).await,
+            "hk_basic" => self.save_hk_basic(fields, items).await,
+            "us_basic" => self.save_us_basic(fields, items).await,
+            "hk_tradecal" => {
+                self.save_global_trade_cal("tushare_hk_trade_cal", fields, items)
+                    .await
+            }
+            "us_tradecal" => {
+                self.save_global_trade_cal("tushare_us_trade_cal", fields, items)
+                    .await
+            }
             "daily_basic" => self.save_daily_basic(params, fields, items).await,
             "income" | "income_vip" => {
                 self.save_financial_rows(api_name, params, fields, items)
@@ -454,6 +464,72 @@ impl PgCache {
                 self.save_fina_audit(params, fields, items).await
             }
             "daily" => self.save_daily_ohlc(params, fields, items).await,
+            "hk_daily" => {
+                self.save_market_payload_rows(
+                    "tushare_hk_daily",
+                    api_name,
+                    params,
+                    fields,
+                    items,
+                    false,
+                )
+                .await
+            }
+            "hk_daily_adj" => {
+                self.save_market_payload_rows(
+                    "tushare_hk_daily_adj",
+                    api_name,
+                    params,
+                    fields,
+                    items,
+                    false,
+                )
+                .await
+            }
+            "hk_adjfactor" => {
+                self.save_market_payload_rows(
+                    "tushare_hk_adjfactor",
+                    api_name,
+                    params,
+                    fields,
+                    items,
+                    false,
+                )
+                .await
+            }
+            "us_daily" => {
+                self.save_market_payload_rows(
+                    "tushare_us_daily",
+                    api_name,
+                    params,
+                    fields,
+                    items,
+                    false,
+                )
+                .await
+            }
+            "us_daily_adj" => {
+                self.save_market_payload_rows(
+                    "tushare_us_daily_adj",
+                    api_name,
+                    params,
+                    fields,
+                    items,
+                    false,
+                )
+                .await
+            }
+            "us_adjfactor" => {
+                self.save_market_payload_rows(
+                    "tushare_us_adjfactor",
+                    api_name,
+                    params,
+                    fields,
+                    items,
+                    true,
+                )
+                .await
+            }
             "adj_factor" => {
                 self.save_market_series("tushare_adj_factor", "adj_factor", params, fields, items)
                     .await
@@ -468,6 +544,26 @@ impl PgCache {
                 self.save_financial_rows(api_name, params, fields, items)
                     .await?;
                 self.save_cashflow(params, fields, items).await
+            }
+            "hk_income" | "hk_balancesheet" | "hk_cashflow" | "hk_fina_indicator" => {
+                self.save_global_financial_rows(
+                    "tushare_hk_financial_rows",
+                    api_name,
+                    params,
+                    fields,
+                    items,
+                )
+                .await
+            }
+            "us_income" | "us_balancesheet" | "us_cashflow" | "us_fina_indicator" => {
+                self.save_global_financial_rows(
+                    "tushare_us_financial_rows",
+                    api_name,
+                    params,
+                    fields,
+                    items,
+                )
+                .await
             }
             "disclosure_date" => self.save_disclosure_date(params, fields, items).await,
             "suspend_d" => self.save_suspend_d(params, fields, items).await,
@@ -493,6 +589,16 @@ impl PgCache {
         match api_name {
             "trade_cal" => self.load_trade_cal(params, fields).await,
             "stock_basic" => self.load_stock_basic(params, fields).await,
+            "hk_basic" => self.load_hk_basic(params, fields).await,
+            "us_basic" => self.load_us_basic(params, fields).await,
+            "hk_tradecal" => {
+                self.load_global_trade_cal("tushare_hk_trade_cal", params, fields)
+                    .await
+            }
+            "us_tradecal" => {
+                self.load_global_trade_cal("tushare_us_trade_cal", params, fields)
+                    .await
+            }
             "daily_basic" => self.load_daily_basic(params, fields).await,
             "income" | "income_vip" => self.load_income(params, fields).await,
             "dividend" => self.load_dividend(params, fields).await,
@@ -633,6 +739,272 @@ impl PgCache {
         Ok(())
     }
 
+    async fn save_hk_basic(&self, fields: &[String], items: &[Vec<Value>]) -> Result<()> {
+        let Some(ts_code_idx) = field_index(fields, "ts_code") else {
+            return Ok(());
+        };
+        for row in items {
+            let Some(ts_code) = cell_string(row, ts_code_idx) else {
+                continue;
+            };
+            let payload = Value::Object(row_payload(fields, row));
+            sqlx::query(
+                r#"
+                insert into deep_value.tushare_hk_basic (
+                    ts_code, name, fullname, enname, cn_spell, market, list_status,
+                    list_date, delist_date, trade_unit, isin, curr_type, payload
+                )
+                values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                on conflict (ts_code) do update set
+                    name = coalesce(excluded.name, deep_value.tushare_hk_basic.name),
+                    fullname = coalesce(excluded.fullname, deep_value.tushare_hk_basic.fullname),
+                    enname = coalesce(excluded.enname, deep_value.tushare_hk_basic.enname),
+                    cn_spell = coalesce(excluded.cn_spell, deep_value.tushare_hk_basic.cn_spell),
+                    market = coalesce(excluded.market, deep_value.tushare_hk_basic.market),
+                    list_status = coalesce(excluded.list_status, deep_value.tushare_hk_basic.list_status),
+                    list_date = coalesce(excluded.list_date, deep_value.tushare_hk_basic.list_date),
+                    delist_date = coalesce(excluded.delist_date, deep_value.tushare_hk_basic.delist_date),
+                    trade_unit = coalesce(excluded.trade_unit, deep_value.tushare_hk_basic.trade_unit),
+                    isin = coalesce(excluded.isin, deep_value.tushare_hk_basic.isin),
+                    curr_type = coalesce(excluded.curr_type, deep_value.tushare_hk_basic.curr_type),
+                    payload = excluded.payload,
+                    updated_at = now()
+                "#,
+            )
+            .bind(ts_code)
+            .bind(field_str_opt(fields, row, "name"))
+            .bind(field_str_opt(fields, row, "fullname"))
+            .bind(field_str_opt(fields, row, "enname"))
+            .bind(field_str_opt(fields, row, "cn_spell"))
+            .bind(field_str_opt(fields, row, "market"))
+            .bind(field_str_opt(fields, row, "list_status"))
+            .bind(field_str_opt(fields, row, "list_date"))
+            .bind(field_str_opt(fields, row, "delist_date"))
+            .bind(field_f64_opt(fields, row, "trade_unit"))
+            .bind(field_str_opt(fields, row, "isin"))
+            .bind(field_str_opt(fields, row, "curr_type"))
+            .bind(payload)
+            .execute(&self.pool)
+            .await
+            .context("写入 tushare_hk_basic 失败")?;
+        }
+        Ok(())
+    }
+
+    async fn save_us_basic(&self, fields: &[String], items: &[Vec<Value>]) -> Result<()> {
+        for row in items {
+            let row_hash = stable_row_hash("us_basic", fields, row);
+            let payload = row_payload(fields, row);
+            let ts_code = json_field_string(&payload, "ts_code");
+            sqlx::query(
+                r#"
+                insert into deep_value.tushare_us_basic (
+                    row_hash, ts_code, name, enname, classify, list_date, delist_date, payload
+                )
+                values ($1,$2,$3,$4,$5,$6,$7,$8)
+                on conflict (row_hash) do update set
+                    ts_code = coalesce(excluded.ts_code, deep_value.tushare_us_basic.ts_code),
+                    name = coalesce(excluded.name, deep_value.tushare_us_basic.name),
+                    enname = coalesce(excluded.enname, deep_value.tushare_us_basic.enname),
+                    classify = coalesce(excluded.classify, deep_value.tushare_us_basic.classify),
+                    list_date = coalesce(excluded.list_date, deep_value.tushare_us_basic.list_date),
+                    delist_date = coalesce(excluded.delist_date, deep_value.tushare_us_basic.delist_date),
+                    payload = excluded.payload,
+                    updated_at = now()
+                "#,
+            )
+            .bind(row_hash)
+            .bind(ts_code)
+            .bind(json_field_string(&payload, "name"))
+            .bind(json_field_string(&payload, "enname"))
+            .bind(json_field_string(&payload, "classify"))
+            .bind(json_field_string(&payload, "list_date"))
+            .bind(json_field_string(&payload, "delist_date"))
+            .bind(Value::Object(payload))
+            .execute(&self.pool)
+            .await
+            .context("写入 tushare_us_basic 失败")?;
+        }
+        Ok(())
+    }
+
+    async fn save_global_trade_cal(
+        &self,
+        table: &str,
+        fields: &[String],
+        items: &[Vec<Value>],
+    ) -> Result<()> {
+        let Some(cal_date_idx) = field_index(fields, "cal_date") else {
+            return Ok(());
+        };
+        let sql = format!(
+            r#"
+            insert into deep_value.{table} (cal_date, is_open, pretrade_date, payload)
+            values ($1,$2,$3,$4)
+            on conflict (cal_date) do update set
+                is_open = coalesce(excluded.is_open, deep_value.{table}.is_open),
+                pretrade_date = coalesce(excluded.pretrade_date, deep_value.{table}.pretrade_date),
+                payload = excluded.payload,
+                updated_at = now()
+            "#
+        );
+        for row in items {
+            let Some(cal_date) = cell_string(row, cal_date_idx) else {
+                continue;
+            };
+            sqlx::query(&sql)
+                .bind(cal_date)
+                .bind(field_str_opt(fields, row, "is_open"))
+                .bind(field_str_opt(fields, row, "pretrade_date"))
+                .bind(Value::Object(row_payload(fields, row)))
+                .execute(&self.pool)
+                .await
+                .with_context(|| format!("写入 {table} 失败"))?;
+        }
+        Ok(())
+    }
+
+    async fn save_market_payload_rows(
+        &self,
+        table: &str,
+        api_name: &str,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
+        include_exchange: bool,
+    ) -> Result<()> {
+        let sql = if include_exchange {
+            format!(
+                r#"
+                insert into deep_value.{table} (row_hash, ts_code, trade_date, exchange, payload)
+                values ($1,$2,$3,$4,$5)
+                on conflict (row_hash) do update set
+                    ts_code = coalesce(excluded.ts_code, deep_value.{table}.ts_code),
+                    trade_date = coalesce(excluded.trade_date, deep_value.{table}.trade_date),
+                    exchange = coalesce(excluded.exchange, deep_value.{table}.exchange),
+                    payload = excluded.payload,
+                    updated_at = now()
+                "#
+            )
+        } else {
+            format!(
+                r#"
+                insert into deep_value.{table} (row_hash, ts_code, trade_date, payload)
+                values ($1,$2,$3,$4)
+                on conflict (row_hash) do update set
+                    ts_code = coalesce(excluded.ts_code, deep_value.{table}.ts_code),
+                    trade_date = coalesce(excluded.trade_date, deep_value.{table}.trade_date),
+                    payload = excluded.payload,
+                    updated_at = now()
+                "#
+            )
+        };
+
+        for row in items {
+            let payload = row_payload(fields, row);
+            let row_hash = stable_row_hash(api_name, fields, row);
+            let ts_code =
+                json_field_string(&payload, "ts_code").or_else(|| params.get("ts_code").cloned());
+            let trade_date = json_field_string(&payload, "trade_date")
+                .or_else(|| params.get("trade_date").cloned());
+            if include_exchange {
+                sqlx::query(&sql)
+                    .bind(row_hash)
+                    .bind(ts_code)
+                    .bind(trade_date)
+                    .bind(json_field_string(&payload, "exchange"))
+                    .bind(Value::Object(payload))
+                    .execute(&self.pool)
+                    .await
+                    .with_context(|| format!("写入 {table} 失败"))?;
+            } else {
+                sqlx::query(&sql)
+                    .bind(row_hash)
+                    .bind(ts_code)
+                    .bind(trade_date)
+                    .bind(Value::Object(payload))
+                    .execute(&self.pool)
+                    .await
+                    .with_context(|| format!("写入 {table} 失败"))?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn save_global_financial_rows(
+        &self,
+        table: &str,
+        api_name: &str,
+        params: &HashMap<String, String>,
+        fields: &[String],
+        items: &[Vec<Value>],
+    ) -> Result<()> {
+        let sql = format!(
+            r#"
+            insert into deep_value.{table} (
+                api_name, row_hash, ts_code, end_date, start_date, ann_date,
+                report_type, ind_type, ind_name, ind_value, payload
+            )
+            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            on conflict (api_name, row_hash) do update set
+                ts_code = coalesce(excluded.ts_code, deep_value.{table}.ts_code),
+                end_date = coalesce(excluded.end_date, deep_value.{table}.end_date),
+                start_date = coalesce(excluded.start_date, deep_value.{table}.start_date),
+                ann_date = coalesce(excluded.ann_date, deep_value.{table}.ann_date),
+                report_type = coalesce(excluded.report_type, deep_value.{table}.report_type),
+                ind_type = coalesce(excluded.ind_type, deep_value.{table}.ind_type),
+                ind_name = coalesce(excluded.ind_name, deep_value.{table}.ind_name),
+                ind_value = coalesce(excluded.ind_value, deep_value.{table}.ind_value),
+                payload = excluded.payload,
+                updated_at = now()
+            "#
+        );
+
+        for row in items {
+            let payload = row_payload(fields, row);
+            let row_hash = stable_row_hash(api_name, fields, row);
+            let ts_code =
+                json_field_string(&payload, "ts_code").or_else(|| params.get("ts_code").cloned());
+            let end_date = json_field_string(&payload, "end_date")
+                .or_else(|| params.get("period").cloned())
+                .or_else(|| params.get("end_date").cloned());
+            sqlx::query(&sql)
+                .bind(api_name)
+                .bind(row_hash)
+                .bind(ts_code)
+                .bind(end_date)
+                .bind(
+                    json_field_string(&payload, "start_date")
+                        .or_else(|| params.get("start_date").cloned()),
+                )
+                .bind(
+                    json_field_string(&payload, "ann_date")
+                        .or_else(|| params.get("ann_date").cloned()),
+                )
+                .bind(
+                    json_field_string(&payload, "report_type")
+                        .or_else(|| params.get("report_type").cloned()),
+                )
+                .bind(
+                    json_field_string(&payload, "ind_type")
+                        .or_else(|| params.get("ind_type").cloned()),
+                )
+                .bind(
+                    json_field_string(&payload, "ind_name")
+                        .or_else(|| params.get("ind_name").cloned()),
+                )
+                .bind(
+                    json_field_string(&payload, "ind_value")
+                        .and_then(|value| value.parse::<f64>().ok()),
+                )
+                .bind(Value::Object(payload))
+                .execute(&self.pool)
+                .await
+                .with_context(|| format!("写入 {table} 失败"))?;
+        }
+        Ok(())
+    }
+
     async fn save_daily_basic(
         &self,
         params: &HashMap<String, String>,
@@ -745,8 +1117,8 @@ impl PgCache {
                    is_hs, act_name, act_ent_type
             from deep_value.tushare_stock_basic
             where ($1::text is null or list_status = $1)
-              and ($2::text is null or list_date is null or list_date <= $2)
-              and ($2::text is null or delist_date is null or delist_date = '' or delist_date > $2)
+              and ($2::text is null or nullif(list_date, 'NaT') is null or nullif(list_date, 'NaT') <= $2)
+              and ($2::text is null or nullif(nullif(delist_date, ''), 'NaT') is null or nullif(nullif(delist_date, ''), 'NaT') > $2)
             order by ts_code
             "#,
         )
@@ -779,6 +1151,129 @@ impl PgCache {
                     "act_ent_type",
                 ],
             ),
+            &rows,
+        )
+    }
+
+    async fn load_hk_basic(
+        &self,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        let list_status = params.get("list_status").map(String::as_str);
+        let as_of_date = params.get("as_of_date").map(String::as_str);
+        let rows = sqlx::query(
+            r#"
+            select ts_code, name, fullname, enname, cn_spell, market, list_status,
+                   list_date, delist_date, trade_unit, isin, curr_type
+            from deep_value.tushare_hk_basic
+            where ($1::text is null or list_status = $1)
+              and ($2::text is null or nullif(list_date, 'NaT') is null or nullif(list_date, 'NaT') <= $2)
+              and ($2::text is null or nullif(nullif(delist_date, ''), 'NaT') is null or nullif(nullif(delist_date, ''), 'NaT') > $2)
+            order by ts_code
+            "#,
+        )
+        .bind(list_status)
+        .bind(as_of_date)
+        .fetch_all(&self.pool)
+        .await
+        .context("读取 tushare_hk_basic 失败")?;
+
+        rows_to_dataframe(
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "name",
+                    "fullname",
+                    "enname",
+                    "cn_spell",
+                    "market",
+                    "list_status",
+                    "list_date",
+                    "delist_date",
+                    "trade_unit",
+                    "isin",
+                    "curr_type",
+                ],
+            ),
+            &rows,
+        )
+    }
+
+    async fn load_us_basic(
+        &self,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        let classify = params.get("classify").map(String::as_str);
+        let as_of_date = params.get("as_of_date").map(String::as_str);
+        let rows = sqlx::query(
+            r#"
+            select ts_code, name, enname, classify, list_date, delist_date
+            from deep_value.tushare_us_basic
+            where ts_code is not null
+              and ($1::text is null or classify = $1)
+              and ($2::text is null or nullif(list_date, 'NaT') is null or nullif(list_date, 'NaT') <= $2)
+              and ($2::text is null or nullif(nullif(delist_date, ''), 'NaT') is null or nullif(nullif(delist_date, ''), 'NaT') > $2)
+            order by ts_code
+            "#,
+        )
+        .bind(classify)
+        .bind(as_of_date)
+        .fetch_all(&self.pool)
+        .await
+        .context("读取 tushare_us_basic 失败")?;
+
+        rows_to_dataframe(
+            &requested_fields(
+                fields,
+                &[
+                    "ts_code",
+                    "name",
+                    "enname",
+                    "classify",
+                    "list_date",
+                    "delist_date",
+                ],
+            ),
+            &rows,
+        )
+    }
+
+    async fn load_global_trade_cal(
+        &self,
+        table: &str,
+        params: &HashMap<String, String>,
+        fields: Option<&str>,
+    ) -> Result<Option<DataFrame>> {
+        let Some(start_date) = params.get("start_date") else {
+            return Ok(None);
+        };
+        let Some(end_date) = params.get("end_date") else {
+            return Ok(None);
+        };
+        let is_open = params.get("is_open").map(String::as_str);
+        let sql = format!(
+            r#"
+            select cal_date, is_open, pretrade_date
+            from deep_value.{table}
+            where cal_date >= $1
+              and cal_date <= $2
+              and ($3::text is null or is_open = $3)
+            order by cal_date
+            "#
+        );
+        let rows = sqlx::query(&sql)
+            .bind(start_date)
+            .bind(end_date)
+            .bind(is_open)
+            .fetch_all(&self.pool)
+            .await
+            .with_context(|| format!("读取 {table} 失败"))?;
+
+        rows_to_dataframe(
+            &requested_fields(fields, &["cal_date", "is_open", "pretrade_date"]),
             &rows,
         )
     }
@@ -2214,6 +2709,14 @@ fn typed_json_endpoint(
         )),
         _ => None,
     }
+}
+
+fn row_payload(fields: &[String], row: &[Value]) -> serde_json::Map<String, Value> {
+    let mut payload = serde_json::Map::new();
+    for (idx, field) in fields.iter().enumerate() {
+        payload.insert(field.clone(), row.get(idx).cloned().unwrap_or(Value::Null));
+    }
+    payload
 }
 
 fn field_index(fields: &[String], name: &str) -> Option<usize> {
