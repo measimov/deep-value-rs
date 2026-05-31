@@ -17,6 +17,34 @@ MANIFEST_VERSION = 1
 _BLOCKED_FILE_STATUSES = {"quarantined", "missing", "deleted", "deleted_pending", "superseded", "compacted"}
 
 
+def _connect_readonly_sqlite(path: Path) -> sqlite3.Connection:
+    uri = f"file:{path.resolve().as_posix()}?mode=ro&immutable=1"
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _catalog_summary_readonly(root: Path, catalog_path: Path) -> dict[str, Any]:
+    with _connect_readonly_sqlite(catalog_path) as conn:
+        version = conn.execute("select value from catalog_meta where key='catalog_schema_version'").fetchone()
+        latest = conn.execute("select snapshot_id from snapshots where status='current' order by created_at desc limit 1").fetchone()
+        latest_backfill = conn.execute("select run_id from ingestion_runs where run_type='backfill' order by started_at desc limit 1").fetchone()
+        return {
+            "catalog_path": str(catalog_path),
+            "schema_version": int(version[0]) if version else 0,
+            "endpoint_count": conn.execute("select count(*) from endpoints").fetchone()[0],
+            "run_count": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+            "backfill_run_count": conn.execute("select count(*) from ingestion_runs where run_type='backfill'").fetchone()[0],
+            "latest_backfill_run_id": latest_backfill[0] if latest_backfill else None,
+            "job_count": conn.execute("select count(*) from jobs").fetchone()[0],
+            "file_count": conn.execute("select count(*) from files").fetchone()[0],
+            "snapshot_count": conn.execute("select count(*) from snapshots").fetchone()[0],
+            "latest_snapshot": latest[0] if latest else None,
+            "validation_count": conn.execute("select count(*) from validation_runs").fetchone()[0],
+            "quarantine_count": conn.execute("select count(*) from quarantine_files").fetchone()[0],
+        }
+
+
 @dataclass(frozen=True)
 class BackupFileItem:
     file_id: str
@@ -170,6 +198,8 @@ class BackupInspectResult:
     total_size_bytes: int | None
     catalog_relative_path: str | None
     catalog_present: bool
+    catalog_checksum_status: str | None
+    possible_mutation: bool
     manifest_validation_status: str
     manifest_error_count: int
     manifest_warning_count: int
@@ -207,6 +237,8 @@ class RestoreCheckResult:
     file_count_failure_count: int
     manifest_validation_status: str
     unsupported_manifest_version: bool
+    catalog_checksum_status: str | None
+    possible_mutation: bool
     manifest_error_count: int
     manifest_warning_count: int
     failures: list[dict[str, Any]]
@@ -384,9 +416,11 @@ class BackupInspector:
         catalog_rel = str(catalog_entry.get("relative_path") or "_catalog/catalog.sqlite") if catalog_entry is not None else "_catalog/catalog.sqlite"
         catalog_path = root / catalog_rel
         catalog_counts = None
+        catalog_checksum_status = None
+        possible_mutation = False
         if catalog_path.exists():
             try:
-                catalog_counts = CatalogStore(root).inspect_summary()
+                catalog_counts = _catalog_summary_readonly(root, catalog_path)
             except Exception as exc:
                 validation = ManifestValidationResult(
                     validation.backup_id,
@@ -397,6 +431,10 @@ class BackupInspector:
                     validation.warnings + [{"reason": "catalog_inspect_failed", "details": str(exc)}],
                     validation.unsupported_manifest_version,
                 )
+            expected_catalog_hash = catalog_entry.get("sha256") if isinstance(catalog_entry, dict) else None
+            if isinstance(expected_catalog_hash, str) and expected_catalog_hash:
+                catalog_checksum_status = "matched" if sha256_file(catalog_path) == expected_catalog_hash else "mismatch"
+                possible_mutation = catalog_checksum_status == "mismatch"
         return BackupInspectResult(
             backup_id=validation.backup_id,
             status="succeeded" if validation.status == "succeeded" else "failed",
@@ -414,6 +452,8 @@ class BackupInspector:
             total_size_bytes=manifest.get("total_size_bytes") if isinstance(manifest.get("total_size_bytes"), int) else None,
             catalog_relative_path=catalog_rel,
             catalog_present=catalog_path.exists(),
+            catalog_checksum_status=catalog_checksum_status,
+            possible_mutation=possible_mutation,
             manifest_validation_status=validation.status,
             manifest_error_count=validation.error_count,
             manifest_warning_count=validation.warning_count,
@@ -657,6 +697,8 @@ class RestoreChecker:
                 file_count_failure_count=file_count_failures,
                 manifest_validation_status=validation.status,
                 unsupported_manifest_version=validation.unsupported_manifest_version,
+                catalog_checksum_status=None,
+                possible_mutation=False,
                 manifest_error_count=validation.error_count,
                 manifest_warning_count=validation.warning_count,
                 failures=validation.errors,
@@ -681,6 +723,9 @@ class RestoreChecker:
             self._check_file(root, item, failures, counts)
         endpoint_failures = sum(1 for failure in failures if str(failure.get("reason", "")).startswith("endpoint_config"))
         file_count_failures = sum(1 for failure in failures if failure.get("reason") == "file_count_mismatch")
+        catalog_checksum_failures = [failure for failure in failures if failure.get("reason") == "catalog_checksum_mismatch"]
+        catalog_checksum_status = "mismatch" if catalog_checksum_failures else ("matched" if catalog_status == "succeeded" else None)
+        possible_mutation = bool(catalog_checksum_failures)
         status = "succeeded" if not failures else "failed"
         return RestoreCheckResult(
             backup_id=manifest.get("backup_id"),
@@ -701,6 +746,8 @@ class RestoreChecker:
             file_count_failure_count=file_count_failures,
             manifest_validation_status=validation.status,
             unsupported_manifest_version=validation.unsupported_manifest_version,
+            catalog_checksum_status=catalog_checksum_status,
+            possible_mutation=possible_mutation,
             manifest_error_count=validation.error_count,
             manifest_warning_count=validation.warning_count,
             failures=failures,
@@ -718,10 +765,15 @@ class RestoreChecker:
             failures.append({"reason": "catalog_size_mismatch", "path": str(rel)})
             status = "failed"
         if entry.get("sha256") != sha256_file(path):
-            failures.append({"reason": "catalog_checksum_mismatch", "path": str(rel)})
+            failures.append({
+                "reason": "catalog_checksum_mismatch",
+                "path": str(rel),
+                "details": "catalog checksum mismatch: backup catalog may have been modified after backup creation",
+                "possible_mutation": True,
+            })
             status = "failed"
         try:
-            conn = sqlite3.connect(path)
+            conn = _connect_readonly_sqlite(path)
             conn.execute("select 1").fetchone()
             conn.close()
         except Exception as exc:

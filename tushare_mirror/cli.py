@@ -429,7 +429,7 @@ def cmd_restore_check(args) -> int:
             'restore_check_scope': 'validates backup artifact only',
             'restore_check_writes': 'none',
             'read_as_root': 'use --root <backup> with catalog-inspect/list-files/coverage',
-            'validate_note': 'validate on a backup root writes validation_runs into that backup catalog',
+            'validate_note': 'validate on a backup root writes validation_runs unless --no-record is used',
         })
         if result.failures:
             _print_table(result.failures, ['reason', 'file_id', 'path', 'expected', 'actual', 'details'])
@@ -541,14 +541,14 @@ def _print_validation_reports(reports: list[dict[str, Any]], overall_ok: bool, a
 
 def cmd_validate(args) -> int:
     root = Path(args.root)
-    catalog = _ensure_catalog(root)
+    catalog = _open_existing_catalog(root) if args.no_record else _ensure_catalog(root)
     validator = Validator(root, catalog)
     latest_all = args.latest_all or args.all_active or (args.snapshot in (None, 'latest') and not args.api)
     if latest_all:
-        ok, reports = validator.validate_latest_snapshots(args.api)
+        ok, reports = validator.validate_latest_snapshots(args.api, record=not args.no_record)
         _print_validation_reports(reports, ok, args.json)
         return 0 if ok else 1
-    report = validator.validate_snapshot_report(args.snapshot, args.api)
+    report = validator.validate_snapshot_report(args.snapshot, args.api, record=not args.no_record)
     ok = report['status'] == 'succeeded'
     _print_validation_reports([report], ok, args.json)
     return 0 if ok else 1
@@ -865,6 +865,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--all-active', action='store_true')
     p.add_argument('--latest-all', action='store_true')
     p.add_argument('--json', action='store_true')
+    p.add_argument('--no-record', action='store_true')
     p.set_defaults(func=cmd_validate)
 
     p = sub.add_parser('list-files')

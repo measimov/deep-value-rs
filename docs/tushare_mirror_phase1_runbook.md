@@ -865,10 +865,12 @@ python3 -m tushare_mirror --root /tmp/tushare-mirror-backup coverage \
 - `restore-check --backup <path>` validates the backup artifact against
   `manifest.json`. It does not write `validation_runs`, does not restore into a
   source root, and does not depend on the original source root.
-- `validate --snapshot latest` with `--root <backup>` validates the backup as a
-  normal root and writes new `validation_runs` into the backup catalog. This is
-  useful when you intentionally want to prove the backup root can be queried and
-  validated, but it changes the backup catalog file.
+- `validate --snapshot latest --no-record` with `--root <backup>` validates
+  the backup as a normal root without writing `validation_runs`. Use this when
+  you want the backup artifact to remain immutable.
+- `validate --snapshot latest` without `--no-record` writes new
+  `validation_runs` into the backup catalog. This changes the catalog file and
+  can make `restore-check` report a catalog checksum mismatch.
 
 The manifest `source_root` field is provenance only. `restore-check`,
 `list-files`, `LakeReader`, and `coverage` must resolve data files from the
@@ -976,5 +978,46 @@ python3 -m tushare_mirror --root /tmp/tushare-mirror-backup coverage \
   --calendar-exchange SSE
 ```
 
-Only `validate --root <backup>` intentionally writes new `validation_runs` into
-the backup catalog. `backup-inspect` and `restore-check` are read-only.
+Only `validate --root <backup>` without `--no-record` intentionally writes new
+`validation_runs` into the backup catalog. `backup-inspect`, `restore-check`,
+`coverage`, and `validate --no-record` are read-only.
+
+### Immutable backup artifact policy
+
+A backup directory should be treated as an immutable artifact. The manifest stores
+checksums for the copied catalog and active data files. Commands that write to the
+backup catalog change `_catalog/catalog.sqlite`, so the catalog checksum in
+`manifest.json` will no longer match.
+
+Read-only commands for a backup artifact:
+
+```bash
+python3 -m tushare_mirror restore-check --backup /tmp/tushare-mirror-backup-smoke
+python3 -m tushare_mirror backup-inspect --backup /tmp/tushare-mirror-backup-smoke
+python3 -m tushare_mirror --root /tmp/tushare-mirror-backup-smoke validate --snapshot latest --no-record
+python3 -m tushare_mirror --root /tmp/tushare-mirror-backup-smoke coverage \
+  --api daily_basic \
+  --start-date 20250101 \
+  --end-date 20250110 \
+  --trading-days-only \
+  --calendar-exchange SSE
+```
+
+These commands do not create `validation_runs`, do not create
+`validation_failures`, and do not update the backup manifest.
+
+Writable command to avoid on the original backup artifact:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-backup-smoke validate --snapshot latest
+```
+
+Plain `validate` records `validation_runs` by design. On a source root this is the
+normal behavior. On a backup artifact it mutates the copied catalog and
+`restore-check` will fail with a catalog checksum mismatch. The JSON output
+includes `catalog_checksum_status: "mismatch"` and `possible_mutation: true` to
+make this diagnosis explicit.
+
+Do not edit `manifest.json` to hide the mutation. If you want a writable working
+copy, copy the backup directory to a new location and use that copy as a normal
+root. Keep the original backup artifact untouched.

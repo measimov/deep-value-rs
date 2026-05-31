@@ -48,12 +48,14 @@ class Validator:
                     failures.append((file_id, "raw_unreadable", str(e)))
         return not failures, failures
 
-    def validate_snapshot_report(self, snapshot_id: str | None = None, api_name: str | None = None) -> dict[str, Any]:
+    def validate_snapshot_report(self, snapshot_id: str | None = None, api_name: str | None = None, record: bool = True) -> dict[str, Any]:
         snapshot = None
         if snapshot_id in (None, "latest"):
             snapshot = self.catalog.latest_snapshot(api_name)
             if not snapshot:
-                validation_id = self.catalog.record_validation(None, api_name, "failed", {"error": "snapshot_not_found", "files": 0, "failures": 1, "record_count": 0, "raw_event_count": 0}, [(None, "snapshot_not_found", api_name)])
+                validation_id = None
+                if record:
+                    validation_id = self.catalog.record_validation(None, api_name, "failed", {"error": "snapshot_not_found", "files": 0, "failures": 1, "record_count": 0, "raw_event_count": 0}, [(None, "snapshot_not_found", api_name)])
                 return {
                     "validation_id": validation_id,
                     "scope": "api_latest" if api_name else "snapshot",
@@ -79,7 +81,9 @@ class Validator:
             "record_count": record_count,
             "raw_event_count": raw_event_count,
         }
-        validation_id = self.catalog.record_validation(str(snapshot_id), resolved_api, status, summary, failures)
+        validation_id = None
+        if record:
+            validation_id = self.catalog.record_validation(str(snapshot_id), resolved_api, status, summary, failures)
         return {
             "validation_id": validation_id,
             "scope": summary["scope"],
@@ -92,14 +96,15 @@ class Validator:
             "raw_event_count": raw_event_count,
         }
 
-    def validate_snapshot(self, snapshot_id: str | None = None, api_name: str | None = None) -> tuple[bool, str]:
-        report = self.validate_snapshot_report(snapshot_id, api_name)
-        return report["status"] == "succeeded", str(report["validation_id"])
+    def validate_snapshot(self, snapshot_id: str | None = None, api_name: str | None = None, record: bool = True) -> tuple[bool, str | None]:
+        report = self.validate_snapshot_report(snapshot_id, api_name, record=record)
+        validation_id = report["validation_id"]
+        return report["status"] == "succeeded", str(validation_id) if validation_id is not None else None
 
-    def validate_latest_snapshots(self, api_name: str | None = None) -> tuple[bool, list[dict[str, Any]]]:
+    def validate_latest_snapshots(self, api_name: str | None = None, record: bool = True) -> tuple[bool, list[dict[str, Any]]]:
         snapshots = self.catalog.latest_snapshots(api_name)
         if not snapshots:
-            report = self.validate_snapshot_report("latest", api_name)
+            report = self.validate_snapshot_report("latest", api_name, record=record)
             return False, [report]
-        reports = [self.validate_snapshot_report(snap["snapshot_id"], snap.get("api_name")) for snap in snapshots]
+        reports = [self.validate_snapshot_report(snap["snapshot_id"], snap.get("api_name"), record=record) for snap in snapshots]
         return all(row["status"] == "succeeded" for row in reports), reports
