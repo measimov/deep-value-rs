@@ -1021,3 +1021,134 @@ make this diagnosis explicit.
 Do not edit `manifest.json` to hide the mutation. If you want a writable working
 copy, copy the backup directory to a new location and use that copy as a normal
 root. Keep the original backup artifact untouched.
+
+
+## Phase 3.0 Controlled Mirror Orchestrator
+
+`mirror-plan` and `mirror-run` provide a bounded orchestration layer for the first low-risk A-share local mirror. They do not scan all Tushare APIs, do not infer full history, and do not iterate over all stocks.
+
+Supported scope:
+
+```bash
+--scope low-risk-a-share
+```
+
+This scope is limited to:
+
+- Snapshot/reference: `stock_basic`, `trade_cal`, `hs_const`
+- Date-based low-risk: `daily`, `adj_factor`, `daily_basic`, `weekly`, `monthly`, `suspend_d`
+- Event/company snapshot fetches only: `namechange`, `stk_managers`, `stk_rewards`
+
+Explicitly out of scope: minute, tick, order-level, realtime, announcements/PDF, news, research reports, financial statements, PIT derived layers, PostgreSQL loaders, remote backup, and restore-into.
+
+### mirror-plan
+
+`mirror-plan` is read-only. It does not send Tushare requests, write raw/lake files, create snapshots, create validation runs, or create mirror runs.
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-local mirror-plan \
+  --scope low-risk-a-share \
+  --mode smoke \
+  --max-jobs-per-api 3
+```
+
+Use JSON for machine-readable planning:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-local mirror-plan \
+  --scope low-risk-a-share \
+  --mode smoke \
+  --max-jobs-per-api 3 \
+  --json
+```
+
+The plan shows endpoint category, whether `trade_cal` is required, planned jobs, missing jobs, blocked reason, and whether the endpoint would execute. If local `trade_cal` is missing, calendar-aware endpoints are blocked in the plan rather than silently switching to natural-day backfill.
+
+### mirror-run
+
+`mirror-run` defaults to dry-run behavior unless `--execute` is passed:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-local mirror-run \
+  --scope low-risk-a-share \
+  --mode smoke \
+  --max-jobs-per-api 3
+```
+
+A real run requires `--execute` and an explicit `--max-jobs-per-api`:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-local mirror-run \
+  --scope low-risk-a-share \
+  --mode smoke \
+  --max-jobs-per-api 3 \
+  --backup-target /tmp/tushare-mirror-local-backup \
+  --execute
+```
+
+Safety limits:
+
+- `smoke`: `--max-jobs-per-api <= 3`
+- `pilot`: `--max-jobs-per-api <= 20`
+- no `--force` override
+- no stock loop
+- no endpoint discovery loop
+- no hidden `trade_cal` request from the planner
+
+Execution order:
+
+1. Probe the fixed low-risk endpoint set once.
+2. Fetch `trade_cal` dependency.
+3. Fetch snapshot/reference endpoints.
+4. Run calendar-aware backfill for daily-like endpoints only after local `trade_cal` exists.
+5. Run explicit-date backfill for `weekly` and `monthly`.
+6. Fetch event/company endpoints once with fixed `000001.SZ` params.
+7. Validate all latest snapshots.
+8. If `--backup-target` is provided, run local `backup` and `restore-check`.
+9. Store a `run_type=mirror` summary that can be viewed with `show-run`.
+
+Permission failures are recorded per endpoint. A non-dependency endpoint with `permission_denied` is blocked without forcing the whole mirror run to fail. If `trade_cal` fails, calendar-aware endpoints are blocked and the run is marked as a dependency failure.
+
+### Smoke Mode
+
+Smoke mode is the smallest real-request mirror check:
+
+- `stock_basic`: one `list_status=L` fetch
+- `trade_cal`: one SSE `20250101` to `20250110` fetch
+- `hs_const`: one `hs_type=SH,is_new=1` fetch
+- `daily`, `adj_factor`, `daily_basic`, `suspend_d`: at most 3 trading-day jobs each
+- `weekly`: explicit dates `20250103,20250110`
+- `monthly`: explicit dates `20250127,20250228`
+- `namechange`, `stk_managers`, `stk_rewards`: one `ts_code=000001.SZ` fetch each
+
+### Pilot Mode
+
+Pilot mode is prepared but should only be executed after review. It is still not full mirror.
+
+Plan only:
+
+```bash
+MIRROR_ROOT=/path/to/local/tushare
+MIRROR_BACKUP=/path/to/local/tushare-backup
+
+python3 -m tushare_mirror --root "$MIRROR_ROOT" mirror-plan \
+  --scope low-risk-a-share \
+  --mode pilot \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --max-jobs-per-api 20 \
+  --json
+```
+
+Do not execute pilot until the plan is reviewed.
+
+### Observing Mirror Runs
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-local show-runs --limit 50
+python3 -m tushare_mirror --root /tmp/tushare-mirror-local show-run --run-id <mirror_run_id>
+python3 -m tushare_mirror --root /tmp/tushare-mirror-local validate --snapshot latest --no-record
+python3 -m tushare_mirror restore-check --backup /tmp/tushare-mirror-local-backup
+```
+
+`show-run` displays the mirror endpoint items, including endpoint status, planned jobs, executed jobs, skipped jobs, record counts, snapshot IDs, and blocked reasons.

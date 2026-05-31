@@ -25,6 +25,7 @@ from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
 from .hashing import token_hash
 from .missing_backfill import MissingBackfillPlanner
+from .mirror import MirrorOrchestrator, MirrorPlanner, init_catalog_if_requested
 from .planner import JobPlanner
 from .reader import LakeReader
 from .store import FileLakeStore
@@ -539,6 +540,81 @@ def _print_validation_reports(reports: list[dict[str, Any]], overall_ok: bool, a
         print('overall_status=' + ('succeeded' if overall_ok else 'failed'))
 
 
+def _print_mirror_plan(plan, as_json: bool) -> None:
+    if as_json:
+        _print_json(plan.to_dict())
+        return
+    _print_table(
+        [item.to_dict() for item in plan.items],
+        [
+            'endpoint',
+            'category',
+            'requires_trade_cal',
+            'plan_status',
+            'planned_jobs',
+            'max_jobs',
+            'existing_coverage',
+            'missing_jobs',
+            'blocked_reason',
+            'will_execute',
+            'permission_status',
+        ],
+    )
+    _print_key_values(plan.summary())
+
+
+def cmd_mirror_plan(args) -> int:
+    root = Path(args.root)
+    catalog = _open_existing_catalog(root)
+    try:
+        plan = MirrorPlanner(root, catalog).plan(
+            scope=args.scope,
+            mode=args.mode,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            max_jobs_per_api=args.max_jobs_per_api,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    _print_mirror_plan(plan, args.json)
+    return 0
+
+
+def cmd_mirror_run(args) -> int:
+    root = Path(args.root)
+    execute = bool(args.execute)
+    if not execute:
+        print('mirror-run without --execute is dry-run only')
+        return cmd_mirror_plan(args)
+    if args.max_jobs_per_api is None:
+        raise SystemExit('mirror-run --execute requires --max-jobs-per-api')
+    try:
+        catalog = init_catalog_if_requested(root, args.init_if_missing)
+    except FileNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
+    if catalog.db_path.exists():
+        load_into_catalog(root, catalog)
+    token = require_token()
+    result = MirrorOrchestrator(root, catalog, TushareClient(token)).run(
+        scope=args.scope,
+        mode=args.mode,
+        max_jobs_per_api=args.max_jobs_per_api,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        backup_target=args.backup_target,
+    )
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary)
+        if result.summary.get('items'):
+            _print_table(
+                result.summary['items'],
+                ['endpoint', 'category', 'status', 'planned_jobs', 'executed_jobs', 'skipped_jobs', 'record_count', 'snapshot_id', 'blocked_reason'],
+            )
+    return 0 if result.status == 'succeeded' else 1
+
+
 def cmd_validate(args) -> int:
     root = Path(args.root)
     catalog = _open_existing_catalog(root) if args.no_record else _ensure_catalog(root)
@@ -620,7 +696,7 @@ def cmd_show_runs(args) -> int:
 
 def _backfill_run_items(root: Path, catalog: CatalogStore, run: dict[str, Any]) -> list[dict[str, Any]]:
     summary = run.get('summary') or {}
-    if summary.get('items'):
+    if run.get('run_type') == 'backfill' and summary.get('items'):
         return list(summary['items'])
     if run.get('run_type') != 'backfill':
         return []
@@ -676,7 +752,10 @@ def cmd_show_run(args) -> int:
     if not run:
         raise SystemExit(f'run not found: {args.run_id}')
     summary = dict(run.get('summary') or {})
-    items = _backfill_run_items(root, catalog, run)
+    if run.get('run_type') == 'backfill':
+        items = _backfill_run_items(root, catalog, run)
+    else:
+        items = list(summary.get('items') or []) if isinstance(summary.get('items'), list) else []
     if items and not summary.get('items'):
         summary['items'] = items
         run = dict(run)
@@ -703,7 +782,10 @@ def cmd_show_run(args) -> int:
         'error_message': run.get('error_message'),
     })
     if items:
-        _print_table(items, ['date', 'job_key', 'existing_status', 'planned_action', 'result_status', 'snapshot_id', 'record_count', 'raw_event_count', 'error_type'])
+        if run.get('run_type') == 'mirror':
+            _print_table(items, ['endpoint', 'category', 'status', 'planned_jobs', 'executed_jobs', 'skipped_jobs', 'record_count', 'snapshot_id', 'blocked_reason'])
+        else:
+            _print_table(items, ['date', 'job_key', 'existing_status', 'planned_action', 'result_status', 'snapshot_id', 'record_count', 'raw_event_count', 'error_type'])
     else:
         _print_key_values({'summary': summary})
     return 0
@@ -858,6 +940,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--validate-latest', action='store_true')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_backfill_missing)
+
+    p = sub.add_parser('mirror-plan')
+    p.add_argument('--scope', default='low-risk-a-share')
+    p.add_argument('--mode', default='smoke')
+    p.add_argument('--start-date')
+    p.add_argument('--end-date')
+    p.add_argument('--max-jobs-per-api', type=int)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_plan)
+
+    p = sub.add_parser('mirror-run')
+    p.add_argument('--scope', default='low-risk-a-share')
+    p.add_argument('--mode', default='smoke')
+    p.add_argument('--start-date')
+    p.add_argument('--end-date')
+    p.add_argument('--max-jobs-per-api', type=int)
+    p.add_argument('--backup-target')
+    p.add_argument('--execute', action='store_true')
+    p.add_argument('--init-if-missing', action='store_true')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_run)
 
     p = sub.add_parser('validate')
     p.add_argument('--snapshot', default='latest')
