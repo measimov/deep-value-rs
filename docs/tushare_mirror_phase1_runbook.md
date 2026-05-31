@@ -632,3 +632,77 @@ rm -rf /tmp/tushare-mirror-real
 ```
 
 Real Tushare probe/fetch was not executed by the unit test suite.
+
+## Phase 2.6 Coverage and Gap Report
+
+`coverage` is a read-only report for date-based endpoint coverage. It answers
+which dates already have active data, which dates are missing, which dates had a
+failed job, and which dates are blocked by quarantine before you run a backfill.
+It does not send Tushare requests and does not create runs, jobs, files,
+snapshots, or validation records.
+
+Use it with explicit dates:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill coverage \
+  --api daily \
+  --dates 20250102,20250103,20250106
+```
+
+Or use a bounded date range:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill coverage \
+  --api daily \
+  --start-date 20250101 \
+  --end-date 20250110
+```
+
+Calendar-aware coverage uses the local `trade_cal` latest snapshot and never
+fetches the calendar implicitly:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill coverage \
+  --api daily_basic \
+  --start-date 20250101 \
+  --end-date 20250110 \
+  --trading-days-only \
+  --calendar-exchange SSE
+```
+
+If local `trade_cal` is missing, the command fails with the same safety error as
+`backfill-plan`: `trading-days-only requires local trade_cal latest snapshot;
+fetch trade_cal first`. In Phase 2.6, calendar filtering is only for daily-like
+endpoints: `daily`, `adj_factor`, `daily_basic`, and `suspend_d`. `weekly` and
+`monthly` can be inspected by explicit dates or natural date ranges, but they do
+not support `--trading-days-only`.
+
+Coverage and `backfill-plan` reuse the same planner, so for the same input their
+`existing_status` and `planned_action` should match. The difference is intent:
+`coverage` is an inventory and gap report; `backfill-plan` is a pre-execution
+plan. Typical statuses are:
+
+- `active_exists` / `skip_existing`: the date is already covered by the API's latest snapshot.
+- `missing` / `fetch`: no active data exists for that date.
+- `failed_exists` / `retry_failed`: a previous job failed and can be retried.
+- `quarantined_exists` / `blocked_quarantined`: the job is quarantined and should be reviewed manually.
+- `staged_exists` / `retry_failed`: staged leftovers exist and should be handled through retry or cleanup.
+
+Use `--json` when you want to compare coverage in scripts:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill coverage \
+  --api daily \
+  --start-date 20250101 \
+  --end-date 20250110 \
+  --trading-days-only \
+  --calendar-exchange SSE \
+  --json
+```
+
+The JSON summary includes `total_dates`, `covered_dates`, `missing_dates`,
+`failed_dates`, `quarantined_dates`, and `coverage_ratio`, plus one item per
+planned date with `job_key`, `snapshot_id`, `record_count`, `raw_event_count`,
+`file_count`, and the previous job status. Use this report to decide whether a
+small scoped backfill is needed; do not use it as an excuse to start a full
+mirror or broad historical loop.

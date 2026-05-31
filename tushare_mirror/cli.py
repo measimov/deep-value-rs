@@ -19,6 +19,7 @@ from .backfill import (
 )
 from .catalog import CatalogStore
 from .client import TushareClient, classify_probe_response
+from .coverage import CoverageReporter
 from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
 from .hashing import token_hash
@@ -107,6 +108,13 @@ def _ensure_catalog(root: Path) -> CatalogStore:
     catalog = CatalogStore(root)
     catalog.init()
     load_into_catalog(root, catalog)
+    return catalog
+
+
+def _open_existing_catalog(root: Path) -> CatalogStore:
+    catalog = CatalogStore(root)
+    if not catalog.db_path.exists():
+        raise SystemExit(f"catalog not found: {catalog.db_path}; run init-catalog first")
     return catalog
 
 
@@ -303,6 +311,63 @@ def cmd_backfill(args) -> int:
     nonfatal = {'permission_denied', 'empty_result'}
     fatal_failures = [row for row in result.results if row.status in {'failed', 'blocked'} and row.error_type not in nonfatal]
     return 1 if fatal_failures else 0
+
+
+def _print_coverage_report(report, as_json: bool) -> None:
+    if as_json:
+        _print_json(report.to_dict())
+        return
+    _print_table(
+        [item.to_dict() for item in report.items],
+        [
+            'date',
+            'existing_status',
+            'planned_action',
+            'job_key',
+            'snapshot_id',
+            'record_count',
+            'raw_event_count',
+            'file_count',
+            'last_job_status',
+            'last_error_type',
+            'notes',
+        ],
+    )
+    _print_key_values({
+        'api_name': report.api_name,
+        'requested_start_date': report.requested_start_date,
+        'requested_end_date': report.requested_end_date,
+        'calendar_source': report.calendar_source,
+        'calendar_exchange': report.calendar_exchange,
+        'natural_days': report.natural_days,
+        'trading_days': report.trading_days,
+        'filtered_non_trading_days': report.filtered_non_trading_days,
+        'filtered_non_trading_dates': report.filtered_non_trading_dates,
+        'total_dates': report.total_dates,
+        'covered_dates': report.covered_dates,
+        'missing_dates': report.missing_dates,
+        'failed_dates': report.failed_dates,
+        'quarantined_dates': report.quarantined_dates,
+        'coverage_ratio': report.coverage_ratio,
+    })
+
+
+def cmd_coverage(args) -> int:
+    root = Path(args.root)
+    catalog = _open_existing_catalog(root)
+    try:
+        report = CoverageReporter(root, catalog).report(
+            args.api,
+            dates=args.dates,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            trading_days_only=args.trading_days_only,
+            calendar_exchange=args.calendar_exchange,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    _print_coverage_report(report, args.json)
+    return 0
 
 
 def _print_validation_reports(reports: list[dict[str, Any]], overall_ok: bool, as_json: bool) -> None:
@@ -584,6 +649,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--validate-latest', action='store_true')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_backfill)
+
+    p = sub.add_parser('coverage')
+    p.add_argument('--api', required=True)
+    p.add_argument('--dates')
+    p.add_argument('--start-date')
+    p.add_argument('--end-date')
+    p.add_argument('--trading-days-only', action='store_true')
+    p.add_argument('--calendar-exchange', default='SSE')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_coverage)
 
     p = sub.add_parser('validate')
     p.add_argument('--snapshot', default='latest')
