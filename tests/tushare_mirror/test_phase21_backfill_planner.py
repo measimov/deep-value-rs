@@ -49,6 +49,25 @@ class EchoClient:
         return QueryResult(events=[event], fields=response_fields, items=response_items)
 
 
+class CalendarClient:
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = 0
+
+    def query_paginated(self, api_name, params, fields, page_size=None):
+        self.calls += 1
+        response_fields = ["exchange", "cal_date", "is_open", "pretrade_date"]
+        event = {
+            "code": 0,
+            "msg": None,
+            "data": {"fields": response_fields, "items": self.rows, "has_more": False},
+            "_http_status": 200,
+            "_page_index": 0,
+            "_request_params": dict(params),
+        }
+        return QueryResult(events=[event], fields=response_fields, items=self.rows)
+
+
 class FlakyRateLimitClient(EchoClient):
     def query_paginated(self, api_name, params, fields, page_size=None):
         self.calls += 1
@@ -79,14 +98,14 @@ class Phase21BackfillPlannerTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_cli(self, *args):
+    def run_cli(self, *args, check=True):
         return subprocess.run(
             [sys.executable, "-m", "tushare_mirror", "--root", str(self.root), *args],
             cwd=Path(__file__).resolve().parents[2],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            check=True,
+            check=check,
         )
 
     def test_date_planner_explicit_range_invalid_and_trading_days(self):
@@ -110,6 +129,116 @@ class Phase21BackfillPlannerTests(unittest.TestCase):
             ["20250102", "20250103"],
         )
 
+        with sqlite3.connect(self.catalog.db_path) as conn:
+            self.assertEqual(conn.execute("select count(*) from validation_runs").fetchone()[0], 0)
+
+    def test_calendar_aware_plan_metadata_exchange_filter_and_cli_output(self):
+        rows = [
+            ["SSE", "20250101", "0", "20241231"],
+            ["SSE", "20250102", "1", "20241231"],
+            ["SSE", "20250103", "1", "20250102"],
+            ["SSE", "20250104", "0", "20250103"],
+            ["SSE", "20250105", "0", "20250103"],
+            ["SSE", "20250106", "true", "20250103"],
+            ["SSE", "20250107", "1.0", "20250106"],
+            ["SSE", "20250108", "1", "20250107"],
+            ["SSE", "20250109", "1", "20250108"],
+            ["SSE", "20250110", "1", "20250109"],
+            ["SZSE", "20250104", "1", "20250103"],
+        ]
+        FileLakeStore(self.root, self.catalog).fetch(
+            "trade_cal",
+            {"exchange": "SSE", "start_date": "20250101", "end_date": "20250110"},
+            CalendarClient(rows),
+        )
+        before = self._catalog_counts()
+        dates, metadata = DatePlanner(self.root, self.catalog).plan_dates_with_metadata(
+            start_date="20250101",
+            end_date="20250110",
+            trading_days_only=True,
+            calendar_exchange="SSE",
+        )
+        self.assertEqual(dates, ["20250102", "20250103", "20250106", "20250107", "20250108", "20250109", "20250110"])
+        self.assertEqual(metadata["calendar_source"], "local trade_cal latest snapshot")
+        self.assertEqual(metadata["exchange"], "SSE")
+        self.assertEqual(metadata["natural_days"], 10)
+        self.assertEqual(metadata["trading_days"], 7)
+        self.assertEqual(metadata["filtered_non_trading_days"], 3)
+        self.assertEqual(metadata["filtered_non_trading_dates"], ["20250101", "20250104", "20250105"])
+        self.assertEqual(self._catalog_counts(), before)
+
+        planner = BackfillPlanner(self.root, self.catalog)
+        for api_name in ["daily", "adj_factor", "daily_basic", "suspend_d"]:
+            plan = planner.plan_date_backfill(api_name, dates, max_jobs=5, calendar_metadata=metadata)
+            self.assertTrue(plan.truncated_by_max_jobs)
+            self.assertEqual(plan.natural_days, 10)
+            self.assertEqual(plan.trading_days, 7)
+            self.assertEqual(len(plan.planned_jobs), 5)
+
+        table_output = self.run_cli(
+            "backfill-plan",
+            "--api",
+            "daily",
+            "--start-date",
+            "20250101",
+            "--end-date",
+            "20250110",
+            "--trading-days-only",
+            "--calendar-exchange",
+            "SSE",
+            "--max-jobs",
+            "5",
+        ).stdout
+        self.assertIn("calendar_source", table_output)
+        self.assertIn("filtered_non_trading_dates", table_output)
+        payload = json.loads(self.run_cli(
+            "backfill-plan",
+            "--api",
+            "daily",
+            "--start-date",
+            "20250101",
+            "--end-date",
+            "20250110",
+            "--trading-days-only",
+            "--calendar-exchange",
+            "SSE",
+            "--max-jobs",
+            "5",
+            "--json",
+        ).stdout)
+        self.assertEqual(payload["calendar_source"], "local trade_cal latest snapshot")
+        self.assertEqual(payload["exchange"], "SSE")
+        self.assertEqual(payload["requested_start_date"], "20250101")
+        self.assertEqual(payload["requested_end_date"], "20250110")
+        self.assertEqual(payload["natural_days"], 10)
+        self.assertEqual(payload["trading_days"], 7)
+        self.assertEqual(payload["filtered_non_trading_days"], 3)
+        self.assertTrue(payload["truncated_by_max_jobs"])
+        self.assertEqual(self._catalog_counts(), before)
+
+        weekly = self.run_cli(
+            "backfill-plan",
+            "--api",
+            "weekly",
+            "--start-date",
+            "20250101",
+            "--end-date",
+            "20250110",
+            "--trading-days-only",
+            "--max-jobs",
+            "5",
+            check=False,
+        )
+        self.assertNotEqual(weekly.returncode, 0)
+        self.assertIn("trading-days-only is only supported for daily-like endpoints", weekly.stderr)
+        with self.assertRaisesRegex(ValueError, "unsupported calendar exchange"):
+            DatePlanner(self.root, self.catalog).plan_dates(
+                start_date="20250101",
+                end_date="20250110",
+                trading_days_only=True,
+                calendar_exchange="SZSE",
+            )
+
     def test_backfill_planner_supported_endpoints_and_dry_run_side_effects(self):
         planner = BackfillPlanner(self.root, self.catalog)
         for api_name in sorted(SUPPORTED_DATE_BACKFILL_APIS):
@@ -127,6 +256,16 @@ class Phase21BackfillPlannerTests(unittest.TestCase):
         with sqlite3.connect(self.catalog.db_path) as conn:
             self.assertEqual(conn.execute("select count(*) from jobs").fetchone()[0], 0)
             self.assertEqual(conn.execute("select count(*) from snapshots").fetchone()[0], 0)
+
+    def _catalog_counts(self):
+        with sqlite3.connect(self.catalog.db_path) as conn:
+            return {
+                "runs": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+                "jobs": conn.execute("select count(*) from jobs").fetchone()[0],
+                "files": conn.execute("select count(*) from files").fetchone()[0],
+                "snapshots": conn.execute("select count(*) from snapshots").fetchone()[0],
+                "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
+            }
 
     def test_existing_statuses_active_failed_staged_and_quarantine(self):
         store = FileLakeStore(self.root, self.catalog)

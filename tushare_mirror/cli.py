@@ -13,6 +13,7 @@ from .backfill import (
     BackfillPlanner,
     DatePlanner,
     PHASE21_EXECUTE_MAX_JOBS,
+    TRADING_DAY_BACKFILL_APIS,
     execution_to_rows,
     plan_to_rows,
 )
@@ -218,14 +219,23 @@ def _make_backfill_plan(args, execute: bool):
     root = Path(args.root)
     catalog = _ensure_catalog(root)
     try:
-        dates = DatePlanner(root, catalog).plan_dates(
+        if args.trading_days_only and args.api not in TRADING_DAY_BACKFILL_APIS:
+            raise ValueError("trading-days-only is only supported for daily-like endpoints in Phase 2.4")
+        dates, calendar_metadata = DatePlanner(root, catalog).plan_dates_with_metadata(
             dates=args.dates,
             start_date=args.start_date,
             end_date=args.end_date,
             trading_days_only=args.trading_days_only,
+            calendar_exchange=args.calendar_exchange,
         )
         max_jobs = _backfill_max_jobs(args, execute)
-        plan = BackfillPlanner(root, catalog).plan_date_backfill(args.api, dates, max_jobs=max_jobs, dry_run=not execute)
+        plan = BackfillPlanner(root, catalog).plan_date_backfill(
+            args.api,
+            dates,
+            max_jobs=max_jobs,
+            dry_run=not execute,
+            calendar_metadata=calendar_metadata,
+        )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     return root, catalog, plan
@@ -236,7 +246,20 @@ def _print_backfill_plan(plan, as_json: bool) -> None:
         _print_json(plan.to_dict())
         return
     _print_table(plan_to_rows(plan), ['api_name', 'date', 'job_key', 'existing_status', 'planned_action', 'partition', 'raw_path', 'lake_path_prefix'])
-    _print_key_values({
+    summary = {}
+    if plan.calendar_source:
+        summary.update({
+            'calendar_source': plan.calendar_source,
+            'exchange': plan.exchange,
+            'requested_start_date': plan.requested_start_date,
+            'requested_end_date': plan.requested_end_date,
+            'natural_days': plan.natural_days,
+            'trading_days': plan.trading_days,
+            'filtered_non_trading_days': plan.filtered_non_trading_days,
+            'filtered_non_trading_dates': plan.filtered_non_trading_dates,
+            'truncated_by_max_jobs': plan.truncated_by_max_jobs,
+        })
+    summary.update({
         'total_candidate_jobs': plan.total_candidate_jobs,
         'planned_jobs': len(plan.planned_jobs),
         'skipped_jobs': plan.skipped_jobs,
@@ -245,6 +268,9 @@ def _print_backfill_plan(plan, as_json: bool) -> None:
         'dry_run': plan.dry_run,
         'warnings': plan.warnings,
     })
+    if not plan.calendar_source:
+        summary['truncated_by_max_jobs'] = plan.truncated_by_max_jobs
+    _print_key_values(summary)
 
 
 def cmd_backfill_plan(args) -> int:
@@ -540,6 +566,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--start-date')
     p.add_argument('--end-date')
     p.add_argument('--trading-days-only', action='store_true')
+    p.add_argument('--calendar-exchange', default='SSE')
     p.add_argument('--max-jobs', type=int)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_backfill_plan)
@@ -550,6 +577,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--start-date')
     p.add_argument('--end-date')
     p.add_argument('--trading-days-only', action='store_true')
+    p.add_argument('--calendar-exchange', default='SSE')
     p.add_argument('--max-jobs', type=int)
     p.add_argument('--execute', action='store_true')
     p.add_argument('--stop-on-error', action='store_true')

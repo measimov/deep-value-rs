@@ -23,6 +23,8 @@ SUPPORTED_DATE_BACKFILL_APIS = {
     "suspend_d": "trade_date",
 }
 
+TRADING_DAY_BACKFILL_APIS = {"daily", "adj_factor", "daily_basic", "suspend_d"}
+SUPPORTED_CALENDAR_EXCHANGES = {"SSE"}
 PHASE21_EXECUTE_MAX_JOBS = 20
 
 
@@ -57,6 +59,15 @@ class BackfillPlan:
     rejected_reason: str | None
     dry_run: bool
     warnings: list[str]
+    calendar_source: str | None = None
+    exchange: str | None = None
+    requested_start_date: str | None = None
+    requested_end_date: str | None = None
+    natural_days: int | None = None
+    trading_days: int | None = None
+    filtered_non_trading_days: int | None = None
+    filtered_non_trading_dates: list[str] | None = None
+    truncated_by_max_jobs: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -110,7 +121,26 @@ class DatePlanner:
         start_date: str | None = None,
         end_date: str | None = None,
         trading_days_only: bool = False,
+        calendar_exchange: str = "SSE",
     ) -> list[str]:
+        planned, _ = self.plan_dates_with_metadata(
+            dates=dates,
+            start_date=start_date,
+            end_date=end_date,
+            trading_days_only=trading_days_only,
+            calendar_exchange=calendar_exchange,
+        )
+        return planned
+
+    def plan_dates_with_metadata(
+        self,
+        *,
+        dates: str | list[str] | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        trading_days_only: bool = False,
+        calendar_exchange: str = "SSE",
+    ) -> tuple[list[str], dict[str, Any] | None]:
         if dates:
             if isinstance(dates, str):
                 values = [item.strip() for item in dates.split(",") if item.strip()]
@@ -130,24 +160,56 @@ class DatePlanner:
                 planned.append(current.strftime("%Y%m%d"))
                 current += timedelta(days=1)
         if trading_days_only:
-            return self._filter_trading_days(planned)
-        return planned
+            filtered = self._filter_trading_days(planned, calendar_exchange)
+            filtered_out = sorted(set(planned) - set(filtered))
+            metadata = {
+                "calendar_source": "local trade_cal latest snapshot",
+                "exchange": calendar_exchange.upper(),
+                "requested_start_date": planned[0] if planned else None,
+                "requested_end_date": planned[-1] if planned else None,
+                "natural_days": len(planned),
+                "trading_days": len(filtered),
+                "filtered_non_trading_days": len(filtered_out),
+                "filtered_non_trading_dates": filtered_out,
+            }
+            return filtered, metadata
+        return planned, None
 
-    def _filter_trading_days(self, dates: list[str]) -> list[str]:
+    def _filter_trading_days(self, dates: list[str], calendar_exchange: str = "SSE") -> list[str]:
+        exchange = calendar_exchange.upper()
+        if exchange not in SUPPORTED_CALENDAR_EXCHANGES:
+            supported = ", ".join(sorted(SUPPORTED_CALENDAR_EXCHANGES))
+            raise ValueError(f"unsupported calendar exchange: {calendar_exchange}; supported: {supported}")
         if not self.catalog.latest_snapshot("trade_cal"):
-            raise ValueError("trading-days-only requires a local trade_cal latest snapshot; fetch trade_cal first")
+            raise ValueError("trading-days-only requires local trade_cal latest snapshot; fetch trade_cal first")
         wanted = set(dates)
-        table = LakeReader(self.root, self.catalog).scan_api("trade_cal", columns=["cal_date", "is_open"])
+        table = LakeReader(self.root, self.catalog).scan_api("trade_cal", columns=["exchange", "cal_date", "is_open"])
         if table.num_rows == 0:
             return []
-        cal_dates = table["cal_date"].to_pylist() if "cal_date" in table.column_names else []
-        is_open = table["is_open"].to_pylist() if "is_open" in table.column_names else []
+        missing = [name for name in ["exchange", "cal_date", "is_open"] if name not in table.column_names]
+        if missing:
+            raise ValueError(f"trade_cal latest snapshot is missing required columns: {', '.join(missing)}")
+        exchanges = table["exchange"].to_pylist()
+        cal_dates = table["cal_date"].to_pylist()
+        is_open = table["is_open"].to_pylist()
         open_dates: list[str] = []
-        for cal_date, open_flag in zip(cal_dates, is_open):
-            value = str(cal_date)
-            if value in wanted and str(open_flag) in {"1", "1.0", "True", "true"}:
+        for source_exchange, cal_date, open_flag in zip(exchanges, cal_dates, is_open):
+            if str(source_exchange).upper() != exchange:
+                continue
+            try:
+                value = self._normalize_date(str(cal_date))
+            except ValueError:
+                continue
+            if value in wanted and self._is_open_flag(open_flag):
                 open_dates.append(value)
         return sorted(set(open_dates))
+
+    def _is_open_flag(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return float(value) == 1.0
+        return str(value).strip().lower() in {"1", "1.0", "true", "t", "yes", "y"}
 
     def _normalize_date(self, value: str) -> str:
         parsed = self._parse_date(value)
@@ -176,6 +238,7 @@ class BackfillPlanner:
         max_jobs: int,
         fields: list[str] | None = None,
         dry_run: bool = True,
+        calendar_metadata: dict[str, Any] | None = None,
     ) -> BackfillPlan:
         if api_name not in SUPPORTED_DATE_BACKFILL_APIS:
             supported = ", ".join(sorted(SUPPORTED_DATE_BACKFILL_APIS))
@@ -185,7 +248,8 @@ class BackfillPlanner:
         normalized_dates = sorted({DatePlanner(self.root, self.catalog)._normalize_date(date) for date in dates})
         date_field = SUPPORTED_DATE_BACKFILL_APIS[api_name]
         warnings: list[str] = []
-        if len(normalized_dates) > max_jobs:
+        truncated_by_max_jobs = len(normalized_dates) > max_jobs
+        if truncated_by_max_jobs:
             warnings.append(f"truncated candidate jobs from {len(normalized_dates)} to max_jobs={max_jobs}")
         planned_jobs: list[BackfillJobPlan] = []
         for date in normalized_dates[:max_jobs]:
@@ -219,6 +283,15 @@ class BackfillPlanner:
             rejected_reason=None,
             dry_run=dry_run,
             warnings=warnings,
+            calendar_source=(calendar_metadata or {}).get("calendar_source"),
+            exchange=(calendar_metadata or {}).get("exchange"),
+            requested_start_date=(calendar_metadata or {}).get("requested_start_date"),
+            requested_end_date=(calendar_metadata or {}).get("requested_end_date"),
+            natural_days=(calendar_metadata or {}).get("natural_days"),
+            trading_days=(calendar_metadata or {}).get("trading_days"),
+            filtered_non_trading_days=(calendar_metadata or {}).get("filtered_non_trading_days"),
+            filtered_non_trading_dates=(calendar_metadata or {}).get("filtered_non_trading_dates"),
+            truncated_by_max_jobs=truncated_by_max_jobs,
         )
 
     def _existing_status_and_action(self, api_name: str, job_key: str, active_exists: bool) -> tuple[str, str]:
@@ -343,7 +416,7 @@ class BackfillExecutor:
                     "error_type": row.error_type,
                 }
             )
-        return {
+        summary = {
             "api_name": plan.api_name,
             "date_field": plan.date_field,
             "requested_dates": plan.dates,
@@ -361,7 +434,23 @@ class BackfillExecutor:
             "items": items,
             "started_at": started_at,
             "finished_at": now_utc(),
+            "truncated_by_max_jobs": plan.truncated_by_max_jobs,
+            "warnings": plan.warnings,
         }
+        if plan.calendar_source:
+            summary.update(
+                {
+                    "calendar_source": plan.calendar_source,
+                    "exchange": plan.exchange,
+                    "requested_start_date": plan.requested_start_date,
+                    "requested_end_date": plan.requested_end_date,
+                    "natural_days": plan.natural_days,
+                    "trading_days": plan.trading_days,
+                    "filtered_non_trading_days": plan.filtered_non_trading_days,
+                    "filtered_non_trading_dates": plan.filtered_non_trading_dates,
+                }
+            )
+        return summary
 
 
 def plan_to_rows(plan: BackfillPlan) -> list[dict[str, Any]]:

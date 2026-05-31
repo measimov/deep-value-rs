@@ -126,12 +126,77 @@ def run_smoke(root: Path, endpoints: list[str], reset_root: bool) -> int:
     return 1 if failed else 0
 
 
+
+def run_calendar_backfill_smoke(root: Path, reset_root: bool) -> int:
+    load_dotenv()
+    if not os.environ.get("TUSHARE_TOKEN"):
+        print("TUSHARE_TOKEN is required; no real requests were sent.", file=sys.stderr)
+        return 2
+    if reset_root and root.exists():
+        shutil.rmtree(root)
+    run_cli(root, ["init-catalog"])
+    trade_cal_params = {"exchange": "SSE", "start_date": "20250101", "end_date": "20250110"}
+    run_cli(root, ["fetch", "--api", "trade_cal", "--params", json.dumps(trade_cal_params, separators=(",", ":")), "--json"])
+    trade_cal_validation = parse_json_stdout(run_cli(root, ["validate", "--api", "trade_cal", "--snapshot", "latest", "--json"]))
+    plan = parse_json_stdout(run_cli(root, [
+        "backfill-plan",
+        "--api",
+        "daily",
+        "--start-date",
+        "20250101",
+        "--end-date",
+        "20250110",
+        "--trading-days-only",
+        "--calendar-exchange",
+        "SSE",
+        "--max-jobs",
+        "3",
+        "--json",
+    ]))
+    result = parse_json_stdout(run_cli(root, [
+        "backfill",
+        "--api",
+        "daily",
+        "--start-date",
+        "20250101",
+        "--end-date",
+        "20250110",
+        "--trading-days-only",
+        "--calendar-exchange",
+        "SSE",
+        "--max-jobs",
+        "3",
+        "--execute",
+        "--validate-latest",
+        "--json",
+    ]))
+    inspect = parse_json_stdout(run_cli(root, ["catalog-inspect", "--json"]))
+    summary = {
+        "root": str(root),
+        "trade_cal_validation_status": (trade_cal_validation or {}).get("status"),
+        "calendar_source": (plan or {}).get("calendar_source"),
+        "exchange": (plan or {}).get("exchange"),
+        "natural_days": (plan or {}).get("natural_days"),
+        "trading_days": (plan or {}).get("trading_days"),
+        "filtered_non_trading_days": (plan or {}).get("filtered_non_trading_days"),
+        "planned_jobs": len((plan or {}).get("planned_jobs") or []),
+        "backfill_status": (result or {}).get("status"),
+        "executed_jobs": (result or {}).get("summary", {}).get("executed_jobs"),
+        "succeeded_jobs": (result or {}).get("summary", {}).get("succeeded_jobs"),
+        "daily_validation_status": ((result or {}).get("validation") or {}).get("status"),
+        "catalog_inspect": inspect,
+    }
+    print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2))
+    ok = (summary["trade_cal_validation_status"] == "succeeded" and summary["backfill_status"] == "succeeded" and summary["daily_validation_status"] == "succeeded")
+    return 0 if ok else 1
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Opt-in real Tushare smoke test. Sends real requests only when executed.")
     parser.add_argument("--root", default="/tmp/tushare-mirror-real-smoke")
     parser.add_argument("--endpoint", choices=sorted(ENDPOINTS), action="append")
     parser.add_argument("--all-phase-1", action="store_true", help="Run daily plus Phase 1.2 low-volume endpoints.")
     parser.add_argument("--phase-2-low-volume", action="store_true", help="Run Phase 2 low-risk endpoints only.")
+    parser.add_argument("--calendar-backfill", action="store_true", help="Run the Phase 2.4 calendar-aware daily backfill smoke.")
     parser.add_argument("--reset-root", action="store_true", help="Remove the root before running.")
     return parser
 
@@ -145,10 +210,12 @@ def main(argv: list[str] | None = None) -> int:
         endpoints.extend(PHASE2_LOW_VOLUME_ENDPOINTS)
     if args.endpoint:
         endpoints.extend(args.endpoint)
+    if args.calendar_backfill:
+        return run_calendar_backfill_smoke(Path(args.root), args.reset_root)
     seen: set[str] = set()
     endpoints = [api for api in endpoints if not (api in seen or seen.add(api))]
     if not endpoints:
-        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, or --endpoint.", file=sys.stderr)
+        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --calendar-backfill, or --endpoint.", file=sys.stderr)
         return 2
     return run_smoke(Path(args.root), endpoints, args.reset_root)
 

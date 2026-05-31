@@ -415,22 +415,67 @@ python3 -m tushare_mirror --root /tmp/tushare-backfill backfill \
   --validate-latest
 ```
 
+### Phase 2.4 Calendar-aware Scoped Backfill
+
 `--trading-days-only` reads local `trade_cal` lake data. It does not request
-Tushare. If no local `trade_cal` latest snapshot exists, the planner fails and
-asks you to fetch a small calendar range first:
+Tushare. If no local `trade_cal` latest snapshot exists, the planner fails with
+`trading-days-only requires local trade_cal latest snapshot; fetch trade_cal first`.
+Phase 2.4 supports `--calendar-exchange SSE` only. Unsupported exchanges fail
+without falling back to network access.
+
+Fetch a small calendar range first, then plan from local calendar data:
 
 ```bash
 python3 -m tushare_mirror --root /tmp/tushare-backfill fetch \
   --api trade_cal \
-  --params '{"exchange":"SSE","start_date":"20250101","end_date":"20250131"}'
+  --params '{"exchange":"SSE","start_date":"20250101","end_date":"20250110"}'
 
 python3 -m tushare_mirror --root /tmp/tushare-backfill backfill-plan \
   --api daily \
   --start-date 20250101 \
   --end-date 20250110 \
   --trading-days-only \
-  --max-jobs 10
+  --calendar-exchange SSE \
+  --max-jobs 3
 ```
+
+Calendar-aware plan output includes `calendar_source`, `exchange`,
+`requested_start_date`, `requested_end_date`, `natural_days`, `trading_days`,
+`filtered_non_trading_days`, `filtered_non_trading_dates`, and
+`truncated_by_max_jobs`. This makes max-job truncation and weekend/holiday
+filtering visible before execution. In Phase 2.4, trading-calendar filtering is
+for daily-like endpoints: `daily`, `adj_factor`, `daily_basic`, and
+`suspend_d`. `weekly` and `monthly` reject `--trading-days-only`; their dates
+represent week/month bar anchors rather than ordinary daily trading sessions.
+
+Execute a small daily calendar-aware smoke only after reviewing the plan:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill backfill \
+  --api daily \
+  --start-date 20250101 \
+  --end-date 20250110 \
+  --trading-days-only \
+  --calendar-exchange SSE \
+  --max-jobs 3 \
+  --execute \
+  --validate-latest
+```
+
+The opt-in real smoke script performs exactly that small sequence: fetch a
+local `trade_cal` window, validate it, plan daily with `--trading-days-only`,
+and execute at most 3 daily jobs. It is not run by tests or CI by default:
+
+```bash
+python3 scripts/tushare_real_smoke.py \
+  --calendar-backfill \
+  --root /tmp/tushare-mirror-calendar-backfill-smoke \
+  --reset-root
+```
+
+Do not use this as a full historical calendar or market backfill. It is a
+small scoped validation path, and it never implicitly fetches `trade_cal` from
+inside the planner.
 
 Use observability commands after an executed scoped backfill:
 
