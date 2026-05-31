@@ -37,3 +37,141 @@ endpoints:
         - ts_code
     pit_safety:
       requires_disclosure_date: false
+
+  - api_name: stock_basic
+    family: stock_reference
+    market: a
+    domain: stock
+    permission_class: regular
+    volume_class: S0_STATIC
+    partition_template: snapshot_date
+    primary_date_field: null
+    supported_params:
+      - exchange
+      - list_status
+      - is_hs
+    default_params:
+      list_status: L
+    default_fields:
+      - ts_code
+      - symbol
+      - name
+      - area
+      - industry
+      - market
+      - list_date
+    probe:
+      params:
+        list_status: L
+      fields:
+        - ts_code
+        - name
+        - list_date
+      allow_empty_probe: false
+    page_size: 5000
+    enabled: true
+
+  - api_name: trade_cal
+    family: market_calendar
+    market: a
+    domain: calendar
+    permission_class: regular
+    volume_class: S0_STATIC
+    partition_template: exchange_year
+    primary_date_field: cal_date
+    supported_params:
+      - exchange
+      - start_date
+      - end_date
+      - is_open
+    default_params:
+      exchange: SSE
+    default_fields:
+      - exchange
+      - cal_date
+      - is_open
+      - pretrade_date
+    probe:
+      params:
+        exchange: SSE
+        start_date: '20250101'
+        end_date: '20250110'
+      fields:
+        - exchange
+        - cal_date
+        - is_open
+      allow_empty_probe: false
+    page_size: 5000
+    enabled: true
+
+  - api_name: adj_factor
+    family: stock_daily_adjustment
+    market: a
+    domain: stock
+    permission_class: regular
+    volume_class: D1_DAILY_NARROW
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params:
+      - ts_code
+      - trade_date
+      - start_date
+      - end_date
+    default_fields:
+      - ts_code
+      - trade_date
+      - adj_factor
+    probe:
+      params:
+        trade_date: '20250102'
+      fields:
+        - ts_code
+        - trade_date
+        - adj_factor
+      allow_empty_probe: false
+    page_size: 5000
+    enabled: true
+
+  - api_name: daily_basic
+    family: stock_daily_basic
+    market: a
+    domain: stock
+    permission_class: regular
+    volume_class: D2_DAILY_WIDE
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params:
+      - ts_code
+      - trade_date
+      - start_date
+      - end_date
+    default_fields:
+      - ts_code
+      - trade_date
+      - close
+      - turnover_rate
+      - turnover_rate_f
+      - volume_ratio
+      - pe
+      - pe_ttm
+      - pb
+      - ps
+      - ps_ttm
+      - dv_ratio
+      - dv_ttm
+      - total_share
+      - float_share
+      - free_share
+      - total_mv
+      - circ_mv
+    probe:
+      params:
+        trade_date: '20250102'
+      fields:
+        - ts_code
+        - trade_date
+        - total_mv
+        - pe_ttm
+      allow_empty_probe: false
+    page_size: 5000
+    enabled: true

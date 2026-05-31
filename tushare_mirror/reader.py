@@ -30,7 +30,7 @@ class LakeReader:
 
     def scan_api(self, api_name: str, snapshot_id: str | None = None, filters: Mapping[str, Any] | None = None, columns: list[str] | None = None) -> pa.Table:
         files = self.list_active_files(api_name, snapshot_id)
-        tables = [pq.read_table(self.root / f["relative_path"]) for f in files]
+        tables = [self._read_parquet_file(self.root / f["relative_path"]) for f in files]
         table = self._union_tables(tables)
         table = self._apply_filters(table, filters or {})
         if columns is not None:
@@ -42,8 +42,11 @@ class LakeReader:
         for row in self.list_active_files(api_name, snapshot_id):
             values = loads(row.get("partition_values_json")) or {}
             if all(values.get(k) == v for k, v in partition_values.items()):
-                tables.append(pq.read_table(self.root / row["relative_path"]))
+                tables.append(self._read_parquet_file(self.root / row["relative_path"]))
         return self._union_tables(tables)
+
+    def _read_parquet_file(self, path: Path) -> pa.Table:
+        return pq.ParquetFile(path).read()
 
     def _union_tables(self, tables: list[pa.Table]) -> pa.Table:
         if not tables:

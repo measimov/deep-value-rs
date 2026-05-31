@@ -2,17 +2,15 @@
 
 Last reviewed: 2026-05-31
 
-Phase 1 is a minimal file-lake closed loop for one Tushare endpoint: `daily`.
-It is not a full Tushare mirror, does not backfill history, and does not support
-minute/tick/financial expansion.
+Phase 1 started as a minimal file-lake closed loop for `daily`. Phase 1.2 extends the same closed loop to a small set of low-volume stable endpoints. It is not a full Tushare mirror, does not backfill history, and does not support minute/tick/financial expansion.
 
 ## Scope
 
 Implemented:
 
 - SQLite catalog initialization.
-- Endpoint config loading for `daily`.
-- Permission probe for one endpoint.
+- Endpoint config loading for `daily`, `stock_basic`, `trade_cal`, `adj_factor`, and `daily_basic`.
+- Permission probe for enabled low-volume endpoints.
 - Staged write under `_tmp/run_id=<run_id>/`.
 - Raw `JSONL.zst` archive.
 - Lake Parquet writer with standard metadata columns.
@@ -176,6 +174,74 @@ table = LakeReader(root, catalog).scan_api(
 )
 print(table)
 ```
+
+## Phase 1.2 Low-volume Endpoint Smoke Tests
+
+Phase 1.2 supports only these endpoints:
+
+- `daily`
+- `stock_basic`
+- `trade_cal`
+- `adj_factor`
+- `daily_basic`
+
+The following commands send real Tushare requests. Run them only when you intend
+to spend quota on a single minimal request per endpoint. Do not loop dates, do
+not iterate stocks, and do not run a full mirror. A `permission_denied` result for
+any endpoint is a valid observable state; it means the endpoint is not currently
+accessible for the token and is not by itself a system failure.
+
+Initialize an isolated root:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 init-catalog
+```
+
+`stock_basic` minimal smoke:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 probe --api stock_basic
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 fetch --api stock_basic --params '{"list_status":"L"}'
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 validate --snapshot latest --api stock_basic
+```
+
+`trade_cal` minimal smoke:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 probe --api trade_cal
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 fetch --api trade_cal --params '{"exchange":"SSE","start_date":"20250101","end_date":"20250131"}'
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 validate --snapshot latest --api trade_cal
+```
+
+`adj_factor` minimal smoke:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 probe --api adj_factor
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 fetch --api adj_factor --params '{"trade_date":"20250102"}'
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 validate --snapshot latest --api adj_factor
+```
+
+`daily_basic` minimal smoke:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 probe --api daily_basic
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 fetch --api daily_basic --params '{"trade_date":"20250102"}'
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 validate --snapshot latest --api daily_basic
+```
+
+Use catalog observability after each minimal smoke or after the sequence:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 catalog-inspect
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 show-permissions
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 show-runs --limit 20
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 show-jobs --limit 20
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 show-snapshots --limit 20
+python3 -m tushare_mirror --root /tmp/tushare-mirror-real-12 show-validations --limit 20
+```
+
+For dry-run only, append `--dry-run` to `fetch`. Dry-run does not request
+Tushare and does not create raw, lake, job, file, checkpoint, or snapshot rows.
 
 ## Clean Test Root
 

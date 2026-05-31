@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -10,8 +11,9 @@ from typing import Any, Iterable
 from .catalog import CatalogStore
 from .client import TushareClient, classify_probe_response
 from .endpoints import load_into_catalog
-from .errors import ErrorType, classify_exception
+from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
 from .hashing import token_hash
+from .planner import JobPlanner
 from .reader import LakeReader
 from .store import FileLakeStore
 from .validation import Validator
@@ -99,6 +101,29 @@ def _ensure_catalog(root: Path) -> CatalogStore:
     return catalog
 
 
+def _probe_request_with_retry(client: TushareClient, api_name: str, params: dict[str, Any], fields: list[str], max_attempts: int = 3) -> tuple[dict[str, Any], str, str | None]:
+    attempt = 1
+    while True:
+        try:
+            response = client.request(api_name, params, fields)
+            status, error = classify_probe_response(response)
+        except Exception as e:
+            response = {'error': str(e)}
+            err = classify_exception(e)
+            status, error = err.value, str(e)
+        if status in {'accessible', 'empty_but_accessible'}:
+            return response, status, error
+        try:
+            retryable = should_retry(status, attempt, max_attempts)
+        except ValueError:
+            retryable = False
+        if retryable:
+            time.sleep(retry_delay_seconds(status, attempt))
+            attempt += 1
+            continue
+        return response, status, error
+
+
 def cmd_probe(args) -> int:
     root = Path(args.root)
     catalog = _ensure_catalog(root)
@@ -116,22 +141,17 @@ def cmd_probe(args) -> int:
     thash = token_hash(token)
     exit_code = 0
     outputs: list[dict[str, Any]] = []
+    planner = JobPlanner(root, catalog)
     for api_name in endpoints:
         cfg = catalog.get_endpoint_config(api_name)
-        probe = cfg.get('probe') or {}
-        params = probe.get('params') or {}
-        fields = probe.get('fields') or cfg.get('default_fields') or []
-        response: dict[str, Any]
-        try:
-            response = client.request(api_name, params, fields)
-            status, error = classify_probe_response(response)
-        except Exception as e:
-            response = {'error': str(e)}
-            err = classify_exception(e)
-            status, error = err.value, str(e)
+        probe_cfg = cfg.get('probe') or {}
+        probe_plan = planner.plan_probe(api_name)
+        params = probe_plan.params
+        fields = probe_plan.fields
+        response, status, error = _probe_request_with_retry(client, api_name, params, fields)
         row_count = len(((response.get('data') or {}).get('items')) or [])
         error_type = None if status in {'accessible', 'empty_but_accessible'} else status
-        if status == 'empty_but_accessible' and not probe.get('allow_empty_probe'):
+        if status == 'empty_but_accessible' and not probe_cfg.get('allow_empty_probe'):
             exit_code = 1
         if status not in {'accessible', 'empty_but_accessible'}:
             exit_code = 1

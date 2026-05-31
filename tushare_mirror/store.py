@@ -4,7 +4,6 @@ import json
 import shutil
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -14,8 +13,9 @@ import pyarrow.parquet as pq
 from .catalog import CatalogStore
 from .client import QueryResult
 from .errors import ErrorType, MirrorError, classify_exception, retry_delay_seconds, should_retry
-from .hashing import job_key as make_job_key, params_hash, row_hash, sha256_hex
+from .hashing import params_hash, row_hash, sha256_hex
 from .io_utils import atomic_move, ensure_dir, move_tree_to_quarantine, now_utc, sha256_file, write_jsonl_zst
+from .planner import JobPlanner
 from .schema import SchemaRegistry
 from .validation import Validator
 
@@ -45,56 +45,26 @@ class FileLakeStore:
         self.catalog = catalog or CatalogStore(self.root)
         self.retry_sleep = retry_sleep or time.sleep
 
-    def plan_fetch(self, api_name: str, params: Mapping[str, Any]) -> dict[str, Any]:
-        cfg = self.catalog.get_endpoint_config(api_name)
-        fields = list(cfg.get("default_fields") or [])
-        partition_spec_id = cfg["partition_spec_id"]
-        key = make_job_key(api_name, params, fields, partition_spec_id)
-        partition_values = self._partition_values(cfg, params)
-        permission = self.catalog.latest_permission(api_name)
-        permission_status = permission.get("status") if permission else "unknown"
-        permission_expired = True
-        if permission and permission.get("valid_until"):
-            permission_expired = self._is_expired(str(permission["valid_until"]))
-        existing_job = self.catalog.get_job(key)
-        active_lake_files = self.catalog.active_files_for_job(key, api_name, content_type="lake")
-        existing_active = bool(existing_job and existing_job.get("status") == "done" and active_lake_files)
-        planned_actions = ["no_op_existing_active_data"] if existing_active else ["request_tushare", "write_raw_jsonl_zst", "write_lake_parquet", "validate", "commit_snapshot"]
-        return {
-            "api_name": api_name,
-            "params_hash": params_hash(params),
-            "job_key": key,
-            "volume_class": cfg.get("volume_class"),
-            "partition_values": partition_values,
-            "raw_path": self._raw_relative_path(api_name, key),
-            "lake_path_prefix": str(Path(self._lake_relative_path(cfg, params, key)).parent),
-            "permission_status": permission_status,
-            "permission_expired": permission_expired,
-            "existing_active_data": existing_active,
-            "planned_actions": planned_actions,
-        }
+    def plan_fetch(self, api_name: str, params: Mapping[str, Any], fields: list[str] | None = None) -> dict[str, Any]:
+        return JobPlanner(self.root, self.catalog).plan_single_fetch(api_name, params, fields).to_dict()
 
-    def fetch(self, api_name: str, params: Mapping[str, Any], client, max_attempts: int = 3) -> FetchResult:
+    def fetch(self, api_name: str, params: Mapping[str, Any], client, max_attempts: int = 3, fields: list[str] | None = None) -> FetchResult:
         cfg = self.catalog.get_endpoint_config(api_name)
-        fields = list(cfg.get("default_fields") or [])
-        table_id = cfg["table_id"]
-        partition_spec_id = cfg["partition_spec_id"]
-        key = make_job_key(api_name, params, fields, partition_spec_id)
-        existing = self.catalog.get_job(key)
-        active_lake_files = self.catalog.active_files_for_job(key, api_name, content_type="lake")
-        if existing and existing.get("status") == "done" and active_lake_files:
+        plan = JobPlanner(self.root, self.catalog).plan_single_fetch(api_name, params, fields)
+        if plan.existing_active_data:
             snap = self.catalog.latest_snapshot(api_name)
-            return FetchResult("", key, snap["snapshot_id"] if snap else None, int(existing.get("record_count") or 0), skipped=True)
+            existing = self.catalog.get_job(plan.job_key)
+            return FetchResult("", plan.job_key, snap["snapshot_id"] if snap else None, int((existing or {}).get("record_count") or 0), skipped=True)
 
         run_id = self.catalog.create_run("fetch")
-        self.catalog.upsert_job(key, run_id, api_name, params, fields, "running")
+        self.catalog.upsert_job(plan.job_key, run_id, api_name, plan.params, plan.fields, "running")
         tmp_dir = self.root / "_tmp" / f"run_id={run_id}"
-        raw_tmp = tmp_dir / "raw" / f"{key}.jsonl.zst"
-        parquet_tmp = tmp_dir / "lake" / f"{key}.parquet"
+        raw_tmp = tmp_dir / "raw" / f"{plan.job_key}.jsonl.zst"
+        parquet_tmp = tmp_dir / "lake" / f"{plan.job_key}.parquet"
         try:
             page_size = cfg.get("page_size") or 5000
-            result = self._query_with_retry(client, api_name, params, fields, page_size, max_attempts)
-            raw_events = [self._raw_event(run_id, key, api_name, event, fields) for event in result.events]
+            result = self._query_with_retry(client, api_name, plan.params, plan.fields, page_size, max_attempts)
+            raw_events = [self._raw_event(run_id, plan.job_key, api_name, event, plan.fields) for event in result.events]
             try:
                 raw_event_count = write_jsonl_zst(raw_tmp, raw_events)
             except Exception as e:
@@ -114,30 +84,27 @@ class FileLakeStore:
                     approved=False,
                 )
                 raw_hash = sha256_file(raw_tmp)
-                self._quarantine(run_id, key, api_name, ErrorType.SCHEMA_INCOMPATIBLE.value, tmp_dir, raw_tmp, raw_hash)
-                self.catalog.update_job_failed(key, f"schema incompatible: {decision.details}", ErrorType.SCHEMA_INCOMPATIBLE.value)
-                self.catalog.finish_run(run_id, "failed", "schema incompatible", ErrorType.SCHEMA_INCOMPATIBLE.value, {"job_key": key})
-                return FetchResult(run_id, key, None, 0)
+                self._quarantine(run_id, plan.job_key, api_name, ErrorType.SCHEMA_INCOMPATIBLE.value, tmp_dir, raw_tmp, raw_hash)
+                self.catalog.update_job_failed(plan.job_key, f"schema incompatible: {decision.details}", ErrorType.SCHEMA_INCOMPATIBLE.value)
+                self.catalog.finish_run(run_id, "failed", "schema incompatible", ErrorType.SCHEMA_INCOMPATIBLE.value, {"job_key": plan.job_key})
+                return FetchResult(run_id, plan.job_key, None, 0)
 
             schema_registry.commit(api_name, decision)
-            rows = self._rows(api_name, params, key, run_id, decision.schema_id, result.fields, result.items)
+            rows = self._rows(api_name, plan.params, plan.job_key, run_id, decision.schema_id, result.fields, result.items)
             record_count = len(rows)
             try:
                 self._write_parquet(parquet_tmp, rows)
             except Exception as e:
                 raise MirrorError(ErrorType.WRITE_FAILED, f"lake parquet write failed: {e}") from e
 
-            partition_values = self._partition_values(cfg, params)
-            raw_rel = self._raw_relative_path(api_name, key)
-            lake_rel = self._lake_relative_path(cfg, params, key)
             raw_file_id = self.catalog.insert_file(
-                table_id=table_id,
+                table_id=plan.table_id,
                 api_name=api_name,
                 content_type="raw",
                 file_format="jsonl.zst",
-                relative_path=raw_rel,
+                relative_path=plan.raw_path,
                 staged_path=str(raw_tmp),
-                partition_values=partition_values,
+                partition_values=plan.partition_values,
                 record_count=None,
                 source_item_count=source_item_count,
                 raw_event_count=raw_event_count,
@@ -147,16 +114,16 @@ class FileLakeStore:
                 schema_id=None,
                 status="staged",
                 run_id=run_id,
-                job_key=key,
+                job_key=plan.job_key,
             )
             lake_file_id = self.catalog.insert_file(
-                table_id=table_id,
+                table_id=plan.table_id,
                 api_name=api_name,
                 content_type="lake",
                 file_format="parquet",
-                relative_path=lake_rel,
+                relative_path=plan.lake_path,
                 staged_path=str(parquet_tmp),
-                partition_values=partition_values,
+                partition_values=plan.partition_values,
                 record_count=record_count,
                 source_item_count=source_item_count,
                 raw_event_count=None,
@@ -166,19 +133,19 @@ class FileLakeStore:
                 schema_id=decision.schema_id,
                 status="staged",
                 run_id=run_id,
-                job_key=key,
+                job_key=plan.job_key,
             )
 
             validator = Validator(self.root, self.catalog)
             ok, failures = validator.validate_file_rows([self.catalog.get_file(raw_file_id), self.catalog.get_file(lake_file_id)], use_staged=True)
             if not ok:
-                self._quarantine(run_id, key, api_name, ErrorType.VALIDATION_FAILED.value, tmp_dir, raw_tmp, None)
-                self.catalog.update_job_failed(key, json.dumps(failures), ErrorType.VALIDATION_FAILED.value)
+                self._quarantine(run_id, plan.job_key, api_name, ErrorType.VALIDATION_FAILED.value, tmp_dir, raw_tmp, None)
+                self.catalog.update_job_failed(plan.job_key, json.dumps(failures), ErrorType.VALIDATION_FAILED.value)
                 self.catalog.finish_run(run_id, "failed", "validation failed", ErrorType.VALIDATION_FAILED.value, {"failures": failures})
-                return FetchResult(run_id, key, None, 0)
+                return FetchResult(run_id, plan.job_key, None, 0)
 
-            raw_final = self.root / raw_rel
-            lake_final = self.root / lake_rel
+            raw_final = self.root / plan.raw_path
+            lake_final = self.root / plan.lake_path
             try:
                 atomic_move(raw_tmp, raw_final)
                 atomic_move(parquet_tmp, lake_final)
@@ -189,26 +156,26 @@ class FileLakeStore:
             try:
                 snapshot_id = self.catalog.commit_snapshot(
                     api_name=api_name,
-                    table_id=table_id,
+                    table_id=plan.table_id,
                     file_ids=[raw_file_id, lake_file_id],
                     run_id=run_id,
-                    checkpoint_key=key,
-                    cursor=json.dumps(params, sort_keys=True),
+                    checkpoint_key=plan.job_key,
+                    cursor=json.dumps(plan.params, sort_keys=True),
                 )
             except Exception as e:
                 raise MirrorError(ErrorType.CATALOG_COMMIT_FAILED, f"catalog commit failed: {e}") from e
-            self.catalog.update_job_done(key, record_count, source_item_count, raw_event_count, error_event_count)
-            self.catalog.finish_run(run_id, "succeeded", summary={"job_key": key, "record_count": record_count, "raw_event_count": raw_event_count})
+            self.catalog.update_job_done(plan.job_key, record_count, source_item_count, raw_event_count, error_event_count)
+            self.catalog.finish_run(run_id, "succeeded", summary={"job_key": plan.job_key, "record_count": record_count, "raw_event_count": raw_event_count})
             shutil.rmtree(tmp_dir, ignore_errors=True)
-            return FetchResult(run_id, key, snapshot_id, record_count)
+            return FetchResult(run_id, plan.job_key, snapshot_id, record_count)
         except Exception as e:
             error_type = classify_exception(e)
-            self.catalog.update_job_failed(key, str(e), error_type.value)
-            self.catalog.finish_run(run_id, "failed", str(e), error_type.value, {"job_key": key})
-            qdir = self.root / "_quarantine" / f"run_id={run_id}" / f"api={api_name}" / f"job={key}" / f"reason={error_type.value}"
+            self.catalog.update_job_failed(plan.job_key, str(e), error_type.value)
+            self.catalog.finish_run(run_id, "failed", str(e), error_type.value, {"job_key": plan.job_key})
+            qdir = self.root / "_quarantine" / f"run_id={run_id}" / f"api={api_name}" / f"job={plan.job_key}" / f"reason={error_type.value}"
             move_tree_to_quarantine(tmp_dir, qdir)
             if qdir.exists():
-                self.catalog.record_quarantine(run_id, key, api_name, error_type.value, str(qdir.relative_to(self.root)), None, None)
+                self.catalog.record_quarantine(run_id, plan.job_key, api_name, error_type.value, str(qdir.relative_to(self.root)), None, None)
             raise
 
     def _query_with_retry(self, client, api_name: str, params: Mapping[str, Any], fields: list[str], page_size: int, max_attempts: int) -> QueryResult:
@@ -223,13 +190,6 @@ class FileLakeStore:
                     attempt += 1
                     continue
                 raise
-
-    def _is_expired(self, value: str) -> bool:
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return True
-        return parsed <= datetime.now(timezone.utc)
 
     def _raw_event(self, run_id: str, key: str, api_name: str, event: Mapping[str, Any], fields: list[str]) -> dict[str, Any]:
         data = event.get("data") or {}
@@ -277,29 +237,13 @@ class FileLakeStore:
         pq.write_table(table, path, compression="zstd", use_dictionary=True)
 
     def _partition_values(self, cfg: Mapping[str, Any], params: Mapping[str, Any]) -> dict[str, Any]:
-        date_field = (cfg.get("partition") or {}).get("date_field", "trade_date")
-        date_value = str(params.get(date_field, "unknown"))
-        year = date_value[:4] if len(date_value) >= 4 else "unknown"
-        month = date_value[4:6] if len(date_value) >= 6 else "unknown"
-        return {
-            "market": cfg.get("market"),
-            "domain": cfg.get("domain"),
-            "api_name": cfg.get("api_name"),
-            "year": year,
-            "month": month,
-            date_field: date_value,
-        }
+        return JobPlanner(self.root, self.catalog).partition_values(cfg, params)
 
     def _raw_relative_path(self, api_name: str, key: str) -> str:
-        date = now_utc()[:10].replace("-", "")
-        return f"raw/api={api_name}/ingest_date={date}/job={key}.jsonl.zst"
+        return JobPlanner(self.root, self.catalog).raw_relative_path(api_name, key)
 
     def _lake_relative_path(self, cfg: Mapping[str, Any], params: Mapping[str, Any], key: str) -> str:
-        parts = self._partition_values(cfg, params)
-        return (
-            f"lake/market={parts['market']}/domain={parts['domain']}/api={parts['api_name']}/"
-            f"year={parts['year']}/month={parts['month']}/part-{key[-12:]}.parquet"
-        )
+        return JobPlanner(self.root, self.catalog).lake_relative_path(cfg, params, key)
 
     def _quarantine(self, run_id: str, key: str, api_name: str, reason: str, tmp_dir: Path, raw_path: Path, raw_hash: str | None) -> None:
         qdir = self.root / "_quarantine" / f"run_id={run_id}" / f"api={api_name}" / f"job={key}" / f"reason={reason}"

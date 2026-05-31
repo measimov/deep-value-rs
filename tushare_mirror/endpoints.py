@@ -46,6 +46,16 @@ def load_endpoint_configs(root: Path) -> list[dict[str, Any]]:
 def enrich_endpoint_config(cfg: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
     namespace = cfg.get("namespace") or f"tushare.{cfg.get('family', 'unknown')}"
     cfg["namespace"] = namespace
+    if not cfg.get("partition"):
+        template = cfg.get("partition_template") or "year_month"
+        primary_date_field = cfg.get("primary_date_field")
+        partition: dict[str, Any] = {
+            "name": f"{cfg['api_name']}_{template}_v1",
+            "template": template,
+        }
+        if primary_date_field:
+            partition["date_field"] = primary_date_field
+        cfg["partition"] = partition
     tid = table_id(namespace, cfg["api_name"])
     part = cfg.get("partition", {})
     psid = partition_spec_id(part.get("name", f"{cfg['api_name']}_default"), part)
