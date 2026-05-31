@@ -48,6 +48,9 @@ SMOKE_EXPLICIT_DATE_APIS: dict[str, list[str]] = {
     "monthly": ["20250127", "20250228"],
 }
 
+PILOT_JAN_2025_WEEKLY_DATES = ["20250103", "20250110", "20250117", "20250124", "20250127"]
+PILOT_JAN_2025_MONTHLY_DATES = ["20250127"]
+
 PILOT_BACKFILL_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d", "weekly", "monthly"]
 MODE_MAX_JOBS = {"smoke": 3, "pilot": 20}
 
@@ -78,6 +81,9 @@ class MirrorPlanItem:
     params: dict[str, Any] | None = None
     dates: list[str] | None = None
     permission_status: str | None = None
+    planned_action: str | None = None
+    required_by: list[str] | None = None
+    notes: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -88,6 +94,9 @@ class MirrorPlan:
     scope: str
     mode: str
     root: str
+    start_date: str | None
+    end_date: str | None
+    max_jobs_per_api: int
     endpoint_count: int
     planned_endpoint_count: int
     blocked_endpoint_count: int
@@ -107,6 +116,9 @@ class MirrorPlan:
             "scope": self.scope,
             "mode": self.mode,
             "root": self.root,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "max_jobs_per_api": self.max_jobs_per_api,
             "endpoint_count": self.endpoint_count,
             "planned_endpoint_count": self.planned_endpoint_count,
             "blocked_endpoint_count": self.blocked_endpoint_count,
@@ -170,15 +182,18 @@ class MirrorPlanner:
             raise ValueError(f"{mode} mode max-jobs-per-api cannot exceed {MODE_MAX_JOBS[mode]}")
         items = self._smoke_items(max_jobs) if mode == "smoke" else self._pilot_items(start_date, end_date, max_jobs)
         planned_endpoint_count = sum(1 for item in items if item.plan_status in {"planned", "skip_existing"})
-        blocked_endpoint_count = sum(1 for item in items if item.plan_status == "blocked")
+        blocked_endpoint_count = sum(1 for item in items if item.plan_status.startswith("blocked"))
         return MirrorPlan(
             scope=scope,
             mode=mode,
             root=str(self.root),
+            start_date=start_date,
+            end_date=end_date,
+            max_jobs_per_api=max_jobs,
             endpoint_count=len(items),
             planned_endpoint_count=planned_endpoint_count,
             blocked_endpoint_count=blocked_endpoint_count,
-            total_planned_jobs=sum(item.planned_jobs for item in items if item.plan_status != "blocked"),
+            total_planned_jobs=sum(item.planned_jobs for item in items if item.plan_status not in {"blocked", "blocked_until_trade_cal", "excluded_from_pilot_execution"}),
             requires_real_requests=True,
             dry_run=True,
             items=items,
@@ -204,19 +219,24 @@ class MirrorPlanner:
     def _pilot_items(self, start_date: str | None, end_date: str | None, max_jobs: int) -> list[MirrorPlanItem]:
         if not start_date or not end_date:
             raise ValueError("pilot mode requires --start-date and --end-date")
-        items = [self._fetch_item("trade_cal", "calendar_source", {"exchange": "SSE", "start_date": start_date, "end_date": end_date}, max_jobs=1)]
+        items = [
+            self._fetch_item("stock_basic", "snapshot_reference", {"list_status": "L"}, max_jobs=1),
+            self._fetch_item("trade_cal", "calendar_dependency", {"exchange": "SSE", "start_date": start_date, "end_date": end_date}, max_jobs=1, planned_action="fetch_calendar", required_by=["daily", "adj_factor", "daily_basic", "suspend_d"]),
+            self._fetch_item("hs_const", "snapshot_reference", {"hs_type": "SH", "is_new": "1"}, max_jobs=1),
+        ]
         trade_cal_ready = bool(self.catalog.latest_snapshot("trade_cal"))
-        for endpoint in PILOT_BACKFILL_APIS:
-            if endpoint in {"weekly", "monthly"}:
-                dates, _ = DatePlanner(self.root, self.catalog).plan_dates_with_metadata(start_date=start_date, end_date=end_date)
-                items.append(self._date_backfill_item(endpoint, dates, max_jobs, requires_trade_cal=False))
-            elif not trade_cal_ready:
-                items.append(self._blocked_item(endpoint, "daily_like", True, max_jobs, "missing_trade_cal_snapshot"))
+        for endpoint in ["daily", "adj_factor", "daily_basic", "suspend_d"]:
+            if not trade_cal_ready:
+                items.append(self._blocked_item(endpoint, "daily_like", True, max_jobs, "missing_trade_cal_snapshot", plan_status="blocked_until_trade_cal", notes="calendar-aware backfill waits for local trade_cal latest snapshot"))
             else:
                 items.append(self._calendar_backfill_item(endpoint, start_date, end_date, max_jobs))
+        items.append(self._date_backfill_item("weekly", self._pilot_weekly_dates(start_date, end_date), max_jobs, requires_trade_cal=False, notes="weekly does not use trading-days-only in Phase 3.1"))
+        items.append(self._date_backfill_item("monthly", self._pilot_monthly_dates(start_date, end_date), max_jobs, requires_trade_cal=False, notes="monthly does not use trading-days-only in Phase 3.1"))
+        for endpoint in ["namechange", "stk_managers", "stk_rewards"]:
+            items.append(self._excluded_item(endpoint, "event_snapshot", max_jobs, "excluded_from_pilot_execution", "pilot does not run stock loops; smoke mode only fetches 000001.SZ once"))
         return items
 
-    def _fetch_item(self, endpoint: str, category: str, params: dict[str, Any], max_jobs: int) -> MirrorPlanItem:
+    def _fetch_item(self, endpoint: str, category: str, params: dict[str, Any], max_jobs: int, *, planned_action: str = "fetch", required_by: list[str] | None = None) -> MirrorPlanItem:
         plan = JobPlanner(self.root, self.catalog).plan_single_fetch(endpoint, params)
         status = "skip_existing" if plan.existing_active_data else "planned"
         return MirrorPlanItem(
@@ -232,6 +252,8 @@ class MirrorPlanner:
             will_execute=not plan.existing_active_data,
             params=plan.params,
             permission_status=plan.permission_status,
+            planned_action="skip_existing" if plan.existing_active_data else planned_action,
+            required_by=required_by,
         )
 
     def _calendar_backfill_item(self, endpoint: str, start_date: str, end_date: str, max_jobs: int) -> MirrorPlanItem:
@@ -258,9 +280,10 @@ class MirrorPlanner:
             will_execute=missing > 0,
             dates=[job.date for job in plan.planned_jobs],
             permission_status=(self.catalog.latest_permission(endpoint) or {}).get("status"),
+            planned_action="calendar_backfill",
         )
 
-    def _date_backfill_item(self, endpoint: str, dates: list[str], max_jobs: int, *, requires_trade_cal: bool) -> MirrorPlanItem:
+    def _date_backfill_item(self, endpoint: str, dates: list[str], max_jobs: int, *, requires_trade_cal: bool, notes: str | None = None) -> MirrorPlanItem:
         plan = BackfillPlanner(self.root, self.catalog).plan_date_backfill(endpoint, dates, max_jobs=max_jobs)
         missing = sum(1 for job in plan.planned_jobs if job.planned_action in {"fetch", "retry_failed"})
         skipped = sum(1 for job in plan.planned_jobs if job.planned_action == "skip_existing")
@@ -278,14 +301,16 @@ class MirrorPlanner:
             will_execute=missing > 0,
             dates=[job.date for job in plan.planned_jobs],
             permission_status=(self.catalog.latest_permission(endpoint) or {}).get("status"),
+            planned_action="date_backfill",
+            notes=notes,
         )
 
-    def _blocked_item(self, endpoint: str, category: str, requires_trade_cal: bool, max_jobs: int, reason: str) -> MirrorPlanItem:
+    def _blocked_item(self, endpoint: str, category: str, requires_trade_cal: bool, max_jobs: int, reason: str, *, plan_status: str = "blocked", notes: str | None = None) -> MirrorPlanItem:
         return MirrorPlanItem(
             endpoint=endpoint,
             category=category,
             requires_trade_cal=requires_trade_cal,
-            plan_status="blocked",
+            plan_status=plan_status,
             planned_jobs=0,
             max_jobs=max_jobs,
             existing_coverage=None,
@@ -293,7 +318,33 @@ class MirrorPlanner:
             blocked_reason=reason,
             will_execute=False,
             permission_status=(self.catalog.latest_permission(endpoint) or {}).get("status"),
+            planned_action="blocked",
+            notes=notes,
         )
+
+    def _excluded_item(self, endpoint: str, category: str, max_jobs: int, reason: str, notes: str) -> MirrorPlanItem:
+        return MirrorPlanItem(
+            endpoint=endpoint,
+            category=category,
+            requires_trade_cal=False,
+            plan_status="excluded_from_pilot_execution",
+            planned_jobs=0,
+            max_jobs=max_jobs,
+            existing_coverage=None,
+            missing_jobs=0,
+            blocked_reason=reason,
+            will_execute=False,
+            params={"ts_code": "000001.SZ"},
+            permission_status=(self.catalog.latest_permission(endpoint) or {}).get("status"),
+            planned_action="excluded",
+            notes=notes,
+        )
+
+    def _pilot_weekly_dates(self, start_date: str, end_date: str) -> list[str]:
+        return [date for date in PILOT_JAN_2025_WEEKLY_DATES if start_date <= date <= end_date]
+
+    def _pilot_monthly_dates(self, start_date: str, end_date: str) -> list[str]:
+        return [date for date in PILOT_JAN_2025_MONTHLY_DATES if start_date <= date <= end_date]
 
 
 class MirrorOrchestrator:
@@ -335,8 +386,9 @@ class MirrorOrchestrator:
         if mode == "smoke":
             date_groups = SMOKE_EXPLICIT_DATE_APIS.items()
         else:
-            dates = DatePlanner(self.root, self.catalog).plan_dates(start_date=start_date, end_date=end_date)
-            date_groups = [("weekly", dates), ("monthly", dates)]
+            if not start_date or not end_date:
+                raise ValueError("pilot mode requires --start-date and --end-date")
+            date_groups = [("weekly", self._pilot_weekly_dates(start_date, end_date)), ("monthly", self._pilot_monthly_dates(start_date, end_date))]
         for endpoint, dates in date_groups:
             items.append(self._execute_date_backfill(endpoint, list(dates), max_jobs_per_api, probe_statuses))
         if mode == "smoke":

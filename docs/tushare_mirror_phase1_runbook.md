@@ -1152,3 +1152,74 @@ python3 -m tushare_mirror restore-check --backup /tmp/tushare-mirror-local-backu
 ```
 
 `show-run` displays the mirror endpoint items, including endpoint status, planned jobs, executed jobs, skipped jobs, record counts, snapshot IDs, and blocked reasons.
+
+
+## Phase 3.1 Pilot Plan Readiness
+
+Phase 3.1 is a dry-run readiness review for one-month pilot planning. It must not execute `mirror-run --execute`, send Tushare requests, create raw/lake files, create snapshots, or create validation runs.
+
+Recommended readiness command:
+
+```bash
+PILOT_PLAN_ROOT=/tmp/tushare-mirror-pilot-plan
+
+python3 -m tushare_mirror --root "$PILOT_PLAN_ROOT" init-catalog
+
+python3 -m tushare_mirror --root "$PILOT_PLAN_ROOT" mirror-plan \
+  --scope low-risk-a-share \
+  --mode pilot \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --max-jobs-per-api 20 \
+  --json
+```
+
+Pilot plan output is expected to include:
+
+- top-level `scope`, `mode`, `start_date`, `end_date`, `max_jobs_per_api`, endpoint counts, planned job counts, and `dry_run=true`
+- per-endpoint `endpoint`, `category`, `requires_trade_cal`, `plan_status`, `planned_jobs`, `max_jobs`, `existing_coverage`, `missing_jobs`, `blocked_reason`, `will_execute`, `planned_action`, `required_by`, and `notes`
+
+Pilot plan semantics:
+
+- `trade_cal` is the calendar dependency. It is shown as `category=calendar_dependency`, `planned_action=fetch_calendar`, with `exchange=SSE` and the requested date range.
+- `daily`, `adj_factor`, `daily_basic`, and `suspend_d` are daily-like calendar-aware endpoints. In an empty root they show `plan_status=blocked_until_trade_cal` and do not fall back to natural-day planning.
+- `weekly` and `monthly` do not use `--trading-days-only` in Phase 3.1. They use explicit endpoint-specific date lists for the pilot month.
+- `stock_basic` and `hs_const` are snapshot/reference fetches with one planned job each.
+- `namechange`, `stk_managers`, and `stk_rewards` are marked `excluded_from_pilot_execution`; pilot mode does not run stock loops.
+
+To confirm no side effects after planning:
+
+```bash
+python3 -m tushare_mirror --root "$PILOT_PLAN_ROOT" catalog-inspect
+python3 -m tushare_mirror --root "$PILOT_PLAN_ROOT" show-runs --limit 20
+python3 -m tushare_mirror --root "$PILOT_PLAN_ROOT" show-jobs --limit 20
+python3 -m tushare_mirror --root "$PILOT_PLAN_ROOT" show-snapshots --latest
+```
+
+Expected empty-root counts after `mirror-plan`:
+
+- `run_count=0`
+- `job_count=0`
+- `file_count=0`
+- `snapshot_count=0`
+- `validation_count=0`
+
+If reviewing an existing smoke root, pilot plan can show `active_exists`, missing jobs, and satisfied dependencies based on the current local lake. It still remains dry-run and does not execute requests.
+
+Pilot execute is a separate user-confirmed step. Do not run it during readiness review. The command to review for a future execution is:
+
+```bash
+MIRROR_ROOT=/path/to/local/tushare
+MIRROR_BACKUP=/path/to/local/tushare-backup
+
+python3 -m tushare_mirror --root "$MIRROR_ROOT" mirror-run \
+  --scope low-risk-a-share \
+  --mode pilot \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --max-jobs-per-api 20 \
+  --backup-target "$MIRROR_BACKUP" \
+  --execute
+```
+
+This command is intentionally not executed as part of Phase 3.1.

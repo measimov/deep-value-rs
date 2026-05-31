@@ -124,6 +124,52 @@ class Phase30MirrorOrchestratorTests(unittest.TestCase):
         self.assertEqual(payload["endpoint_count"], 12)
         self.assertEqual(self.counts(), before)
 
+
+    def test_pilot_plan_readiness_is_read_only_and_explicit_about_dependencies(self):
+        before = self.counts()
+        plan = MirrorPlanner(self.root, self.catalog).plan(
+            scope="low-risk-a-share",
+            mode="pilot",
+            start_date="20250101",
+            end_date="20250131",
+            max_jobs_per_api=20,
+        )
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(plan.endpoint_count, 12)
+        self.assertEqual(plan.start_date, "20250101")
+        self.assertEqual(plan.end_date, "20250131")
+        self.assertEqual(plan.max_jobs_per_api, 20)
+        by_endpoint = {item.endpoint: item for item in plan.items}
+        self.assertEqual(by_endpoint["trade_cal"].category, "calendar_dependency")
+        self.assertEqual(by_endpoint["trade_cal"].planned_action, "fetch_calendar")
+        self.assertEqual(by_endpoint["trade_cal"].required_by, ["daily", "adj_factor", "daily_basic", "suspend_d"])
+        for endpoint in ["daily", "adj_factor", "daily_basic", "suspend_d"]:
+            self.assertTrue(by_endpoint[endpoint].requires_trade_cal)
+            self.assertEqual(by_endpoint[endpoint].plan_status, "blocked_until_trade_cal")
+            self.assertEqual(by_endpoint[endpoint].blocked_reason, "missing_trade_cal_snapshot")
+            self.assertEqual(by_endpoint[endpoint].planned_jobs, 0)
+        self.assertEqual(by_endpoint["weekly"].dates, ["20250103", "20250110", "20250117", "20250124", "20250127"])
+        self.assertIn("does not use trading-days-only", by_endpoint["weekly"].notes)
+        self.assertEqual(by_endpoint["monthly"].dates, ["20250127"])
+        for endpoint in ["namechange", "stk_managers", "stk_rewards"]:
+            self.assertEqual(by_endpoint[endpoint].plan_status, "excluded_from_pilot_execution")
+            self.assertFalse(by_endpoint[endpoint].will_execute)
+            self.assertIn("stock loops", by_endpoint[endpoint].notes)
+        payload = json.loads(self.run_cli(
+            "mirror-plan",
+            "--scope", "low-risk-a-share",
+            "--mode", "pilot",
+            "--start-date", "20250101",
+            "--end-date", "20250131",
+            "--max-jobs-per-api", "20",
+            "--json",
+        ).stdout)
+        self.assertEqual(payload["endpoint_count"], 12)
+        self.assertEqual(payload["start_date"], "20250101")
+        self.assertEqual(payload["end_date"], "20250131")
+        self.assertEqual(payload["max_jobs_per_api"], 20)
+        self.assertEqual(self.counts(), before)
+
     def test_mirror_run_without_execute_is_dry_run_only(self):
         before = self.counts()
         result = self.run_cli("mirror-run", "--scope", "low-risk-a-share", "--mode", "smoke", "--max-jobs-per-api", "3")

@@ -557,6 +557,9 @@ def _print_mirror_plan(plan, as_json: bool) -> None:
             'missing_jobs',
             'blocked_reason',
             'will_execute',
+            'planned_action',
+            'required_by',
+            'notes',
             'permission_status',
         ],
     )
