@@ -616,6 +616,11 @@ class CatalogStore:
     def _decorate_run_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
         d = dict(row)
         summary = loads(d.pop("summary_json", None)) or {}
+        if d.get("run_type") == "backfill" and summary:
+            summary.setdefault("executed_jobs", int(summary.get("succeeded_jobs") or 0) + int(summary.get("failed_jobs") or 0))
+            summary.setdefault("dry_run", False)
+            summary.setdefault("execute", True)
+            summary.setdefault("validate_latest", None)
         d["summary"] = summary
         for key in [
             "api_name",
@@ -656,6 +661,31 @@ class CatalogStore:
         with self.connect() as conn:
             row = conn.execute(sql, (run_id,)).fetchone()
         return self._decorate_run_row(dict(row)) if row else None
+
+    def jobs_for_run(self, run_id: str) -> list[dict[str, Any]]:
+        sql = """
+            select job_key,run_id,api_name,status,params_json,record_count,raw_event_count,last_error_type,last_error
+            from jobs where run_id=? order by updated_at, job_key
+        """
+        with self.connect() as conn:
+            rows = conn.execute(sql, (run_id,)).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["params"] = loads(item.pop("params_json")) or {}
+            result.append(item)
+        return result
+
+    def snapshot_id_for_job(self, job_key: str, api_name: str | None = None) -> str | None:
+        sql = "select added_by_snapshot_id from files where job_key=? and content_type='lake'"
+        args: list[Any] = [job_key]
+        if api_name:
+            sql += " and api_name=?"
+            args.append(api_name)
+        sql += " order by created_at desc limit 1"
+        with self.connect() as conn:
+            row = conn.execute(sql, args).fetchone()
+        return row[0] if row else None
 
     def list_jobs(self, api_name: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         args: list[Any] = []

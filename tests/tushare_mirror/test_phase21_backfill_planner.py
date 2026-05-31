@@ -244,6 +244,17 @@ class Phase21BackfillPlannerTests(unittest.TestCase):
         planner = BackfillPlanner(self.root, self.catalog)
         first = BackfillExecutor(self.root, self.catalog).execute(planner.plan_date_backfill("daily", dates, max_jobs=2, dry_run=False), EchoClient())
         rerun = BackfillExecutor(self.root, self.catalog).execute(planner.plan_date_backfill("daily", dates, max_jobs=2, dry_run=False), EchoClient())
+        # Simulate pre-Phase-2.2 runs created before items/executed_jobs were added to summary_json.
+        with sqlite3.connect(self.catalog.db_path) as conn:
+            for run_id in [first.run_id, rerun.run_id]:
+                summary = json.loads(conn.execute("select summary_json from ingestion_runs where run_id=?", (run_id,)).fetchone()[0])
+                summary.pop("items", None)
+                summary.pop("executed_jobs", None)
+                summary.pop("dry_run", None)
+                summary.pop("execute", None)
+                summary.pop("validate_latest", None)
+                conn.execute("update ingestion_runs set summary_json=? where run_id=?", (json.dumps(summary, sort_keys=True, separators=(",", ":")), run_id))
+            conn.commit()
 
         runs = json.loads(self.run_cli("show-runs", "--json").stdout)
         skip_run = next(row for row in runs if row["run_id"] == rerun.run_id)

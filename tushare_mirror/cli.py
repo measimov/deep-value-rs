@@ -366,15 +366,72 @@ def cmd_show_runs(args) -> int:
     return 0
 
 
+def _backfill_run_items(root: Path, catalog: CatalogStore, run: dict[str, Any]) -> list[dict[str, Any]]:
+    summary = run.get('summary') or {}
+    if summary.get('items'):
+        return list(summary['items'])
+    if run.get('run_type') != 'backfill':
+        return []
+    api_name = summary.get('api_name')
+    requested_dates = list(summary.get('requested_dates') or [])
+    jobs = catalog.jobs_for_run(str(run.get('run_id')))
+    if jobs:
+        items = []
+        for job in jobs:
+            params = job.get('params') or {}
+            date = params.get('trade_date') or params.get('date') or ''
+            status = 'succeeded' if job.get('status') == 'done' else job.get('status')
+            items.append({
+                'date': date,
+                'job_key': job.get('job_key'),
+                'existing_status': 'missing',
+                'planned_action': 'fetch',
+                'result_status': status,
+                'snapshot_id': catalog.snapshot_id_for_job(str(job.get('job_key')), api_name),
+                'record_count': job.get('record_count'),
+                'raw_event_count': job.get('raw_event_count'),
+                'error_type': job.get('last_error_type'),
+            })
+        return items
+    if api_name and requested_dates:
+        try:
+            plan = BackfillPlanner(root, catalog).plan_date_backfill(api_name, requested_dates, max_jobs=len(requested_dates), dry_run=False)
+        except ValueError:
+            return []
+        items = []
+        snapshot = catalog.latest_snapshot(api_name)
+        for job in plan.planned_jobs:
+            existing = catalog.get_job(job.job_key) or {}
+            items.append({
+                'date': job.date,
+                'job_key': job.job_key,
+                'existing_status': job.existing_status,
+                'planned_action': job.planned_action,
+                'result_status': 'skipped' if job.planned_action == 'skip_existing' else job.planned_action,
+                'snapshot_id': snapshot.get('snapshot_id') if snapshot else None,
+                'record_count': existing.get('record_count'),
+                'raw_event_count': existing.get('raw_event_count'),
+                'error_type': existing.get('last_error_type'),
+            })
+        return items
+    return []
+
+
 def cmd_show_run(args) -> int:
-    catalog = _ensure_catalog(Path(args.root))
+    root = Path(args.root)
+    catalog = _ensure_catalog(root)
     run = catalog.get_run(args.run_id)
     if not run:
         raise SystemExit(f'run not found: {args.run_id}')
+    summary = dict(run.get('summary') or {})
+    items = _backfill_run_items(root, catalog, run)
+    if items and not summary.get('items'):
+        summary['items'] = items
+        run = dict(run)
+        run['summary'] = summary
     if args.json:
         _print_json(run)
         return 0
-    summary = run.get('summary') or {}
     _print_key_values({
         'run_id': run.get('run_id'),
         'run_type': run.get('run_type'),
@@ -393,7 +450,6 @@ def cmd_show_run(args) -> int:
         'last_error_type': run.get('last_error_type'),
         'error_message': run.get('error_message'),
     })
-    items = summary.get('items') or []
     if items:
         _print_table(items, ['date', 'job_key', 'existing_status', 'planned_action', 'result_status', 'snapshot_id', 'record_count', 'raw_event_count', 'error_type'])
     else:
