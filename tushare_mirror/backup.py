@@ -122,6 +122,72 @@ class BackupResult:
 
 
 @dataclass(frozen=True)
+class ManifestValidationResult:
+    backup_id: str | None
+    status: str
+    manifest_version: int | None
+    manifest: dict[str, Any] | None
+    errors: list[dict[str, Any]]
+    warnings: list[dict[str, Any]]
+    unsupported_manifest_version: bool = False
+
+    @property
+    def error_count(self) -> int:
+        return len(self.errors)
+
+    @property
+    def warning_count(self) -> int:
+        return len(self.warnings)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "backup_id": self.backup_id,
+            "status": self.status,
+            "manifest_version": self.manifest_version,
+            "unsupported_manifest_version": self.unsupported_manifest_version,
+            "error_count": self.error_count,
+            "warning_count": self.warning_count,
+            "errors": self.errors,
+            "warnings": self.warnings,
+        }
+
+
+@dataclass(frozen=True)
+class BackupInspectResult:
+    backup_id: str | None
+    status: str
+    manifest_version: int | None
+    created_at: str | None
+    snapshot_scope: str | None
+    catalog_schema_version: int | None
+    api_names: list[str]
+    snapshot_count: int
+    file_count: int
+    raw_file_count: int
+    lake_file_count: int
+    object_file_count: int
+    endpoint_config_count: int
+    total_size_bytes: int | None
+    catalog_relative_path: str | None
+    catalog_present: bool
+    manifest_validation_status: str
+    manifest_error_count: int
+    manifest_warning_count: int
+    warnings: list[dict[str, Any]]
+    errors: list[dict[str, Any]]
+    catalog_counts: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        data = self.to_dict()
+        data.pop("errors", None)
+        data.pop("catalog_counts", None)
+        return data
+
+
+@dataclass(frozen=True)
 class RestoreCheckResult:
     backup_id: str | None
     status: str
@@ -139,6 +205,10 @@ class RestoreCheckResult:
     raw_failure_count: int
     endpoint_config_failure_count: int
     file_count_failure_count: int
+    manifest_validation_status: str
+    unsupported_manifest_version: bool
+    manifest_error_count: int
+    manifest_warning_count: int
     failures: list[dict[str, Any]]
 
     def to_dict(self) -> dict[str, Any]:
@@ -148,6 +218,209 @@ class RestoreCheckResult:
         data = self.to_dict()
         data.pop("failures", None)
         return data
+
+
+class BackupManifestValidator:
+    TOP_LEVEL_REQUIRED = {
+        "manifest_version",
+        "backup_id",
+        "created_at",
+        "catalog_schema_version",
+        "snapshot_scope",
+        "api_names",
+        "snapshot_ids",
+        "file_count",
+        "total_size_bytes",
+        "catalog",
+        "endpoint_configs",
+        "files",
+    }
+    TOP_LEVEL_OPTIONAL = {"source_root"}
+    CATALOG_REQUIRED = {"relative_path", "size_bytes", "sha256"}
+    ENDPOINT_CONFIG_REQUIRED = {"relative_path", "size_bytes", "sha256"}
+    FILE_REQUIRED = {
+        "file_id",
+        "api_name",
+        "storage_layer",
+        "source_relative_path",
+        "backup_relative_path",
+        "snapshot_ids",
+        "size_bytes",
+        "sha256",
+    }
+    FILE_OPTIONAL = {"record_count", "raw_event_count", "exists"}
+
+    def load_and_validate(self, backup_root: Path | str) -> ManifestValidationResult:
+        root = Path(backup_root)
+        manifest_path = root / "manifest.json"
+        if not manifest_path.exists():
+            return ManifestValidationResult(
+                None,
+                "failed",
+                None,
+                None,
+                [{"reason": "manifest_missing", "field": "manifest", "path": str(manifest_path)}],
+                [],
+            )
+        try:
+            payload = json.loads(manifest_path.read_text())
+        except Exception as exc:
+            return ManifestValidationResult(
+                None,
+                "failed",
+                None,
+                None,
+                [{"reason": "manifest_unreadable", "field": "manifest", "details": str(exc)}],
+                [],
+            )
+        if not isinstance(payload, dict):
+            return ManifestValidationResult(
+                None,
+                "failed",
+                None,
+                None,
+                [{"reason": "manifest_not_object", "field": "manifest"}],
+                [],
+            )
+        return self.validate_manifest_dict(payload)
+
+    def validate_manifest_dict(self, manifest: dict[str, Any]) -> ManifestValidationResult:
+        errors: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = []
+        version = manifest.get("manifest_version")
+        backup_id = manifest.get("backup_id")
+        unsupported = False
+        for field in sorted(self.TOP_LEVEL_REQUIRED):
+            if field not in manifest:
+                errors.append({"reason": "missing_required_field", "field": field})
+        unknown = sorted(set(manifest) - self.TOP_LEVEL_REQUIRED - self.TOP_LEVEL_OPTIONAL)
+        for field in unknown:
+            warnings.append({"reason": "unknown_field", "field": field})
+        if "manifest_version" in manifest and version != MANIFEST_VERSION:
+            unsupported = True
+            errors.append({"reason": "unsupported_manifest_version", "field": "manifest_version", "expected": MANIFEST_VERSION, "actual": version})
+        self._require_list(manifest, "api_names", errors)
+        self._require_list(manifest, "snapshot_ids", errors)
+        self._require_non_negative_int(manifest, "catalog_schema_version", errors)
+        self._require_non_negative_int(manifest, "file_count", errors)
+        self._require_non_negative_int(manifest, "total_size_bytes", errors)
+        catalog = manifest.get("catalog")
+        if isinstance(catalog, dict):
+            self._validate_entry("catalog", catalog, self.CATALOG_REQUIRED, set(), errors, warnings)
+        elif "catalog" in manifest:
+            errors.append({"reason": "invalid_type", "field": "catalog", "expected": "object"})
+        endpoint_configs = manifest.get("endpoint_configs")
+        if isinstance(endpoint_configs, list):
+            for idx, entry in enumerate(endpoint_configs):
+                if isinstance(entry, dict):
+                    self._validate_entry(f"endpoint_configs[{idx}]", entry, self.ENDPOINT_CONFIG_REQUIRED, set(), errors, warnings)
+                else:
+                    errors.append({"reason": "invalid_type", "field": f"endpoint_configs[{idx}]", "expected": "object"})
+        elif "endpoint_configs" in manifest:
+            errors.append({"reason": "invalid_type", "field": "endpoint_configs", "expected": "list"})
+        files = manifest.get("files")
+        if isinstance(files, list):
+            if "file_count" in manifest and isinstance(manifest.get("file_count"), int) and manifest.get("file_count") != len(files):
+                errors.append({"reason": "file_count_mismatch", "field": "file_count", "expected": manifest.get("file_count"), "actual": len(files)})
+            for idx, entry in enumerate(files):
+                if isinstance(entry, dict):
+                    self._validate_entry(f"files[{idx}]", entry, self.FILE_REQUIRED, self.FILE_OPTIONAL, errors, warnings)
+                    if "snapshot_ids" in entry and not isinstance(entry.get("snapshot_ids"), list):
+                        errors.append({"reason": "invalid_type", "field": f"files[{idx}].snapshot_ids", "expected": "list"})
+                else:
+                    errors.append({"reason": "invalid_type", "field": f"files[{idx}]", "expected": "object"})
+        elif "files" in manifest:
+            errors.append({"reason": "invalid_type", "field": "files", "expected": "list"})
+        status = "failed" if errors else "succeeded"
+        return ManifestValidationResult(
+            str(backup_id) if backup_id is not None else None,
+            status,
+            version if isinstance(version, int) else None,
+            manifest,
+            errors,
+            warnings,
+            unsupported,
+        )
+
+    def _validate_entry(self, prefix: str, entry: dict[str, Any], required: set[str], optional: set[str], errors: list[dict[str, Any]], warnings: list[dict[str, Any]]) -> None:
+        for field in sorted(required):
+            key = f"{prefix}.{field}"
+            if field not in entry:
+                errors.append({"reason": "missing_required_field", "field": key})
+                continue
+            if field in {"relative_path", "sha256", "file_id", "api_name", "storage_layer", "source_relative_path", "backup_relative_path"}:
+                self._require_non_empty_string(entry, field, key, errors)
+            if field == "size_bytes":
+                self._require_non_negative_int(entry, field, errors, key)
+        unknown = sorted(set(entry) - required - optional)
+        for field in unknown:
+            warnings.append({"reason": "unknown_field", "field": f"{prefix}.{field}"})
+
+    def _require_list(self, data: dict[str, Any], field: str, errors: list[dict[str, Any]]) -> None:
+        if field in data and not isinstance(data.get(field), list):
+            errors.append({"reason": "invalid_type", "field": field, "expected": "list"})
+
+    def _require_non_negative_int(self, data: dict[str, Any], field: str, errors: list[dict[str, Any]], label: str | None = None) -> None:
+        if field not in data:
+            return
+        value = data.get(field)
+        if not isinstance(value, int) or value < 0:
+            errors.append({"reason": "invalid_value", "field": label or field, "expected": "non_negative_integer", "actual": value})
+
+    def _require_non_empty_string(self, data: dict[str, Any], field: str, label: str, errors: list[dict[str, Any]]) -> None:
+        value = data.get(field)
+        if not isinstance(value, str) or not value:
+            errors.append({"reason": "invalid_value", "field": label, "expected": "non_empty_string", "actual": value})
+
+
+class BackupInspector:
+    def inspect(self, backup_root: Path | str) -> BackupInspectResult:
+        root = Path(backup_root)
+        validation = BackupManifestValidator().load_and_validate(root)
+        manifest = validation.manifest or {}
+        files = list(manifest.get("files") or []) if isinstance(manifest.get("files"), list) else []
+        endpoint_configs = list(manifest.get("endpoint_configs") or []) if isinstance(manifest.get("endpoint_configs"), list) else []
+        catalog_entry = manifest.get("catalog") if isinstance(manifest.get("catalog"), dict) else {}
+        catalog_rel = str(catalog_entry.get("relative_path") or "_catalog/catalog.sqlite") if catalog_entry is not None else "_catalog/catalog.sqlite"
+        catalog_path = root / catalog_rel
+        catalog_counts = None
+        if catalog_path.exists():
+            try:
+                catalog_counts = CatalogStore(root).inspect_summary()
+            except Exception as exc:
+                validation = ManifestValidationResult(
+                    validation.backup_id,
+                    validation.status,
+                    validation.manifest_version,
+                    validation.manifest,
+                    validation.errors,
+                    validation.warnings + [{"reason": "catalog_inspect_failed", "details": str(exc)}],
+                    validation.unsupported_manifest_version,
+                )
+        return BackupInspectResult(
+            backup_id=validation.backup_id,
+            status="succeeded" if validation.status == "succeeded" else "failed",
+            manifest_version=validation.manifest_version,
+            created_at=manifest.get("created_at") if isinstance(manifest.get("created_at"), str) else None,
+            snapshot_scope=manifest.get("snapshot_scope") if isinstance(manifest.get("snapshot_scope"), str) else None,
+            catalog_schema_version=manifest.get("catalog_schema_version") if isinstance(manifest.get("catalog_schema_version"), int) else None,
+            api_names=list(manifest.get("api_names") or []) if isinstance(manifest.get("api_names"), list) else [],
+            snapshot_count=len(manifest.get("snapshot_ids") or []) if isinstance(manifest.get("snapshot_ids"), list) else 0,
+            file_count=len(files),
+            raw_file_count=sum(1 for item in files if isinstance(item, dict) and item.get("storage_layer") == "raw"),
+            lake_file_count=sum(1 for item in files if isinstance(item, dict) and item.get("storage_layer") == "lake"),
+            object_file_count=sum(1 for item in files if isinstance(item, dict) and item.get("storage_layer") == "object"),
+            endpoint_config_count=len(endpoint_configs),
+            total_size_bytes=manifest.get("total_size_bytes") if isinstance(manifest.get("total_size_bytes"), int) else None,
+            catalog_relative_path=catalog_rel,
+            catalog_present=catalog_path.exists(),
+            manifest_validation_status=validation.status,
+            manifest_error_count=validation.error_count,
+            manifest_warning_count=validation.warning_count,
+            warnings=validation.warnings,
+            errors=validation.errors,
+            catalog_counts=catalog_counts,
+        )
 
 
 class BackupPlanner:
@@ -361,17 +634,34 @@ class BackupExecutor:
 class RestoreChecker:
     def check(self, backup_root: Path | str) -> RestoreCheckResult:
         root = Path(backup_root)
+        validation = BackupManifestValidator().load_and_validate(root)
+        manifest = validation.manifest or {}
+        if validation.status != "succeeded":
+            file_count_failures = sum(1 for failure in validation.errors if failure.get("reason") == "file_count_mismatch")
+            return RestoreCheckResult(
+                backup_id=validation.backup_id,
+                status="failed",
+                manifest_version=validation.manifest_version,
+                catalog_status="not_checked",
+                checked_file_count=0,
+                checked_raw_file_count=0,
+                checked_lake_file_count=0,
+                missing_file_count=0,
+                checksum_failure_count=0,
+                size_failure_count=0,
+                record_count_failure_count=0,
+                raw_event_count_failure_count=0,
+                parquet_failure_count=0,
+                raw_failure_count=0,
+                endpoint_config_failure_count=0,
+                file_count_failure_count=file_count_failures,
+                manifest_validation_status=validation.status,
+                unsupported_manifest_version=validation.unsupported_manifest_version,
+                manifest_error_count=validation.error_count,
+                manifest_warning_count=validation.warning_count,
+                failures=validation.errors,
+            )
         failures: list[dict[str, Any]] = []
-        manifest_path = root / "manifest.json"
-        if not manifest_path.exists():
-            return RestoreCheckResult(None, "failed", None, "missing", 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, [{"reason": "manifest_missing", "path": str(manifest_path)}])
-        try:
-            manifest = json.loads(manifest_path.read_text())
-        except Exception as exc:
-            return RestoreCheckResult(None, "failed", None, "unknown", 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, [{"reason": "manifest_unreadable", "details": str(exc)}])
-        version = manifest.get("manifest_version")
-        if version != MANIFEST_VERSION:
-            failures.append({"reason": "unsupported_manifest_version", "expected": MANIFEST_VERSION, "actual": version})
         catalog_status = self._check_catalog(root, manifest, failures)
         self._check_endpoint_configs(root, manifest, failures)
         counts = {
@@ -387,8 +677,6 @@ class RestoreChecker:
             "raw_failure": 0,
         }
         files = list(manifest.get("files") or [])
-        if int(manifest.get("file_count") or -1) != len(files):
-            failures.append({"reason": "file_count_mismatch", "expected": manifest.get("file_count"), "actual": len(files)})
         for item in files:
             self._check_file(root, item, failures, counts)
         endpoint_failures = sum(1 for failure in failures if str(failure.get("reason", "")).startswith("endpoint_config"))
@@ -397,7 +685,7 @@ class RestoreChecker:
         return RestoreCheckResult(
             backup_id=manifest.get("backup_id"),
             status=status,
-            manifest_version=version,
+            manifest_version=validation.manifest_version,
             catalog_status=catalog_status,
             checked_file_count=counts["checked"],
             checked_raw_file_count=counts["raw"],
@@ -411,6 +699,10 @@ class RestoreChecker:
             raw_failure_count=counts["raw_failure"],
             endpoint_config_failure_count=endpoint_failures,
             file_count_failure_count=file_count_failures,
+            manifest_validation_status=validation.status,
+            unsupported_manifest_version=validation.unsupported_manifest_version,
+            manifest_error_count=validation.error_count,
+            manifest_warning_count=validation.warning_count,
             failures=failures,
         )
 

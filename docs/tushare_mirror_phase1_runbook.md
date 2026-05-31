@@ -878,3 +878,103 @@ archive files, or the copied catalog.
 
 Phase 2.9 still does not implement `restore`, `restore-copy`, or restore into an
 active source root. It also does not add remote disaster recovery.
+
+### Backup manifest compatibility and inspection
+
+Manifest v1 is the compatibility contract for local backup artifacts. Required
+top-level fields are:
+
+```text
+manifest_version
+backup_id
+created_at
+catalog_schema_version
+snapshot_scope
+api_names
+snapshot_ids
+file_count
+total_size_bytes
+catalog
+endpoint_configs
+files
+```
+
+`source_root` is allowed and is kept only as provenance. `backup-inspect`,
+`restore-check`, `LakeReader`, `list-files`, and `coverage` must resolve backup
+files relative to the backup root; they must not read from `source_root`.
+
+The required `catalog` fields are:
+
+```text
+relative_path
+size_bytes
+sha256
+```
+
+Each `endpoint_configs[]` entry requires:
+
+```text
+relative_path
+size_bytes
+sha256
+```
+
+Each `files[]` entry requires:
+
+```text
+file_id
+api_name
+storage_layer
+source_relative_path
+backup_relative_path
+snapshot_ids
+size_bytes
+sha256
+```
+
+`record_count` and `raw_event_count` may be null, but should remain present when
+known because `restore-check` uses them to validate raw event counts and lake
+Parquet row counts. Unknown extra fields are accepted for v1 compatibility and
+reported as warnings, not failures.
+
+Use `backup-inspect` for a lightweight, read-only manifest and catalog summary:
+
+```bash
+python3 -m tushare_mirror backup-inspect --backup /tmp/tushare-mirror-backup
+python3 -m tushare_mirror backup-inspect --backup /tmp/tushare-mirror-backup --json
+```
+
+`backup-inspect` validates the manifest schema and may open the backup catalog to
+show counts, but it does not calculate file checksums, read Parquet footers, read
+raw JSONL.zst payloads, create `validation_runs`, or modify the backup artifact.
+It returns a non-zero exit code for missing manifests, malformed JSON,
+unsupported `manifest_version`, or missing required fields.
+
+Use `restore-check` for the full artifact check:
+
+```bash
+python3 -m tushare_mirror restore-check --backup /tmp/tushare-mirror-backup
+```
+
+`restore-check` first runs the manifest schema validation. If the manifest is
+invalid, it fails before doing checksum or file-content checks. If the manifest is
+valid, it verifies catalog and endpoint config checksums, raw JSONL.zst
+readability and event counts, lake Parquet footer readability and row counts, and
+all listed file sizes and checksums. `restore-check` also does not write
+`validation_runs`.
+
+A backup root can be inspected like any other root:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-backup catalog-version
+python3 -m tushare_mirror --root /tmp/tushare-mirror-backup catalog-inspect
+python3 -m tushare_mirror --root /tmp/tushare-mirror-backup coverage \
+  --api daily_basic \
+  --start-date 20250101 \
+  --end-date 20250110 \
+  --trading-days-only \
+  --calendar-exchange SSE
+```
+
+Only `validate --root <backup>` intentionally writes new `validation_runs` into
+the backup catalog. `backup-inspect` and `restore-check` are read-only.

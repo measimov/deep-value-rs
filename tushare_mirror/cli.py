@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .backup import BackupExecutor, BackupPlanner, RestoreChecker
+from .backup import BackupExecutor, BackupInspector, BackupPlanner, RestoreChecker
 from .backfill import (
     BackfillExecutor,
     BackfillPlanner,
@@ -370,6 +370,21 @@ def cmd_coverage(args) -> int:
         raise SystemExit(str(exc)) from exc
     _print_coverage_report(report, args.json)
     return 0
+
+
+def cmd_backup_inspect(args) -> int:
+    result = BackupInspector().inspect(Path(args.backup))
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+        if result.catalog_counts:
+            _print_key_values({f'catalog_{key}': value for key, value in result.catalog_counts.items()})
+        if result.errors:
+            _print_table(result.errors, ['reason', 'field', 'expected', 'actual', 'details'])
+        if result.warnings:
+            _print_table(result.warnings, ['reason', 'field', 'details'])
+    return 0 if result.status == 'succeeded' else 1
 
 
 def _print_backup_plan(plan, as_json: bool) -> None:
@@ -805,6 +820,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--calendar-exchange', default='SSE')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_coverage)
+
+    p = sub.add_parser('backup-inspect')
+    p.add_argument('--backup', required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_backup_inspect)
 
     p = sub.add_parser('backup-plan')
     p.add_argument('--target', required=True)

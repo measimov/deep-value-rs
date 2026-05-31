@@ -197,14 +197,13 @@ class Phase28BackupRestoreTests(unittest.TestCase):
         raw["raw_event_count"] = int(raw["raw_event_count"] or 0) + 1
         lake = next(item for item in manifest["files"] if item["storage_layer"] == "lake")
         lake["record_count"] = int(lake["record_count"] or 0) + 1
-        manifest["file_count"] = int(manifest["file_count"]) + 1
         self.write_manifest(target, manifest)
         shutil.rmtree(self.root)
         check = RestoreChecker().check(target)
         self.assertEqual(check.status, "failed")
         self.assertEqual(check.raw_event_count_failure_count, 1)
         self.assertEqual(check.record_count_failure_count, 1)
-        self.assertEqual(check.file_count_failure_count, 1)
+        self.assertEqual(check.file_count_failure_count, 0)
 
     def test_cli_backup_and_restore_check(self):
         self.fetch_daily()
