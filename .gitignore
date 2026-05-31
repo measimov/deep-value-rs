@@ -18,3 +18,11 @@ data/cache/
 
 # Runtime logs
 logs/
+
+# Tushare file lake runtime data
+data/tushare/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/

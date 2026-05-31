@@ -1,0 +1,39 @@
+endpoints:
+  - api_name: daily
+    family: stock
+    market: a
+    domain: stock
+    namespace: tushare.stock
+    volume_class: D1_DAILY_NARROW
+    default_fields:
+      - ts_code
+      - trade_date
+      - open
+      - high
+      - low
+      - close
+      - pre_close
+      - change
+      - pct_chg
+      - vol
+      - amount
+    probe:
+      params:
+        trade_date: '20250102'
+      fields:
+        - ts_code
+        - trade_date
+        - close
+      allow_empty_probe: false
+    permission:
+      point_threshold: 120
+      independent_permission: false
+    partition:
+      name: daily_month_v1
+      template: market={market}/domain={domain}/api={api_name}/year={year}/month={month}
+      date_field: trade_date
+      sort_order:
+        - trade_date
+        - ts_code
+    pit_safety:
+      requires_disclosure_date: false
