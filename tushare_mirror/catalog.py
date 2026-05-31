@@ -497,9 +497,9 @@ class CatalogStore:
     def latest_snapshot(self, api_name: str | None = None) -> dict[str, Any] | None:
         with self.connect() as conn:
             if api_name:
-                row = conn.execute("select * from snapshots where api_name=? and status='current' order by sequence_number desc limit 1", (api_name,)).fetchone()
+                row = conn.execute("select * from snapshots where api_name=? and status='current' order by sequence_number desc, created_at desc limit 1", (api_name,)).fetchone()
             else:
-                row = conn.execute("select * from snapshots where status='current' order by sequence_number desc limit 1").fetchone()
+                row = conn.execute("select * from snapshots where status='current' order by sequence_number desc, created_at desc limit 1").fetchone()
         return dict(row) if row else None
 
     def files_for_snapshot(self, snapshot_id: str, content_type: str | None = None) -> list[dict[str, Any]]:

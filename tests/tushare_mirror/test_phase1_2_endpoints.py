@@ -178,6 +178,22 @@ class Phase12EndpointTests(unittest.TestCase):
         ok, _ = Validator(self.root, self.catalog).validate_snapshot(result.snapshot_id, "trade_cal")
         self.assertTrue(ok)
 
+
+    def test_validate_latest_without_api_uses_most_recent_snapshot(self):
+        store = FileLakeStore(self.root, self.catalog)
+        stock_fields, stock_items, stock_params = FIXTURES["stock_basic"]
+        cal_fields, cal_items, cal_params = FIXTURES["trade_cal"]
+        first = store.fetch("stock_basic", stock_params, ApiFakeClient(stock_fields, stock_items))
+        second = store.fetch("trade_cal", cal_params, ApiFakeClient(cal_fields, cal_items))
+        self.assertNotEqual(first.snapshot_id, second.snapshot_id)
+        latest = self.catalog.latest_snapshot()
+        self.assertEqual(latest["snapshot_id"], second.snapshot_id)
+        ok, validation_id = Validator(self.root, self.catalog).validate_snapshot("latest")
+        self.assertTrue(ok)
+        with sqlite3.connect(self.catalog.db_path) as conn:
+            row = conn.execute("select snapshot_id from validation_runs where validation_run_id=?", (validation_id,)).fetchone()
+        self.assertEqual(row[0], second.snapshot_id)
+
     def test_cli_dry_run_show_permissions_and_list_files_for_stock_basic(self):
         self.catalog.record_probe(
             "stock_basic",
