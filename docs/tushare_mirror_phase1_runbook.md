@@ -758,3 +758,87 @@ move from `missing` to `active_exists`.
 iterate endpoints, and does not fetch `trade_cal` implicitly. Calendar-aware mode
 requires a local `trade_cal` latest snapshot, the same as `coverage` and
 `backfill-plan`.
+
+
+## Phase 2.8 Local Backup and Restore-check
+
+Phase 2.8 adds a local backup manifest so a file lake snapshot can be copied and
+checked without contacting Tushare. The goal is local durability verification,
+not remote disaster recovery.
+
+`catalog-backup` still exists and only copies the SQLite catalog:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill catalog-backup   --output /tmp/catalog-backup.sqlite
+```
+
+`backup` is broader: it copies the SQLite catalog via SQLite's backup API,
+endpoint config YAML files, and the raw/lake files referenced by current active
+snapshots. It writes `manifest.json` into the backup root.
+
+Preview the scope first:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill backup-plan   --target /tmp/tushare-mirror-backup
+```
+
+Machine-readable preview:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill backup-plan   --target /tmp/tushare-mirror-backup   --json
+```
+
+Run the local backup:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill backup   --target /tmp/tushare-mirror-backup
+```
+
+If the target exists, backup refuses to overwrite it unless `--overwrite` is
+explicitly passed:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill backup   --target /tmp/tushare-mirror-backup   --overwrite
+```
+
+The backup target must not be the source root or inside the source root. Backup
+uses a same-directory staging path and only moves it into place after
+`restore-check` succeeds.
+
+Check a backup without relying on the original source root:
+
+```bash
+python3 -m tushare_mirror restore-check   --backup /tmp/tushare-mirror-backup
+```
+
+`restore-check` verifies:
+
+- `manifest.json` exists and has a supported version.
+- Catalog backup exists, checksum matches, and SQLite can open it.
+- Endpoint config files exist and match size/checksum.
+- Every manifest data file exists.
+- File size and sha256 match the manifest.
+- Raw JSONL.zst files can be read and their raw event counts match.
+- Lake Parquet footers can be read and record counts match.
+- Manifest `file_count` matches the listed file entries.
+
+Phase 2.8 backs up current active raw/lake files only. It does not copy `_tmp/`,
+`_quarantine/`, inactive/superseded files, compacted/deleted/missing files,
+remote object storage, PostgreSQL derived tables, or Iceberg/Delta metadata.
+The manifest schema has a `storage_layer` field so future object-index files can
+be represented, but this phase does not add object storage support.
+
+A successful local backup looks like:
+
+```text
+/tmp/tushare-mirror-backup/
+  manifest.json
+  _catalog/catalog.sqlite
+  _catalog/endpoints/*.yaml
+  raw/...
+  lake/...
+```
+
+This is a local backup and restore-check MVP. It is not encrypted, compressed,
+incremental, or remote. Do not treat it as full disaster recovery until a remote
+backup policy is designed and tested separately.

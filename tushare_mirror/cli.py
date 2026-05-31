@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .backup import BackupExecutor, BackupPlanner, RestoreChecker
 from .backfill import (
     BackfillExecutor,
     BackfillPlanner,
@@ -369,6 +370,49 @@ def cmd_coverage(args) -> int:
         raise SystemExit(str(exc)) from exc
     _print_coverage_report(report, args.json)
     return 0
+
+
+def _print_backup_plan(plan, as_json: bool) -> None:
+    if as_json:
+        _print_json(plan.to_dict())
+        return
+    _print_key_values(plan.summary())
+    if plan.rejected_reason:
+        print('No active snapshots to backup.')
+
+
+def cmd_backup_plan(args) -> int:
+    root = Path(args.root)
+    catalog = _open_existing_catalog(root)
+    plan = BackupPlanner(root, catalog).plan(args.target, args.api)
+    _print_backup_plan(plan, args.json)
+    return 0
+
+
+def cmd_backup(args) -> int:
+    root = Path(args.root)
+    catalog = _open_existing_catalog(root)
+    plan = BackupPlanner(root, catalog).plan(args.target, args.api)
+    try:
+        result = BackupExecutor(root, catalog).backup(plan, overwrite=args.overwrite)
+    except (ValueError, FileExistsError, FileNotFoundError) as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+    return 0
+
+
+def cmd_restore_check(args) -> int:
+    result = RestoreChecker().check(Path(args.backup))
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+        if result.failures:
+            _print_table(result.failures, ['reason', 'file_id', 'path', 'expected', 'actual', 'details'])
+    return 0 if result.status == 'succeeded' else 1
 
 
 def _missing_backfill_max_jobs(args, execute: bool) -> int:
@@ -755,6 +799,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--calendar-exchange', default='SSE')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_coverage)
+
+    p = sub.add_parser('backup-plan')
+    p.add_argument('--target', required=True)
+    p.add_argument('--api')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_backup_plan)
+
+    p = sub.add_parser('backup')
+    p.add_argument('--target', required=True)
+    p.add_argument('--api')
+    p.add_argument('--overwrite', action='store_true')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_backup)
+
+    p = sub.add_parser('restore-check')
+    p.add_argument('--backup', required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_restore_check)
 
     p = sub.add_parser('backfill-missing')
     p.add_argument('--api', required=True)
