@@ -123,18 +123,25 @@ class JobPlanner:
             "api_name": cfg.get("api_name"),
         }
         if template == "snapshot_date":
-            snapshot_date = str(params.get("snapshot_date") or now_utc()[:10].replace("-", ""))
+            snapshot_date = self._date_value(params, ["snapshot_date"])
             return {**base, "snapshot_date": snapshot_date}
         if template == "exchange_year":
             exchange = str(params.get("exchange") or (cfg.get("default_params") or {}).get("exchange") or "unknown")
-            date_value = str(params.get("cal_date") or params.get("start_date") or params.get("end_date") or now_utc()[:10].replace("-", ""))
-            year = date_value[:4] if len(date_value) >= 4 else "unknown"
-            return {**base, "exchange": exchange, "year": year}
+            date_value = self._date_value(params, ["cal_date", "start_date", "end_date"])
+            return {**base, "exchange": exchange, "year": self._year(date_value)}
+        if template == "event_year_month":
+            date_value = self._date_value(params, ["ann_date", "trade_date", "start_date", "end_date"])
+            return {**base, "year": self._year(date_value), "month": self._month(date_value), "event_date": date_value}
+        if template == "family_code_snapshot":
+            hs_type = str(params.get("hs_type") or (cfg.get("default_params") or {}).get("hs_type") or "unknown")
+            snapshot_date = self._date_value(params, ["snapshot_date"])
+            return {**base, "hs_type": hs_type, "snapshot_date": snapshot_date}
+        if template == "period_year":
+            date_value = self._date_value(params, ["end_date", "ann_date", "start_date"])
+            return {**base, "period_year": self._year(date_value), "period_date": date_value}
         date_field = self._primary_date_field(cfg) or "trade_date"
-        date_value = str(params.get(date_field, "unknown"))
-        year = date_value[:4] if len(date_value) >= 4 else "unknown"
-        month = date_value[4:6] if len(date_value) >= 6 else "unknown"
-        return {**base, "year": year, "month": month, date_field: date_value}
+        date_value = self._date_value(params, [date_field])
+        return {**base, "year": self._year(date_value), "month": self._month(date_value), date_field: date_value}
 
     def raw_relative_path(self, api_name: str, key: str) -> str:
         date = now_utc()[:10].replace("-", "")
@@ -148,6 +155,10 @@ class JobPlanner:
             prefix += f"/snapshot_date={parts['snapshot_date']}"
         elif template == "exchange_year":
             prefix += f"/exchange={parts['exchange']}/year={parts['year']}"
+        elif template == "family_code_snapshot":
+            prefix += f"/hs_type={parts['hs_type']}/snapshot_date={parts['snapshot_date']}"
+        elif template == "period_year":
+            prefix += f"/period_year={parts['period_year']}"
         else:
             prefix += f"/year={parts['year']}/month={parts['month']}"
         return f"{prefix}/part-{key[-12:]}.parquet"
@@ -162,16 +173,29 @@ class JobPlanner:
             return str(cfg["partition_template"])
         part = cfg.get("partition") or {}
         name = str(part.get("name") or "")
-        if "snapshot_date" in name:
-            return "snapshot_date"
-        if "exchange_year" in name:
-            return "exchange_year"
+        for template in ("snapshot_date", "exchange_year", "event_year_month", "family_code_snapshot", "period_year"):
+            if template in name:
+                return template
         return "year_month"
 
     def _primary_date_field(self, cfg: Mapping[str, Any]) -> str | None:
         if "primary_date_field" in cfg:
             return cfg.get("primary_date_field")
         return (cfg.get("partition") or {}).get("date_field")
+
+
+    def _date_value(self, params: Mapping[str, Any], candidates: list[str]) -> str:
+        for key in candidates:
+            value = params.get(key)
+            if value:
+                return str(value)
+        return now_utc()[:10].replace("-", "")
+
+    def _year(self, date_value: str) -> str:
+        return date_value[:4] if len(date_value) >= 4 else "unknown"
+
+    def _month(self, date_value: str) -> str:
+        return date_value[4:6] if len(date_value) >= 6 else "unknown"
 
     def _is_expired(self, value: str) -> bool:
         try:

@@ -115,12 +115,12 @@ class Phase11HardeningTests(unittest.TestCase):
 
         inspect = json.loads(self.run_cli("catalog-inspect", "--json").stdout)
         self.assertEqual(inspect["schema_version"], 2)
-        self.assertEqual(inspect["endpoint_count"], 5)
+        self.assertEqual(inspect["endpoint_count"], 12)
         self.assertEqual(self.run_cli("catalog-version").stdout.strip(), "2")
         backup_path = self.root / "catalog-copy.sqlite"
         self.run_cli("catalog-backup", "--output", str(backup_path))
         with sqlite3.connect(backup_path) as conn:
-            self.assertEqual(conn.execute("select count(*) from endpoints").fetchone()[0], 5)
+            self.assertEqual(conn.execute("select count(*) from endpoints").fetchone()[0], 12)
             self.assertEqual(conn.execute("select value from catalog_meta where key='catalog_schema_version'").fetchone()[0], "2")
         permissions = json.loads(self.run_cli("show-permissions", "--api", "daily", "--json").stdout)
         self.assertEqual(permissions[0]["row_count"], 1)

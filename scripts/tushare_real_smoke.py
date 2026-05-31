@@ -18,13 +18,25 @@ from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.cli import load_dotenv
 from tushare_mirror.endpoints import load_into_catalog
 
-ENDPOINTS: dict[str, dict[str, Any]] = {
+PHASE1_ENDPOINTS: dict[str, dict[str, Any]] = {
     "daily": {"trade_date": "20250102"},
     "stock_basic": {"list_status": "L"},
     "trade_cal": {"exchange": "SSE", "start_date": "20250101", "end_date": "20250131"},
     "adj_factor": {"trade_date": "20250102"},
     "daily_basic": {"trade_date": "20250102"},
 }
+
+PHASE2_LOW_VOLUME_ENDPOINTS: dict[str, dict[str, Any]] = {
+    "weekly": {"trade_date": "20250103"},
+    "monthly": {"trade_date": "20250127"},
+    "suspend_d": {"trade_date": "20250102"},
+    "namechange": {"ts_code": "000001.SZ"},
+    "hs_const": {"hs_type": "SH", "is_new": "1"},
+    "stk_managers": {"ts_code": "000001.SZ"},
+    "stk_rewards": {"ts_code": "000001.SZ"},
+}
+
+ENDPOINTS: dict[str, dict[str, Any]] = {**PHASE1_ENDPOINTS, **PHASE2_LOW_VOLUME_ENDPOINTS}
 
 ACCESSIBLE = {"accessible", "empty_but_accessible"}
 PERMISSION_STATUSES = {"permission_denied", "rate_limited"}
@@ -119,15 +131,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", default="/tmp/tushare-mirror-real-smoke")
     parser.add_argument("--endpoint", choices=sorted(ENDPOINTS), action="append")
     parser.add_argument("--all-phase-1", action="store_true", help="Run daily plus Phase 1.2 low-volume endpoints.")
+    parser.add_argument("--phase-2-low-volume", action="store_true", help="Run Phase 2 low-risk endpoints only.")
     parser.add_argument("--reset-root", action="store_true", help="Remove the root before running.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    endpoints = args.endpoint or list(ENDPOINTS)
+    endpoints: list[str] = []
     if args.all_phase_1:
-        endpoints = list(ENDPOINTS)
+        endpoints.extend(PHASE1_ENDPOINTS)
+    if args.phase_2_low_volume:
+        endpoints.extend(PHASE2_LOW_VOLUME_ENDPOINTS)
+    if args.endpoint:
+        endpoints.extend(args.endpoint)
+    seen: set[str] = set()
+    endpoints = [api for api in endpoints if not (api in seen or seen.add(api))]
+    if not endpoints:
+        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, or --endpoint.", file=sys.stderr)
+        return 2
     return run_smoke(Path(args.root), endpoints, args.reset_root)
 
 

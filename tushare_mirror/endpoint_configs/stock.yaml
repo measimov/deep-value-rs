@@ -175,3 +175,239 @@ endpoints:
       allow_empty_probe: false
     page_size: 5000
     enabled: true
+
+  - api_name: weekly
+    family: stock_bar
+    market: a
+    domain: stock
+    permission_class: regular
+    volume_class: D1_DAILY_NARROW
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params:
+      - ts_code
+      - trade_date
+      - start_date
+      - end_date
+    default_fields:
+      - ts_code
+      - trade_date
+      - open
+      - high
+      - low
+      - close
+      - pre_close
+      - change
+      - pct_chg
+      - vol
+      - amount
+    probe:
+      params:
+        trade_date: '20250103'
+      fields:
+        - ts_code
+        - trade_date
+        - close
+      allow_empty_probe: false
+    page_size: 5000
+    enabled: true
+
+  - api_name: monthly
+    family: stock_bar
+    market: a
+    domain: stock
+    permission_class: regular
+    volume_class: D1_DAILY_NARROW
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params:
+      - ts_code
+      - trade_date
+      - start_date
+      - end_date
+    default_fields:
+      - ts_code
+      - trade_date
+      - open
+      - high
+      - low
+      - close
+      - pre_close
+      - change
+      - pct_chg
+      - vol
+      - amount
+    probe:
+      params:
+        trade_date: '20250127'
+      fields:
+        - ts_code
+        - trade_date
+        - close
+      allow_empty_probe: false
+    page_size: 5000
+    enabled: true
+
+  - api_name: suspend_d
+    family: stock_event
+    market: a
+    domain: stock
+    permission_class: regular
+    volume_class: S1_EVENT
+    partition_template: event_year_month
+    primary_date_field: trade_date
+    supported_params:
+      - ts_code
+      - trade_date
+      - suspend_type
+      - start_date
+      - end_date
+    default_fields:
+      - ts_code
+      - trade_date
+      - suspend_timing
+      - suspend_type
+    probe:
+      params:
+        trade_date: '20250102'
+      fields:
+        - ts_code
+        - trade_date
+        - suspend_type
+      allow_empty_probe: true
+    page_size: 5000
+    enabled: true
+
+  - api_name: namechange
+    family: stock_event
+    market: a
+    domain: stock
+    permission_class: regular
+    volume_class: S1_EVENT
+    partition_template: event_year_month
+    primary_date_field: ann_date
+    supported_params:
+      - ts_code
+      - start_date
+      - end_date
+    default_fields:
+      - ts_code
+      - name
+      - start_date
+      - end_date
+      - ann_date
+      - change_reason
+    probe:
+      params:
+        ts_code: 000001.SZ
+      fields:
+        - ts_code
+        - name
+        - start_date
+        - end_date
+        - ann_date
+      allow_empty_probe: false
+    page_size: 5000
+    enabled: true
+
+  - api_name: hs_const
+    family: market_constituent
+    market: a
+    domain: stock
+    permission_class: regular
+    volume_class: H1_CONSTITUENT
+    partition_template: family_code_snapshot
+    primary_date_field: null
+    supported_params:
+      - hs_type
+      - is_new
+    default_params:
+      hs_type: SH
+      is_new: '1'
+    default_fields:
+      - ts_code
+      - hs_type
+      - in_date
+      - out_date
+      - is_new
+    probe:
+      params:
+        hs_type: SH
+        is_new: '1'
+      fields:
+        - ts_code
+        - hs_type
+        - in_date
+        - is_new
+      allow_empty_probe: false
+    page_size: 5000
+    enabled: true
+
+  - api_name: stk_managers
+    family: company_governance
+    market: a
+    domain: stock
+    permission_class: regular
+    volume_class: S1_EVENT
+    partition_template: event_year_month
+    primary_date_field: ann_date
+    supported_params:
+      - ts_code
+      - ann_date
+      - start_date
+      - end_date
+    default_fields:
+      - ts_code
+      - ann_date
+      - name
+      - gender
+      - lev
+      - title
+      - edu
+      - national
+      - birthday
+      - begin_date
+      - end_date
+      - resume
+    probe:
+      params:
+        ts_code: 000001.SZ
+      fields:
+        - ts_code
+        - ann_date
+        - name
+        - title
+      allow_empty_probe: false
+    page_size: 5000
+    enabled: true
+
+  - api_name: stk_rewards
+    family: company_governance
+    market: a
+    domain: stock
+    permission_class: regular
+    volume_class: F1_PERIOD
+    partition_template: period_year
+    primary_date_field: end_date
+    supported_params:
+      - ts_code
+      - end_date
+    default_fields:
+      - ts_code
+      - ann_date
+      - end_date
+      - name
+      - title
+      - reward
+      - hold_vol
+    probe:
+      params:
+        ts_code: 000001.SZ
+      fields:
+        - ts_code
+        - end_date
+        - name
+        - reward
+      allow_empty_probe: false
+    page_size: 5000
+    enabled: true

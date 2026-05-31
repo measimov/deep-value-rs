@@ -286,6 +286,61 @@ rm -rf /tmp/tushare-mirror-real
 Only clean explicit temporary roots. Do not delete `data/tushare/` unless you
 intend to remove local mirror data.
 
+## Phase 2 Low-risk Endpoint Expansion
+
+Phase 2 adds low-risk A-share base/event endpoints without turning the project
+into a full mirror. Supported Phase 2 endpoints are:
+
+- `weekly`
+- `monthly`
+- `suspend_d`
+- `namechange`
+- `hs_const`
+- `stk_managers`
+- `stk_rewards`
+
+Minimal dry-run commands, which do not send Tushare requests and do not write
+raw/lake/job/snapshot rows:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 fetch --api weekly --params '{"trade_date":"20250103"}' --dry-run
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 fetch --api monthly --params '{"trade_date":"20250127"}' --dry-run
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 fetch --api suspend_d --params '{"trade_date":"20250102"}' --dry-run
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 fetch --api namechange --params '{"ts_code":"000001.SZ"}' --dry-run
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 fetch --api hs_const --params '{"hs_type":"SH","is_new":"1"}' --dry-run
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 fetch --api stk_managers --params '{"ts_code":"000001.SZ"}' --dry-run
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 fetch --api stk_rewards --params '{"ts_code":"000001.SZ"}' --dry-run
+```
+
+Minimal real smoke commands for one endpoint follow the same probe/fetch/validate
+shape. These commands send real requests and consume quota; run only one minimal
+request per endpoint and do not loop dates or stocks:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 init-catalog
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 probe --api weekly
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 fetch --api weekly --params '{"trade_date":"20250103"}'
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 validate --api weekly --snapshot latest
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 list-files --api weekly --snapshot latest
+```
+
+The opt-in smoke script can run the whole Phase 2 low-risk set once:
+
+```bash
+python3 scripts/tushare_real_smoke.py --phase-2-low-volume --root /tmp/tushare-mirror-real-phase2 --reset-root
+```
+
+`permission_denied`, `rate_limited`, and `empty_but_accessible` are observable
+endpoint states. They should be reported rather than treated as framework bugs.
+Response-shape, writer, validation, and reader failures are system failures.
+Use snapshot observability after a smoke run:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 show-snapshots --latest
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 validate --snapshot latest
+python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 show-jobs --limit 50
+```
+
 ## Real Smoke Script
 
 The repository includes an opt-in real smoke script. It is not run by unittest or
@@ -294,14 +349,16 @@ CI by default because it sends real Tushare requests and consumes quota.
 ```bash
 python3 scripts/tushare_real_smoke.py --help
 python3 scripts/tushare_real_smoke.py --root /tmp/tushare-mirror-real-smoke --reset-root --all-phase-1
+python3 scripts/tushare_real_smoke.py --root /tmp/tushare-mirror-real-smoke --reset-root --phase-2-low-volume
 python3 scripts/tushare_real_smoke.py --root /tmp/tushare-mirror-real-smoke --reset-root --endpoint daily
 ```
 
 The script requires `TUSHARE_TOKEN` from the environment or `.env`, but never
-prints the token. It runs only these endpoints: `daily`, `stock_basic`,
-`trade_cal`, `adj_factor`, and `daily_basic`. Each endpoint uses one minimal
-request; the script does not loop dates or stocks and does not perform a full
-mirror.
+prints the token. `--all-phase-1` runs `daily`, `stock_basic`, `trade_cal`,
+`adj_factor`, and `daily_basic`. `--phase-2-low-volume` runs `weekly`,
+`monthly`, `suspend_d`, `namechange`, `hs_const`, `stk_managers`, and
+`stk_rewards`. Each endpoint uses one minimal request; the script does not loop
+dates or stocks and does not perform a full mirror.
 
 `permission_denied` and `rate_limited` are reported as observable endpoint
 states. Response-shape errors, writer errors, validation failures, and reader
