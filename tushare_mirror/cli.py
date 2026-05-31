@@ -8,6 +8,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .backfill import (
+    BackfillExecutor,
+    BackfillPlanner,
+    DatePlanner,
+    PHASE21_EXECUTE_MAX_JOBS,
+    execution_to_rows,
+    plan_to_rows,
+)
 from .catalog import CatalogStore
 from .client import TushareClient, classify_probe_response
 from .endpoints import load_into_catalog
@@ -195,6 +203,82 @@ def cmd_fetch(args) -> int:
     return 0 if result.snapshot_id or result.skipped else 1
 
 
+def _backfill_max_jobs(args, execute: bool) -> int:
+    if execute and args.max_jobs is None:
+        raise SystemExit('backfill --execute requires --max-jobs')
+    max_jobs = args.max_jobs if args.max_jobs is not None else 20
+    if max_jobs <= 0:
+        raise SystemExit('--max-jobs must be positive')
+    if execute and max_jobs > PHASE21_EXECUTE_MAX_JOBS:
+        raise SystemExit(f'Refusing to execute {max_jobs} jobs in Phase 2.1. max allowed: {PHASE21_EXECUTE_MAX_JOBS}.')
+    return max_jobs
+
+
+def _make_backfill_plan(args, execute: bool):
+    root = Path(args.root)
+    catalog = _ensure_catalog(root)
+    try:
+        dates = DatePlanner(root, catalog).plan_dates(
+            dates=args.dates,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            trading_days_only=args.trading_days_only,
+        )
+        max_jobs = _backfill_max_jobs(args, execute)
+        plan = BackfillPlanner(root, catalog).plan_date_backfill(args.api, dates, max_jobs=max_jobs, dry_run=not execute)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    return root, catalog, plan
+
+
+def _print_backfill_plan(plan, as_json: bool) -> None:
+    if as_json:
+        _print_json(plan.to_dict())
+        return
+    _print_table(plan_to_rows(plan), ['api_name', 'date', 'job_key', 'existing_status', 'planned_action', 'partition', 'raw_path', 'lake_path_prefix'])
+    _print_key_values({
+        'total_candidate_jobs': plan.total_candidate_jobs,
+        'planned_jobs': len(plan.planned_jobs),
+        'skipped_jobs': plan.skipped_jobs,
+        'blocked_jobs': plan.blocked_jobs,
+        'max_jobs': plan.max_jobs,
+        'dry_run': plan.dry_run,
+        'warnings': plan.warnings,
+    })
+
+
+def cmd_backfill_plan(args) -> int:
+    _, _, plan = _make_backfill_plan(args, execute=False)
+    _print_backfill_plan(plan, args.json)
+    return 0
+
+
+def cmd_backfill(args) -> int:
+    execute = bool(args.execute)
+    root, catalog, plan = _make_backfill_plan(args, execute=execute)
+    if not execute:
+        _print_backfill_plan(plan, args.json)
+        return 0
+    token = require_token()
+    store = FileLakeStore(root, catalog)
+    result = BackfillExecutor(root, catalog, store).execute(
+        plan,
+        TushareClient(token),
+        validate_latest=args.validate_latest,
+        stop_on_error=args.stop_on_error,
+    )
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_table(execution_to_rows(result), ['date', 'job_key', 'action', 'status', 'record_count', 'raw_event_count', 'snapshot_id', 'error_type'])
+        _print_key_values(result.summary)
+        if result.validation:
+            _print_table([result.validation], ['validation_id', 'scope', 'api_name', 'snapshot_id', 'status', 'checked_file_count', 'failure_count', 'record_count', 'raw_event_count'])
+    nonfatal = {'permission_denied', 'empty_result'}
+    fatal_failures = [row for row in result.results if row.status in {'failed', 'blocked'} and row.error_type not in nonfatal]
+    return 1 if fatal_failures else 0
+
+
 def _print_validation_reports(reports: list[dict[str, Any]], overall_ok: bool, as_json: bool) -> None:
     if as_json:
         _print_json({'status': 'succeeded' if overall_ok else 'failed', 'results': reports})
@@ -343,6 +427,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--dry-run', action='store_true')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_fetch)
+
+    p = sub.add_parser('backfill-plan')
+    p.add_argument('--api', required=True)
+    p.add_argument('--dates')
+    p.add_argument('--start-date')
+    p.add_argument('--end-date')
+    p.add_argument('--trading-days-only', action='store_true')
+    p.add_argument('--max-jobs', type=int)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_backfill_plan)
+
+    p = sub.add_parser('backfill')
+    p.add_argument('--api', required=True)
+    p.add_argument('--dates')
+    p.add_argument('--start-date')
+    p.add_argument('--end-date')
+    p.add_argument('--trading-days-only', action='store_true')
+    p.add_argument('--max-jobs', type=int)
+    p.add_argument('--execute', action='store_true')
+    p.add_argument('--stop-on-error', action='store_true')
+    p.add_argument('--validate-latest', action='store_true')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_backfill)
 
     p = sub.add_parser('validate')
     p.add_argument('--snapshot', default='latest')

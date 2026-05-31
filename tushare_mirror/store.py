@@ -48,15 +48,26 @@ class FileLakeStore:
     def plan_fetch(self, api_name: str, params: Mapping[str, Any], fields: list[str] | None = None) -> dict[str, Any]:
         return JobPlanner(self.root, self.catalog).plan_single_fetch(api_name, params, fields).to_dict()
 
-    def fetch(self, api_name: str, params: Mapping[str, Any], client, max_attempts: int = 3, fields: list[str] | None = None) -> FetchResult:
+    def fetch(
+        self,
+        api_name: str,
+        params: Mapping[str, Any],
+        client,
+        max_attempts: int = 3,
+        fields: list[str] | None = None,
+        run_id: str | None = None,
+        finish_run: bool = True,
+        run_type: str = "fetch",
+    ) -> FetchResult:
         cfg = self.catalog.get_endpoint_config(api_name)
         plan = JobPlanner(self.root, self.catalog).plan_single_fetch(api_name, params, fields)
         if plan.existing_active_data:
             snap = self.catalog.latest_snapshot(api_name)
             existing = self.catalog.get_job(plan.job_key)
-            return FetchResult("", plan.job_key, snap["snapshot_id"] if snap else None, int((existing or {}).get("record_count") or 0), skipped=True)
+            return FetchResult(run_id or "", plan.job_key, snap["snapshot_id"] if snap else None, int((existing or {}).get("record_count") or 0), skipped=True)
 
-        run_id = self.catalog.create_run("fetch")
+        if run_id is None:
+            run_id = self.catalog.create_run(run_type)
         self.catalog.upsert_job(plan.job_key, run_id, api_name, plan.params, plan.fields, "running")
         tmp_dir = self.root / "_tmp" / f"run_id={run_id}"
         raw_tmp = tmp_dir / "raw" / f"{plan.job_key}.jsonl.zst"
@@ -86,7 +97,8 @@ class FileLakeStore:
                 raw_hash = sha256_file(raw_tmp)
                 self._quarantine(run_id, plan.job_key, api_name, ErrorType.SCHEMA_INCOMPATIBLE.value, tmp_dir, raw_tmp, raw_hash)
                 self.catalog.update_job_failed(plan.job_key, f"schema incompatible: {decision.details}", ErrorType.SCHEMA_INCOMPATIBLE.value)
-                self.catalog.finish_run(run_id, "failed", "schema incompatible", ErrorType.SCHEMA_INCOMPATIBLE.value, {"job_key": plan.job_key})
+                if finish_run:
+                    self.catalog.finish_run(run_id, "failed", "schema incompatible", ErrorType.SCHEMA_INCOMPATIBLE.value, {"job_key": plan.job_key})
                 return FetchResult(run_id, plan.job_key, None, 0)
 
             schema_registry.commit(api_name, decision)
@@ -141,7 +153,8 @@ class FileLakeStore:
             if not ok:
                 self._quarantine(run_id, plan.job_key, api_name, ErrorType.VALIDATION_FAILED.value, tmp_dir, raw_tmp, None)
                 self.catalog.update_job_failed(plan.job_key, json.dumps(failures), ErrorType.VALIDATION_FAILED.value)
-                self.catalog.finish_run(run_id, "failed", "validation failed", ErrorType.VALIDATION_FAILED.value, {"failures": failures})
+                if finish_run:
+                    self.catalog.finish_run(run_id, "failed", "validation failed", ErrorType.VALIDATION_FAILED.value, {"failures": failures})
                 return FetchResult(run_id, plan.job_key, None, 0)
 
             raw_final = self.root / plan.raw_path
@@ -165,13 +178,15 @@ class FileLakeStore:
             except Exception as e:
                 raise MirrorError(ErrorType.CATALOG_COMMIT_FAILED, f"catalog commit failed: {e}") from e
             self.catalog.update_job_done(plan.job_key, record_count, source_item_count, raw_event_count, error_event_count)
-            self.catalog.finish_run(run_id, "succeeded", summary={"job_key": plan.job_key, "record_count": record_count, "raw_event_count": raw_event_count})
+            if finish_run:
+                self.catalog.finish_run(run_id, "succeeded", summary={"job_key": plan.job_key, "record_count": record_count, "raw_event_count": raw_event_count})
             shutil.rmtree(tmp_dir, ignore_errors=True)
             return FetchResult(run_id, plan.job_key, snapshot_id, record_count)
         except Exception as e:
             error_type = classify_exception(e)
             self.catalog.update_job_failed(plan.job_key, str(e), error_type.value)
-            self.catalog.finish_run(run_id, "failed", str(e), error_type.value, {"job_key": plan.job_key})
+            if finish_run:
+                self.catalog.finish_run(run_id, "failed", str(e), error_type.value, {"job_key": plan.job_key})
             qdir = self.root / "_quarantine" / f"run_id={run_id}" / f"api={api_name}" / f"job={plan.job_key}" / f"reason={error_type.value}"
             move_tree_to_quarantine(tmp_dir, qdir)
             if qdir.exists():

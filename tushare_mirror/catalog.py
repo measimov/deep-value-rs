@@ -535,6 +535,21 @@ class CatalogStore:
         rows = self.files_for_snapshot(snapshot["snapshot_id"], content_type=content_type)
         return [row for row in rows if row.get("job_key") == job_key and row.get("status") not in {"quarantined", "missing", "deleted", "deleted_pending"}]
 
+    def file_statuses_for_job(self, job_key: str, api_name: str | None = None) -> set[str]:
+        sql = "select status from files where job_key=?"
+        args: list[Any] = [job_key]
+        if api_name:
+            sql += " and api_name=?"
+            args.append(api_name)
+        with self.connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def quarantine_exists_for_job(self, job_key: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute("select 1 from quarantine_files where job_key=? limit 1", (job_key,)).fetchone()
+        return row is not None
+
     def commit_snapshot(self, *, api_name: str, table_id: str, file_ids: Iterable[str], run_id: str, checkpoint_key: str, cursor: str) -> str:
         new_file_ids = list(file_ids)
         parent = self.latest_snapshot(api_name)

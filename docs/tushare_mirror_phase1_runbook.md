@@ -341,6 +341,126 @@ python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 validate --snapshot 
 python3 -m tushare_mirror --root /tmp/tushare-mirror-phase2 show-jobs --limit 50
 ```
 
+
+## Phase 2.1 Scoped Backfill Planner
+
+Phase 2.1 adds controlled scoped backfill planning for existing low-risk date
+series endpoints. It is not a full mirror and it does not infer full history,
+all stocks, all endpoints, or trading calendars from the network.
+
+Supported scoped date backfill endpoints:
+
+- `daily`
+- `adj_factor`
+- `daily_basic`
+- `weekly`
+- `monthly`
+- `suspend_d`
+
+Unsupported in Phase 2.1: `stock_basic`, `trade_cal`, `namechange`, `hs_const`,
+`stk_managers`, and `stk_rewards`. These require snapshot, calendar, code, or
+period-specific planning and should not be routed through date-only backfill.
+
+`backfill-plan` is always dry-run. It never sends Tushare requests and does not
+write raw/lake/job/file/snapshot rows:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill backfill-plan \
+  --api daily \
+  --dates 20250102,20250103 \
+  --max-jobs 2
+
+python3 -m tushare_mirror --root /tmp/tushare-backfill backfill-plan \
+  --api weekly \
+  --start-date 20250102 \
+  --end-date 20250106 \
+  --max-jobs 3
+```
+
+`backfill` also defaults to dry-run. It uses the same output shape as
+`backfill-plan` unless `--execute` is present:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill backfill \
+  --api daily \
+  --dates 20250102,20250103 \
+  --max-jobs 2
+```
+
+Real execution requires both `--execute` and an explicit `--max-jobs`. Phase 2.1
+refuses to execute more than 20 jobs in one command and provides no `--force`:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill backfill \
+  --api daily \
+  --dates 20250102,20250103 \
+  --max-jobs 2 \
+  --execute
+```
+
+Execution is serial. Each date becomes one `trade_date` job, and each job uses
+the existing fetch/staged write/schema/snapshot path. Existing active data is
+skipped. Failed jobs can be retried. Quarantined jobs are blocked by default and
+must be handled manually.
+
+Optional validation checks only the target API latest snapshot, not all API
+latest snapshots:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill backfill \
+  --api daily \
+  --dates 20250102,20250103 \
+  --max-jobs 2 \
+  --execute \
+  --validate-latest
+```
+
+`--trading-days-only` reads local `trade_cal` lake data. It does not request
+Tushare. If no local `trade_cal` latest snapshot exists, the planner fails and
+asks you to fetch a small calendar range first:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill fetch \
+  --api trade_cal \
+  --params '{"exchange":"SSE","start_date":"20250101","end_date":"20250131"}'
+
+python3 -m tushare_mirror --root /tmp/tushare-backfill backfill-plan \
+  --api daily \
+  --start-date 20250101 \
+  --end-date 20250110 \
+  --trading-days-only \
+  --max-jobs 10
+```
+
+Use observability commands after an executed scoped backfill:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-backfill show-runs --api daily --limit 20
+python3 -m tushare_mirror --root /tmp/tushare-backfill show-jobs --api daily --limit 20
+python3 -m tushare_mirror --root /tmp/tushare-backfill show-snapshots --api daily --latest
+python3 -m tushare_mirror --root /tmp/tushare-backfill validate --api daily --snapshot latest
+python3 -m tushare_mirror --root /tmp/tushare-backfill list-files --api daily --snapshot latest
+```
+
+Opt-in real smoke commands are intentionally small and should only be run after
+explicit confirmation:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-backfill-smoke init-catalog
+python3 -m tushare_mirror --root /tmp/tushare-mirror-backfill-smoke backfill-plan \
+  --api daily \
+  --dates 20250102,20250103 \
+  --max-jobs 2
+python3 -m tushare_mirror --root /tmp/tushare-mirror-backfill-smoke backfill \
+  --api daily \
+  --dates 20250102,20250103 \
+  --max-jobs 2 \
+  --execute
+```
+
+Do not use Phase 2.1 commands to run a full mirror, loop all historical dates,
+loop all stocks, or run all endpoints.
+
 ## Real Smoke Script
 
 The repository includes an opt-in real smoke script. It is not run by unittest or
