@@ -140,5 +140,32 @@ class Phase211BackupNoRecordValidateTests(unittest.TestCase):
         self.assertEqual(after["validation_failures"], before["validation_failures"] + 1)
 
 
+    def test_backup_root_read_only_observability_commands_preserve_manifest_checksum(self):
+        self.seed_source()
+        backup_root = self.backup_to()
+        catalog_path = backup_root / "_catalog" / "catalog.sqlite"
+        manifest_catalog_hash = json.loads((backup_root / "manifest.json").read_text())["catalog"]["sha256"]
+        before = self.counts(backup_root)
+
+        commands = [
+            ("catalog-version",),
+            ("catalog-inspect",),
+            ("show-snapshots", "--latest"),
+            ("show-runs", "--limit", "20"),
+            ("show-jobs", "--limit", "20"),
+            ("show-validations", "--limit", "20"),
+            ("show-permissions", "--limit", "20"),
+            ("list-files", "--api", "daily_basic", "--snapshot", "latest"),
+            ("coverage", "--api", "daily_basic", "--dates", "20250102"),
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.run_cli(backup_root, *command)
+                self.assertEqual(self.counts(backup_root), before)
+                self.assertEqual(sha256_file(catalog_path), manifest_catalog_hash)
+                self.assertEqual(RestoreChecker().check(backup_root).status, "succeeded")
+
+
+
 if __name__ == "__main__":
     unittest.main()

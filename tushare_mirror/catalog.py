@@ -289,13 +289,11 @@ class CatalogStore:
             conn.execute(f"alter table {table} add column {column} {definition}")
 
     def schema_version(self) -> int:
-        self.init()
         with self.connect() as conn:
             row = conn.execute("select value from catalog_meta where key='catalog_schema_version'").fetchone()
         return int(row[0]) if row else 0
 
     def backup(self, output_path: Path | str) -> Path:
-        self.init()
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         source = self.connect()
@@ -594,7 +592,6 @@ class CatalogStore:
             )
 
     def inspect_summary(self) -> dict[str, Any]:
-        self.init()
         latest = self.latest_snapshot()
         with self.connect() as conn:
             latest_backfill = conn.execute("select run_id from ingestion_runs where run_type='backfill' order by started_at desc limit 1").fetchone()

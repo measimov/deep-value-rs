@@ -145,7 +145,7 @@ def _probe_request_with_retry(client: TushareClient, api_name: str, params: dict
 
 def cmd_probe(args) -> int:
     root = Path(args.root)
-    catalog = _ensure_catalog(root)
+    catalog = _open_existing_catalog(root)
     token = require_token()
     client = TushareClient(token)
     endpoints = []
@@ -185,7 +185,7 @@ def cmd_probe(args) -> int:
 
 def cmd_fetch(args) -> int:
     root = Path(args.root)
-    catalog = _ensure_catalog(root)
+    catalog = _open_existing_catalog(root)
     params = json.loads(args.params)
     store = FileLakeStore(root, catalog)
     if args.dry_run:
@@ -227,7 +227,7 @@ def _backfill_max_jobs(args, execute: bool) -> int:
 
 def _make_backfill_plan(args, execute: bool):
     root = Path(args.root)
-    catalog = _ensure_catalog(root)
+    catalog = _open_existing_catalog(root)
     try:
         if args.trading_days_only and args.api not in TRADING_DAY_BACKFILL_APIS:
             raise ValueError("trading-days-only is only supported for daily-like endpoints in Phase 2.4")
@@ -568,7 +568,7 @@ def _visible_lake_files_for_snapshot(catalog: CatalogStore, snapshot_id: str) ->
 
 def cmd_list_files(args) -> int:
     root = Path(args.root)
-    catalog = _ensure_catalog(root)
+    catalog = _open_existing_catalog(root)
     if args.api:
         files = LakeReader(root, catalog).list_active_files(args.api, args.snapshot)
     else:
@@ -585,7 +585,7 @@ def cmd_list_files(args) -> int:
 
 
 def cmd_catalog_inspect(args) -> int:
-    catalog = _ensure_catalog(Path(args.root))
+    catalog = _open_existing_catalog(Path(args.root))
     summary = catalog.inspect_summary()
     if args.json:
         _print_json(summary)
@@ -595,7 +595,7 @@ def cmd_catalog_inspect(args) -> int:
 
 
 def cmd_show_runs(args) -> int:
-    rows = _ensure_catalog(Path(args.root)).list_runs(args.api, args.limit)
+    rows = _open_existing_catalog(Path(args.root)).list_runs(args.api, args.limit)
     if args.json:
         _print_json(rows)
     else:
@@ -671,7 +671,7 @@ def _backfill_run_items(root: Path, catalog: CatalogStore, run: dict[str, Any]) 
 
 def cmd_show_run(args) -> int:
     root = Path(args.root)
-    catalog = _ensure_catalog(root)
+    catalog = _open_existing_catalog(root)
     run = catalog.get_run(args.run_id)
     if not run:
         raise SystemExit(f'run not found: {args.run_id}')
@@ -710,7 +710,7 @@ def cmd_show_run(args) -> int:
 
 
 def cmd_show_jobs(args) -> int:
-    rows = _ensure_catalog(Path(args.root)).list_jobs(args.api, args.limit)
+    rows = _open_existing_catalog(Path(args.root)).list_jobs(args.api, args.limit)
     if args.json:
         _print_json(rows)
     else:
@@ -719,7 +719,7 @@ def cmd_show_jobs(args) -> int:
 
 
 def cmd_show_snapshots(args) -> int:
-    rows = _ensure_catalog(Path(args.root)).list_snapshots(args.api, args.limit, latest=args.latest)
+    rows = _open_existing_catalog(Path(args.root)).list_snapshots(args.api, args.limit, latest=args.latest)
     if args.json:
         _print_json(rows)
     else:
@@ -728,7 +728,7 @@ def cmd_show_snapshots(args) -> int:
 
 
 def cmd_show_validations(args) -> int:
-    rows = _ensure_catalog(Path(args.root)).list_validations(args.api, args.limit)
+    rows = _open_existing_catalog(Path(args.root)).list_validations(args.api, args.limit)
     if args.json:
         _print_json(rows)
     else:
@@ -737,7 +737,7 @@ def cmd_show_validations(args) -> int:
 
 
 def cmd_show_permissions(args) -> int:
-    rows = _ensure_catalog(Path(args.root)).list_permissions(args.api, args.limit)
+    rows = _open_existing_catalog(Path(args.root)).list_permissions(args.api, args.limit)
     if args.json:
         _print_json(rows)
     else:
@@ -746,14 +746,14 @@ def cmd_show_permissions(args) -> int:
 
 
 def cmd_catalog_backup(args) -> int:
-    catalog = _ensure_catalog(Path(args.root))
+    catalog = _open_existing_catalog(Path(args.root))
     out = catalog.backup(args.output)
     print(f'backup={out}')
     return 0
 
 
 def cmd_catalog_version(args) -> int:
-    catalog = _ensure_catalog(Path(args.root))
+    catalog = _open_existing_catalog(Path(args.root))
     print(catalog.schema_version())
     return 0
 
