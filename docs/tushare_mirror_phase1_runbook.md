@@ -842,3 +842,39 @@ A successful local backup looks like:
 This is a local backup and restore-check MVP. It is not encrypted, compressed,
 incremental, or remote. Do not treat it as full disaster recovery until a remote
 backup policy is designed and tested separately.
+
+### Backup root as read-only/restored root
+
+A successful `backup` directory is self-contained for local read checks. After
+`restore-check` succeeds, you can point the normal CLI at the backup root:
+
+```bash
+python3 -m tushare_mirror --root /tmp/tushare-mirror-backup catalog-inspect
+python3 -m tushare_mirror --root /tmp/tushare-mirror-backup show-snapshots --latest
+python3 -m tushare_mirror --root /tmp/tushare-mirror-backup list-files --api daily_basic --snapshot latest
+python3 -m tushare_mirror --root /tmp/tushare-mirror-backup coverage \
+  --api daily_basic \
+  --start-date 20250101 \
+  --end-date 20250110 \
+  --trading-days-only \
+  --calendar-exchange SSE
+```
+
+`restore-check` and `validate` are different operations:
+
+- `restore-check --backup <path>` validates the backup artifact against
+  `manifest.json`. It does not write `validation_runs`, does not restore into a
+  source root, and does not depend on the original source root.
+- `validate --snapshot latest` with `--root <backup>` validates the backup as a
+  normal root and writes new `validation_runs` into the backup catalog. This is
+  useful when you intentionally want to prove the backup root can be queried and
+  validated, but it changes the backup catalog file.
+
+The manifest `source_root` field is provenance only. `restore-check`,
+`list-files`, `LakeReader`, and `coverage` must resolve data files from the
+backup root using relative paths such as `backup_relative_path`; they must not
+read files from `source_root`. Tokens are not stored in `manifest.json`, raw
+archive files, or the copied catalog.
+
+Phase 2.9 still does not implement `restore`, `restore-copy`, or restore into an
+active source root. It also does not add remote disaster recovery.

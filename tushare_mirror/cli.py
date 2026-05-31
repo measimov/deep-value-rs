@@ -410,6 +410,12 @@ def cmd_restore_check(args) -> int:
         _print_json(result.to_dict())
     else:
         _print_key_values(result.summary())
+        _print_key_values({
+            'restore_check_scope': 'validates backup artifact only',
+            'restore_check_writes': 'none',
+            'read_as_root': 'use --root <backup> with catalog-inspect/list-files/coverage',
+            'validate_note': 'validate on a backup root writes validation_runs into that backup catalog',
+        })
         if result.failures:
             _print_table(result.failures, ['reason', 'file_id', 'path', 'expected', 'actual', 'details'])
     return 0 if result.status == 'succeeded' else 1
