@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from tushare_mirror.catalog import CatalogStore
-from tushare_mirror.client import QueryResult, TushareError
+from tushare_mirror.client import QueryResult, TushareError, TUSHARE_API_URL
 from tushare_mirror.endpoints import load_into_catalog
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
@@ -90,6 +90,9 @@ class Phase11HardeningTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             check=True,
         )
+
+    def test_default_tushare_api_url_uses_https(self):
+        self.assertEqual(TUSHARE_API_URL, "https://api.tushare.pro")
 
     def test_catalog_cli_dry_run_version_and_backup(self):
         self.catalog.record_probe(

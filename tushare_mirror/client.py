@@ -8,7 +8,7 @@ from typing import Any, Iterable, Mapping
 
 from .errors import classify_tushare_response
 
-TUSHARE_API_URL = "http://api.tushare.pro"
+TUSHARE_API_URL = "https://api.tushare.pro"
 
 
 class TushareError(RuntimeError):
