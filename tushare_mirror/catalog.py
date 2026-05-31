@@ -7,9 +7,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .hashing import params_hash
 from .io_utils import now_utc
 
-CATALOG_SCHEMA_VERSION = 1
+CATALOG_SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 pragma journal_mode = wal;
@@ -49,6 +50,8 @@ create table if not exists permission_probes (
     status text not null,
     probe_params_json text not null,
     probe_fields_json text not null,
+    row_count integer,
+    error_type text,
     error_message text,
     raw_response_json text,
     probed_at text not null,
@@ -60,16 +63,20 @@ create index if not exists idx_permission_probes_api_token
 
 create table if not exists ingestion_runs (
     run_id text primary key,
+    run_type text not null default 'fetch',
     status text not null,
     started_at text not null,
     finished_at text,
-    error_message text
+    last_error_type text,
+    error_message text,
+    summary_json text
 );
 
 create table if not exists jobs (
     job_key text primary key,
     run_id text,
     api_name text not null,
+    params_hash text,
     params_json text not null,
     fields_json text not null,
     status text not null,
@@ -78,6 +85,7 @@ create table if not exists jobs (
     source_item_count integer,
     raw_event_count integer,
     error_event_count integer,
+    last_error_type text,
     last_error text,
     created_at text not null,
     updated_at text not null
@@ -255,10 +263,51 @@ class CatalogStore:
     def init(self) -> None:
         with self.transaction() as conn:
             conn.executescript(SCHEMA_SQL)
+            self._migrate(conn)
             conn.execute(
                 "insert or replace into catalog_meta(key, value) values('catalog_schema_version', ?)",
                 (str(CATALOG_SCHEMA_VERSION),),
             )
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        self._add_column(conn, "permission_probes", "row_count", "integer")
+        self._add_column(conn, "permission_probes", "error_type", "text")
+        self._add_column(conn, "ingestion_runs", "run_type", "text not null default 'fetch'")
+        self._add_column(conn, "ingestion_runs", "last_error_type", "text")
+        self._add_column(conn, "ingestion_runs", "summary_json", "text")
+        self._add_column(conn, "jobs", "params_hash", "text")
+        self._add_column(conn, "jobs", "last_error_type", "text")
+        for row in conn.execute("select job_key, params_json from jobs where params_hash is null").fetchall():
+            conn.execute(
+                "update jobs set params_hash=? where job_key=?",
+                (params_hash(loads(row["params_json"]) or {}), row["job_key"]),
+            )
+
+    def _add_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        cols = {r[1] for r in conn.execute(f"pragma table_info({table})").fetchall()}
+        if column not in cols:
+            conn.execute(f"alter table {table} add column {column} {definition}")
+
+    def schema_version(self) -> int:
+        self.init()
+        with self.connect() as conn:
+            row = conn.execute("select value from catalog_meta where key='catalog_schema_version'").fetchone()
+        return int(row[0]) if row else 0
+
+    def backup(self, output_path: Path | str) -> Path:
+        self.init()
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        source = self.connect()
+        try:
+            dest = sqlite3.connect(out)
+            try:
+                source.backup(dest)
+            finally:
+                dest.close()
+        finally:
+            source.close()
+        return out
 
     def upsert_endpoint(self, cfg: Mapping[str, Any], table_id: str, partition_spec_id: str) -> None:
         now = now_utc()
@@ -319,27 +368,50 @@ class CatalogStore:
                 rows = conn.execute("select * from endpoints order by api_name").fetchall()
         return [dict(r) for r in rows]
 
-    def record_probe(self, api_name: str, token_hash: str, status: str, params: Mapping[str, Any], fields: Iterable[str], valid_until: str, error_message: str | None = None, raw_response: Mapping[str, Any] | None = None) -> str:
+    def latest_permission(self, api_name: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "select * from permission_probes where api_name=? order by probed_at desc limit 1",
+                (api_name,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def record_probe(
+        self,
+        api_name: str,
+        token_hash: str,
+        status: str,
+        params: Mapping[str, Any],
+        fields: Iterable[str],
+        valid_until: str,
+        error_message: str | None = None,
+        raw_response: Mapping[str, Any] | None = None,
+        row_count: int | None = None,
+        error_type: str | None = None,
+    ) -> str:
         probe_id = "probe_" + uuid.uuid4().hex
         with self.transaction() as conn:
             conn.execute(
                 """
-                insert into permission_probes(probe_id,api_name,token_hash,status,probe_params_json,probe_fields_json,error_message,raw_response_json,probed_at,valid_until)
-                values(?,?,?,?,?,?,?,?,?,?)
+                insert into permission_probes(probe_id,api_name,token_hash,status,probe_params_json,probe_fields_json,row_count,error_type,error_message,raw_response_json,probed_at,valid_until)
+                values(?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
-                (probe_id, api_name, token_hash, status, dumps(params), dumps(list(fields)), error_message, dumps(raw_response) if raw_response else None, now_utc(), valid_until),
+                (probe_id, api_name, token_hash, status, dumps(params), dumps(list(fields)), row_count, error_type, error_message, dumps(raw_response) if raw_response else None, now_utc(), valid_until),
             )
         return probe_id
 
-    def create_run(self) -> str:
+    def create_run(self, run_type: str = "fetch") -> str:
         run_id = "run_" + uuid.uuid4().hex
         with self.transaction() as conn:
-            conn.execute("insert into ingestion_runs(run_id,status,started_at) values(?,?,?)", (run_id, "running", now_utc()))
+            conn.execute("insert into ingestion_runs(run_id,run_type,status,started_at) values(?,?,?,?)", (run_id, run_type, "running", now_utc()))
         return run_id
 
-    def finish_run(self, run_id: str, status: str, error_message: str | None = None) -> None:
+    def finish_run(self, run_id: str, status: str, error_message: str | None = None, error_type: str | None = None, summary: Mapping[str, Any] | None = None) -> None:
         with self.transaction() as conn:
-            conn.execute("update ingestion_runs set status=?, finished_at=?, error_message=? where run_id=?", (status, now_utc(), error_message, run_id))
+            conn.execute(
+                "update ingestion_runs set status=?, finished_at=?, error_message=?, last_error_type=?, summary_json=? where run_id=?",
+                (status, now_utc(), error_message, error_type, dumps(summary) if summary is not None else None, run_id),
+            )
 
     def get_job(self, job_key: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -351,27 +423,28 @@ class CatalogStore:
         with self.transaction() as conn:
             conn.execute(
                 """
-                insert into jobs(job_key,run_id,api_name,params_json,fields_json,status,attempts,created_at,updated_at)
-                values(?,?,?,?,?,?,1,?,?)
+                insert into jobs(job_key,run_id,api_name,params_hash,params_json,fields_json,status,attempts,created_at,updated_at)
+                values(?,?,?,?,?,?,?,1,?,?)
                 on conflict(job_key) do update set
                   run_id=excluded.run_id, status=excluded.status, attempts=jobs.attempts+1,
+                  params_hash=excluded.params_hash, last_error_type=null, last_error=null,
                   updated_at=excluded.updated_at
                 """,
-                (job_key, run_id, api_name, dumps(params), dumps(list(fields)), status, now, now),
+                (job_key, run_id, api_name, params_hash(params), dumps(params), dumps(list(fields)), status, now, now),
             )
 
     def update_job_done(self, job_key: str, record_count: int, source_item_count: int, raw_event_count: int, error_event_count: int) -> None:
         with self.transaction() as conn:
             conn.execute(
                 """
-                update jobs set status='done', record_count=?, source_item_count=?, raw_event_count=?, error_event_count=?, updated_at=? where job_key=?
+                update jobs set status='done', record_count=?, source_item_count=?, raw_event_count=?, error_event_count=?, last_error_type=null, last_error=null, updated_at=? where job_key=?
                 """,
                 (record_count, source_item_count, raw_event_count, error_event_count, now_utc(), job_key),
             )
 
-    def update_job_failed(self, job_key: str, error: str) -> None:
+    def update_job_failed(self, job_key: str, error: str, error_type: str | None = None) -> None:
         with self.transaction() as conn:
-            conn.execute("update jobs set status='failed', last_error=?, updated_at=? where job_key=?", (error, now_utc(), job_key))
+            conn.execute("update jobs set status='failed', last_error_type=?, last_error=?, updated_at=? where job_key=?", (error_type, error, now_utc(), job_key))
 
     def insert_schema(self, schema_id: str, api_name: str, fields: Iterable[str], logical_types: Mapping[str, str], nullable: Mapping[str, bool]) -> None:
         with self.transaction() as conn:
@@ -443,6 +516,13 @@ class CatalogStore:
             rows = conn.execute(sql, args).fetchall()
         return [dict(r) for r in rows]
 
+    def active_files_for_job(self, job_key: str, api_name: str, content_type: str | None = None) -> list[dict[str, Any]]:
+        snapshot = self.latest_snapshot(api_name)
+        if not snapshot:
+            return []
+        rows = self.files_for_snapshot(snapshot["snapshot_id"], content_type=content_type)
+        return [row for row in rows if row.get("job_key") == job_key and row.get("status") not in {"quarantined", "missing", "deleted", "deleted_pending"}]
+
     def commit_snapshot(self, *, api_name: str, table_id: str, file_ids: Iterable[str], run_id: str, checkpoint_key: str, cursor: str) -> str:
         new_file_ids = list(file_ids)
         parent = self.latest_snapshot(api_name)
@@ -485,3 +565,107 @@ class CatalogStore:
                 "insert into quarantine_files(quarantine_id,run_id,job_key,api_name,reason,relative_path,size_bytes,sha256,created_at) values(?,?,?,?,?,?,?,?,?)",
                 ("q_" + uuid.uuid4().hex, run_id, job_key, api_name, reason, relative_path, size_bytes, sha256, now_utc()),
             )
+
+    def inspect_summary(self) -> dict[str, Any]:
+        self.init()
+        latest = self.latest_snapshot()
+        with self.connect() as conn:
+            return {
+                "catalog_path": str(self.db_path),
+                "schema_version": self.schema_version(),
+                "endpoint_count": conn.execute("select count(*) from endpoints").fetchone()[0],
+                "run_count": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+                "job_count": conn.execute("select count(*) from jobs").fetchone()[0],
+                "file_count": conn.execute("select count(*) from files").fetchone()[0],
+                "snapshot_count": conn.execute("select count(*) from snapshots").fetchone()[0],
+                "latest_snapshot": latest["snapshot_id"] if latest else None,
+                "validation_count": conn.execute("select count(*) from validation_runs").fetchone()[0],
+                "quarantine_count": conn.execute("select count(*) from quarantine_files").fetchone()[0],
+            }
+
+    def list_runs(self, api_name: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        where = ""
+        args: list[Any] = []
+        if api_name:
+            where = "where exists (select 1 from jobs j where j.run_id=r.run_id and j.api_name=?)"
+            args.append(api_name)
+        args.append(limit)
+        sql = f"""
+            select r.run_id,r.run_type,r.status,r.started_at,r.finished_at,r.last_error_type,r.error_message,r.summary_json,
+                   (select count(*) from jobs j where j.run_id=r.run_id) as job_count
+            from ingestion_runs r {where}
+            order by r.started_at desc limit ?
+        """
+        with self.connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        result = []
+        for row in rows:
+            d = dict(row)
+            d["summary"] = loads(d.pop("summary_json"))
+            result.append(d)
+        return result
+
+    def list_jobs(self, api_name: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        args: list[Any] = []
+        sql = """
+            select j.job_key,j.run_id,j.api_name,j.status,j.params_hash,j.record_count,j.raw_event_count,
+                   r.started_at,r.finished_at,j.last_error_type,j.last_error
+            from jobs j left join ingestion_runs r on r.run_id=j.run_id
+        """
+        if api_name:
+            sql += " where j.api_name=?"
+            args.append(api_name)
+        sql += " order by j.updated_at desc limit ?"
+        args.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_snapshots(self, api_name: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        args: list[Any] = []
+        sql = """
+            select s.snapshot_id,s.table_id,s.api_name,s.status,s.created_at,s.parent_snapshot_id,
+                   count(sf.file_id) as file_count,
+                   coalesce(sum(case when f.content_type='lake' then f.record_count else 0 end), 0) as record_count
+            from snapshots s
+            left join snapshot_files sf on sf.snapshot_id=s.snapshot_id
+            left join files f on f.file_id=sf.file_id
+        """
+        if api_name:
+            sql += " where s.api_name=?"
+            args.append(api_name)
+        sql += " group by s.snapshot_id order by s.sequence_number desc limit ?"
+        args.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_validations(self, api_name: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        args: list[Any] = []
+        sql = """
+            select v.validation_run_id as validation_id,v.snapshot_id,v.status,v.started_at,v.finished_at,
+                   json_extract(v.summary_json, '$.files') as checked_file_count,
+                   json_extract(v.summary_json, '$.failures') as failure_count,
+                   v.api_name
+            from validation_runs v
+        """
+        if api_name:
+            sql += " where v.api_name=?"
+            args.append(api_name)
+        sql += " order by v.started_at desc limit ?"
+        args.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_permissions(self, api_name: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        args: list[Any] = []
+        sql = "select api_name,status,probed_at,valid_until,row_count,error_type,error_message from permission_probes"
+        if api_name:
+            sql += " where api_name=?"
+            args.append(api_name)
+        sql += " order by probed_at desc limit ?"
+        args.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]

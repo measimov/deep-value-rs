@@ -3,14 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .catalog import CatalogStore
 from .client import TushareClient, classify_probe_response
 from .endpoints import load_into_catalog
+from .errors import ErrorType, classify_exception
 from .hashing import token_hash
 from .reader import LakeReader
 from .store import FileLakeStore
@@ -47,6 +47,41 @@ def require_token() -> str:
     return token
 
 
+def _print_json(value: Any) -> None:
+    print(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2))
+
+
+def _stringify(value: Any) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
+def _print_table(rows: Iterable[dict[str, Any]], columns: list[str]) -> None:
+    materialized = list(rows)
+    widths = {col: len(col) for col in columns}
+    for row in materialized:
+        for col in columns:
+            widths[col] = max(widths[col], min(len(_stringify(row.get(col))), 80))
+    print('  '.join(col.ljust(widths[col]) for col in columns))
+    print('  '.join('-' * widths[col] for col in columns))
+    for row in materialized:
+        cells = []
+        for col in columns:
+            value = _stringify(row.get(col))
+            if len(value) > 80:
+                value = value[:77] + '...'
+            cells.append(value.ljust(widths[col]))
+        print('  '.join(cells))
+    print(f'total={len(materialized)}')
+
+
+def _print_key_values(row: dict[str, Any]) -> None:
+    _print_table([{'key': k, 'value': v} for k, v in row.items()], ['key', 'value'])
+
+
 def cmd_init_catalog(args) -> int:
     root = Path(args.root)
     catalog = CatalogStore(root)
@@ -80,39 +115,63 @@ def cmd_probe(args) -> int:
         raise SystemExit('probe requires --api, --family, or --all')
     thash = token_hash(token)
     exit_code = 0
+    outputs: list[dict[str, Any]] = []
     for api_name in endpoints:
         cfg = catalog.get_endpoint_config(api_name)
         probe = cfg.get('probe') or {}
         params = probe.get('params') or {}
         fields = probe.get('fields') or cfg.get('default_fields') or []
+        response: dict[str, Any]
         try:
             response = client.request(api_name, params, fields)
             status, error = classify_probe_response(response)
         except Exception as e:
             response = {'error': str(e)}
-            status, error = 'network_error', str(e)
+            err = classify_exception(e)
+            status, error = err.value, str(e)
+        row_count = len(((response.get('data') or {}).get('items')) or [])
+        error_type = None if status in {'accessible', 'empty_but_accessible'} else status
         if status == 'empty_but_accessible' and not probe.get('allow_empty_probe'):
             exit_code = 1
         if status not in {'accessible', 'empty_but_accessible'}:
             exit_code = 1
-        catalog.record_probe(api_name, thash, status, params, fields, valid_until_for(status), error, response)
-        print(f'{api_name}: {status}' + (f' ({error})' if error else ''))
+        catalog.record_probe(api_name, thash, status, params, fields, valid_until_for(status), error, response, row_count=row_count, error_type=error_type)
+        outputs.append({'api_name': api_name, 'status': status, 'row_count': row_count, 'error_type': error_type, 'error_message': error})
+    if args.json:
+        _print_json(outputs)
+    else:
+        _print_table(outputs, ['api_name', 'status', 'row_count', 'error_type', 'error_message'])
     return exit_code
 
 
 def cmd_fetch(args) -> int:
     root = Path(args.root)
     catalog = _ensure_catalog(root)
-    token = require_token()
     params = json.loads(args.params)
-    result = FileLakeStore(root, catalog).fetch(args.api, params, TushareClient(token))
-    if result.skipped:
+    store = FileLakeStore(root, catalog)
+    if args.dry_run:
+        plan = store.plan_fetch(args.api, params)
+        if args.json:
+            _print_json(plan)
+        else:
+            _print_key_values(plan)
+        return 0
+    token = require_token()
+    result = store.fetch(args.api, params, TushareClient(token))
+    output = {
+        'run_id': result.run_id,
+        'job_key': result.job_key,
+        'snapshot_id': result.snapshot_id,
+        'record_count': result.record_count,
+        'skipped': result.skipped,
+    }
+    if args.json:
+        _print_json(output)
+    elif result.skipped:
         print(f'skipped existing job: {result.job_key}')
     else:
-        print(f'run_id={result.run_id}')
-        print(f'job_key={result.job_key}')
-        print(f'snapshot_id={result.snapshot_id}')
-        print(f'record_count={result.record_count}')
+        for key, value in output.items():
+            print(f'{key}={value}')
     return 0 if result.snapshot_id or result.skipped else 1
 
 
@@ -121,8 +180,12 @@ def cmd_validate(args) -> int:
     catalog = _ensure_catalog(root)
     validator = Validator(root, catalog)
     ok, validation_run_id = validator.validate_snapshot(args.snapshot, args.api)
-    print(f'validation_run_id={validation_run_id}')
-    print('status=succeeded' if ok else 'status=failed')
+    output = {'validation_run_id': validation_run_id, 'status': 'succeeded' if ok else 'failed'}
+    if args.json:
+        _print_json(output)
+    else:
+        print(f"validation_run_id={validation_run_id}")
+        print(f"status={output['status']}")
     return 0 if ok else 1
 
 
@@ -130,10 +193,85 @@ def cmd_list_files(args) -> int:
     root = Path(args.root)
     catalog = _ensure_catalog(root)
     files = LakeReader(root, catalog).list_active_files(args.api, args.snapshot)
-    for f in files:
-        print(f"{f['file_id']} {f['content_type']} {f['record_count']} {f['relative_path']}")
-    print(f'total={len(files)}')
+    if args.json:
+        _print_json(files)
+    else:
+        _print_table(files, ['file_id', 'content_type', 'record_count', 'status', 'relative_path'])
     return 0
+
+
+def cmd_catalog_inspect(args) -> int:
+    catalog = _ensure_catalog(Path(args.root))
+    summary = catalog.inspect_summary()
+    if args.json:
+        _print_json(summary)
+    else:
+        _print_key_values(summary)
+    return 0
+
+
+def cmd_show_runs(args) -> int:
+    rows = _ensure_catalog(Path(args.root)).list_runs(args.api, args.limit)
+    if args.json:
+        _print_json(rows)
+    else:
+        _print_table(rows, ['run_id', 'run_type', 'status', 'started_at', 'finished_at', 'job_count', 'summary'])
+    return 0
+
+
+def cmd_show_jobs(args) -> int:
+    rows = _ensure_catalog(Path(args.root)).list_jobs(args.api, args.limit)
+    if args.json:
+        _print_json(rows)
+    else:
+        _print_table(rows, ['job_key', 'run_id', 'api_name', 'status', 'params_hash', 'record_count', 'raw_event_count', 'started_at', 'finished_at', 'last_error_type', 'last_error'])
+    return 0
+
+
+def cmd_show_snapshots(args) -> int:
+    rows = _ensure_catalog(Path(args.root)).list_snapshots(args.api, args.limit)
+    if args.json:
+        _print_json(rows)
+    else:
+        _print_table(rows, ['snapshot_id', 'table_id', 'api_name', 'status', 'created_at', 'parent_snapshot_id', 'file_count', 'record_count'])
+    return 0
+
+
+def cmd_show_validations(args) -> int:
+    rows = _ensure_catalog(Path(args.root)).list_validations(args.api, args.limit)
+    if args.json:
+        _print_json(rows)
+    else:
+        _print_table(rows, ['validation_id', 'snapshot_id', 'status', 'started_at', 'finished_at', 'checked_file_count', 'failure_count'])
+    return 0
+
+
+def cmd_show_permissions(args) -> int:
+    rows = _ensure_catalog(Path(args.root)).list_permissions(args.api, args.limit)
+    if args.json:
+        _print_json(rows)
+    else:
+        _print_table(rows, ['api_name', 'status', 'probed_at', 'valid_until', 'row_count', 'error_type', 'error_message'])
+    return 0
+
+
+def cmd_catalog_backup(args) -> int:
+    catalog = _ensure_catalog(Path(args.root))
+    out = catalog.backup(args.output)
+    print(f'backup={out}')
+    return 0
+
+
+def cmd_catalog_version(args) -> int:
+    catalog = _ensure_catalog(Path(args.root))
+    print(catalog.schema_version())
+    return 0
+
+
+def _add_observe_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument('--api')
+    p.add_argument('--limit', type=int, default=20)
+    p.add_argument('--json', action='store_true')
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -148,23 +286,59 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--api')
     p.add_argument('--family')
     p.add_argument('--all', action='store_true')
+    p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_probe)
 
     p = sub.add_parser('fetch')
     p.add_argument('--api', required=True)
     p.add_argument('--params', required=True)
+    p.add_argument('--dry-run', action='store_true')
+    p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_fetch)
 
     p = sub.add_parser('validate')
     p.add_argument('--snapshot', default='latest')
     p.add_argument('--api')
     p.add_argument('--all-active', action='store_true')
+    p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_validate)
 
     p = sub.add_parser('list-files')
     p.add_argument('--api', required=True)
     p.add_argument('--snapshot', default='latest')
+    p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_list_files)
+
+    p = sub.add_parser('catalog-inspect')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_catalog_inspect)
+
+    p = sub.add_parser('show-runs')
+    _add_observe_args(p)
+    p.set_defaults(func=cmd_show_runs)
+
+    p = sub.add_parser('show-jobs')
+    _add_observe_args(p)
+    p.set_defaults(func=cmd_show_jobs)
+
+    p = sub.add_parser('show-snapshots')
+    _add_observe_args(p)
+    p.set_defaults(func=cmd_show_snapshots)
+
+    p = sub.add_parser('show-validations')
+    _add_observe_args(p)
+    p.set_defaults(func=cmd_show_validations)
+
+    p = sub.add_parser('show-permissions')
+    _add_observe_args(p)
+    p.set_defaults(func=cmd_show_permissions)
+
+    p = sub.add_parser('catalog-backup')
+    p.add_argument('--output', required=True)
+    p.set_defaults(func=cmd_catalog_backup)
+
+    p = sub.add_parser('catalog-version')
+    p.set_defaults(func=cmd_catalog_version)
     return parser
 
 

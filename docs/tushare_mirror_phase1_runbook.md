@@ -20,6 +20,9 @@ Implemented:
 - Active table/API snapshot commit after validation.
 - Checksum, size, record-count, raw-event-count, and Parquet footer validation.
 - LakeReader reads the latest active snapshot.
+- Catalog observability commands for runs/jobs/snapshots/validations/permissions.
+- Fetch dry-run job plan.
+- SQLite catalog schema version and backup command.
 
 Not implemented in Phase 1:
 
@@ -29,7 +32,7 @@ Not implemented in Phase 1:
 - Financial PIT derived loaders.
 - PostgreSQL derived loader.
 - Compaction executor.
-- Backup/restore executor.
+- Full data backup/restore executor beyond SQLite catalog backup.
 - Iceberg/Delta metadata writer.
 - Multi-writer concurrency.
 - Remote object storage.
@@ -73,6 +76,21 @@ daily: accessible
 An empty but permission-valid response is recorded as `empty_but_accessible` only
 when endpoint config allows it.
 
+## Fetch Dry Run
+
+Use dry-run to inspect the job plan without sending a Tushare request and without
+writing raw, lake, job, checkpoint, or snapshot records:
+
+```bash
+python -m tushare_mirror --root /tmp/tushare-mirror-real fetch --api daily --params '{"trade_date":"20250102"}' --dry-run
+python -m tushare_mirror --root /tmp/tushare-mirror-real fetch --api daily --params '{"trade_date":"20250102"}' --dry-run --json
+```
+
+The plan includes `api_name`, `params_hash`, `job_key`, volume class, partition
+values, expected raw path, expected lake path prefix, latest permission status,
+whether the permission probe is expired, whether active data already covers the
+job, and planned actions.
+
 ## Fetch One Trade Date
 
 ```bash
@@ -111,9 +129,35 @@ Validation checks:
 
 ```bash
 python -m tushare_mirror --root /tmp/tushare-mirror-real list-files --api daily --snapshot latest
+python -m tushare_mirror --root /tmp/tushare-mirror-real list-files --api daily --snapshot latest --json
 ```
 
 The command lists active lake files for the latest `daily` snapshot.
+
+## Inspect Catalog
+
+```bash
+python -m tushare_mirror --root /tmp/tushare-mirror-real catalog-inspect
+python -m tushare_mirror --root /tmp/tushare-mirror-real show-runs --api daily --limit 20
+python -m tushare_mirror --root /tmp/tushare-mirror-real show-jobs --api daily --limit 20
+python -m tushare_mirror --root /tmp/tushare-mirror-real show-snapshots --api daily --limit 20
+python -m tushare_mirror --root /tmp/tushare-mirror-real show-validations --api daily --limit 20
+python -m tushare_mirror --root /tmp/tushare-mirror-real show-permissions --api daily --limit 20
+```
+
+Each command supports `--json` for machine-readable output. These commands read
+from the local SQLite catalog and do not require an external database client.
+
+## Catalog Version And Backup
+
+```bash
+python -m tushare_mirror --root /tmp/tushare-mirror-real catalog-version
+python -m tushare_mirror --root /tmp/tushare-mirror-real catalog-backup --output /tmp/tushare-catalog-backup.sqlite
+```
+
+The MVP SQLite catalog is a local single-writer catalog. Catalog mutations use
+SQLite transactions. The backup command uses the SQLite backup API rather than
+copying a live WAL database file directly.
 
 ## Read Latest Snapshot
 
@@ -142,16 +186,48 @@ rm -rf /tmp/tushare-mirror-real
 Only clean explicit temporary roots. Do not delete `data/tushare/` unless you
 intend to remove local mirror data.
 
-## Real Smoke Test Commands
+## Real Tushare Smoke Test
 
-Run only this single-date sequence for Phase 1 delivery smoke testing:
+This smoke test sends real requests to Tushare. Run it only after confirming the
+token and quota are intended for a single `daily` trade-date check. Do not loop
+dates, do not add endpoints, and do not run a full mirror.
+
+Set the token first:
+
+```bash
+export TUSHARE_TOKEN='<your-token>'
+```
+
+Run only this single-date sequence:
 
 ```bash
 python -m tushare_mirror --root /tmp/tushare-mirror-real init-catalog
 python -m tushare_mirror --root /tmp/tushare-mirror-real probe --api daily
 python -m tushare_mirror --root /tmp/tushare-mirror-real fetch --api daily --params '{"trade_date":"20250102"}'
-python -m tushare_mirror --root /tmp/tushare-mirror-real validate --snapshot latest
+python -m tushare_mirror --root /tmp/tushare-mirror-real validate --snapshot latest --api daily
 python -m tushare_mirror --root /tmp/tushare-mirror-real list-files --api daily --snapshot latest
+python -m tushare_mirror --root /tmp/tushare-mirror-real catalog-inspect
+python -m tushare_mirror --root /tmp/tushare-mirror-real show-jobs --api daily
+python -m tushare_mirror --root /tmp/tushare-mirror-real show-snapshots --api daily
+python -m tushare_mirror --root /tmp/tushare-mirror-real show-validations --api daily
 ```
 
-Do not loop over dates, add endpoints, or run full mirror jobs during Phase 1.
+Expected directories and files include:
+
+- `_catalog/catalog.sqlite`
+- `raw/api=daily/ingest_date=<YYYYMMDD>/job=<job_key>.jsonl.zst`
+- `lake/market=a/domain=stock/api=daily/year=2025/month=01/part-<suffix>.parquet`
+
+If the token is missing, commands that require Tushare access fail before making
+requests with `TUSHARE_TOKEN is required`. If the token lacks permission,
+`probe` records `permission_denied` in `permission_probes`, and `show-permissions`
+shows the status without exposing the token. Rate limiting should appear as
+`rate_limited`. Invalid parameters should appear as `invalid_params`.
+
+Clean the smoke root only when the result is no longer needed:
+
+```bash
+rm -rf /tmp/tushare-mirror-real
+```
+
+Real Tushare probe/fetch was not executed by the unit test suite.

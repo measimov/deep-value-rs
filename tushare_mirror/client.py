@@ -6,6 +6,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
+from .errors import classify_tushare_response
+
 TUSHARE_API_URL = "http://api.tushare.pro"
 
 
@@ -96,20 +98,4 @@ class TushareClient:
 
 
 def classify_probe_response(response: Mapping[str, Any]) -> tuple[str, str | None]:
-    code = response.get("code")
-    msg = str(response.get("msg") or "")
-    msg_lower = msg.lower()
-    if code == 0:
-        items = (((response.get("data") or {}).get("items")) or [])
-        return ("accessible" if items else "empty_but_accessible", None)
-    if "权限" in msg or "permission" in msg_lower or "积分" in msg:
-        return "permission_denied", msg
-    if "频" in msg or "rate" in msg_lower or "limit" in msg_lower or "每分钟" in msg:
-        return "rate_limited", msg
-    if "不存在" in msg or "invalid api" in msg_lower or "api_name" in msg_lower:
-        return "invalid_endpoint", msg
-    if "参数" in msg or "param" in msg_lower:
-        return "invalid_params", msg
-    if code in (500, 502, 503, 504):
-        return "server_error", msg
-    return "unknown_error", msg
+    return classify_tushare_response(response)

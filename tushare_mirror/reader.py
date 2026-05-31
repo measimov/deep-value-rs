@@ -16,13 +16,17 @@ class LakeReader:
         self.catalog = catalog or CatalogStore(self.root)
 
     def list_active_files(self, api_name: str, snapshot_id: str | None = None) -> list[dict[str, Any]]:
-        if snapshot_id in (None, "latest"):
+        latest = snapshot_id in (None, "latest")
+        if latest:
             snap = self.catalog.latest_snapshot(api_name)
             if not snap:
                 return []
             snapshot_id = snap["snapshot_id"]
         rows = self.catalog.files_for_snapshot(str(snapshot_id), content_type="lake")
-        return [r for r in rows if r.get("status") not in {"quarantined", "missing", "deleted"}]
+        blocked = {"quarantined", "missing", "deleted", "deleted_pending"}
+        if latest:
+            blocked |= {"superseded", "compacted"}
+        return [r for r in rows if r.get("status") not in blocked]
 
     def scan_api(self, api_name: str, snapshot_id: str | None = None, filters: Mapping[str, Any] | None = None, columns: list[str] | None = None) -> pa.Table:
         files = self.list_active_files(api_name, snapshot_id)
