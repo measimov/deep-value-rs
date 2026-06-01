@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import os
+import shutil
+import sqlite3
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from .backup import BackupExecutor, BackupPlanner, RestoreChecker
+from .backup import BackupExecutor, BackupInspector, BackupPlanner, RestoreChecker
 from .backfill import BackfillExecutor, BackfillPlanner, DatePlanner
 from .catalog import CatalogStore
 from .client import classify_probe_response
@@ -157,6 +160,274 @@ def ensure_mirror_scope(scope: str) -> None:
 def ensure_mirror_mode(mode: str) -> None:
     if mode not in MODE_MAX_JOBS:
         raise ValueError("unknown mirror mode: %s; supported: smoke, pilot" % mode)
+
+
+@dataclass(frozen=True)
+class MirrorPreflightResult:
+    status: str
+    ready_to_execute: bool
+    mirror_root: str
+    backup_target: str
+    scope: str
+    mode: str
+    start_date: str | None
+    end_date: str | None
+    max_jobs_per_api: int
+    token_available: bool
+    mirror_root_status: str
+    backup_target_status: str
+    path_relationship_status: str
+    disk_space: dict[str, Any]
+    existing_catalog: dict[str, Any]
+    existing_backup: dict[str, Any]
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+def _resolve_path(path: Path) -> Path:
+    return path.expanduser().resolve(strict=False)
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_under_tmp(path: Path) -> bool:
+    resolved = _resolve_path(path)
+    tmp = Path('/tmp').resolve(strict=False)
+    return resolved == tmp or _is_relative_to(resolved, tmp)
+
+
+def _nearest_existing_parent(path: Path) -> Path | None:
+    current = _resolve_path(path)
+    if current.exists():
+        return current if current.is_dir() else current.parent
+    for parent in [current.parent, *current.parents]:
+        if parent.exists():
+            return parent
+    return None
+
+
+def _disk_free(path: Path) -> tuple[int | None, str | None]:
+    parent = _nearest_existing_parent(path.parent)
+    if parent is None:
+        return None, f'no existing parent for {path}'
+    try:
+        return int(shutil.disk_usage(parent).free), None
+    except Exception as exc:  # pragma: no cover - platform specific
+        return None, str(exc)
+
+
+def _token_available_from_env() -> bool:
+    if os.environ.get('TUSHARE_TOKEN'):
+        return True
+    env_path = Path('.env')
+    if not env_path.exists():
+        return False
+    try:
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            if key.strip() == 'TUSHARE_TOKEN' and value.strip():
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _catalog_counts_readonly(catalog_path: Path) -> dict[str, Any]:
+    uri = f"file:{catalog_path.resolve().as_posix()}?mode=ro&immutable=1"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        conn.row_factory = sqlite3.Row
+        version = conn.execute("select value from catalog_meta where key='catalog_schema_version'").fetchone()
+        latest_count = conn.execute("select count(*) from snapshots where status='current'").fetchone()[0]
+        active_file_count = conn.execute("select count(*) from files where status='current'").fetchone()[0]
+        return {
+            'present': True,
+            'schema_version': int(version[0]) if version else None,
+            'endpoint_count': conn.execute('select count(*) from endpoints').fetchone()[0],
+            'snapshot_count': conn.execute('select count(*) from snapshots').fetchone()[0],
+            'latest_snapshots_count': latest_count,
+            'active_file_count': active_file_count,
+            'has_active_data': active_file_count > 0,
+        }
+    finally:
+        conn.close()
+
+
+class MirrorPreflightChecker:
+    PILOT_SIZE_ESTIMATE_BYTES = 100 * 1024 * 1024
+
+    def __init__(self, *, token_available: bool | None = None):
+        self._token_available_override = token_available
+
+    def check(
+        self,
+        *,
+        mirror_root: Path | str,
+        backup_target: Path | str,
+        scope: str,
+        mode: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        max_jobs_per_api: int | None = None,
+    ) -> MirrorPreflightResult:
+        mirror = _resolve_path(Path(mirror_root))
+        backup = _resolve_path(Path(backup_target))
+        warnings: list[str] = []
+        blocking_errors: list[str] = []
+
+        self._check_scope_mode(scope, mode, start_date, end_date, max_jobs_per_api, blocking_errors)
+        token_available = self._token_available_override if self._token_available_override is not None else _token_available_from_env()
+        if not token_available:
+            blocking_errors.append('TUSHARE_TOKEN is not available; mirror-run --execute would fail')
+
+        mirror_status, catalog_info = self._inspect_mirror_root(mirror, warnings, blocking_errors)
+        backup_status, backup_info = self._inspect_backup_target(backup, warnings, blocking_errors)
+        relationship = self._path_relationship(mirror, backup)
+        if relationship != 'ok':
+            blocking_errors.append(f'unsafe path relationship: {relationship}')
+        if _is_under_tmp(mirror):
+            warnings.append('mirror_root is under /tmp; use a durable path for long-lived mirror data')
+        if _is_under_tmp(backup):
+            warnings.append('backup_target is under /tmp; use a durable path for long-lived backup artifacts')
+
+        disk_space = self._disk_space_summary(mirror, backup, warnings)
+        status = 'blocked' if blocking_errors else ('warning' if warnings else 'passed')
+        return MirrorPreflightResult(
+            status=status,
+            ready_to_execute=not blocking_errors,
+            mirror_root=str(mirror),
+            backup_target=str(backup),
+            scope=scope,
+            mode=mode,
+            start_date=start_date,
+            end_date=end_date,
+            max_jobs_per_api=int(max_jobs_per_api or MODE_MAX_JOBS.get(mode, 0)),
+            token_available=bool(token_available),
+            mirror_root_status=mirror_status,
+            backup_target_status=backup_status,
+            path_relationship_status=relationship,
+            disk_space=disk_space,
+            existing_catalog=catalog_info,
+            existing_backup=backup_info,
+            warnings=warnings,
+            blocking_errors=blocking_errors,
+        )
+
+    def _check_scope_mode(self, scope: str, mode: str, start_date: str | None, end_date: str | None, max_jobs_per_api: int | None, blocking_errors: list[str]) -> None:
+        try:
+            ensure_mirror_scope(scope)
+        except ValueError as exc:
+            blocking_errors.append(str(exc))
+        try:
+            ensure_mirror_mode(mode)
+        except ValueError as exc:
+            blocking_errors.append(str(exc))
+            return
+        if mode == 'pilot' and (not start_date or not end_date):
+            blocking_errors.append('pilot mode requires --start-date and --end-date')
+        max_jobs = max_jobs_per_api if max_jobs_per_api is not None else MODE_MAX_JOBS[mode]
+        if max_jobs <= 0:
+            blocking_errors.append('--max-jobs-per-api must be positive')
+        elif max_jobs > MODE_MAX_JOBS[mode]:
+            blocking_errors.append(f'{mode} mode max-jobs-per-api cannot exceed {MODE_MAX_JOBS[mode]}')
+
+    def _inspect_mirror_root(self, mirror: Path, warnings: list[str], blocking_errors: list[str]) -> tuple[str, dict[str, Any]]:
+        default_catalog = {'present': False, 'schema_version': None, 'endpoint_count': 0, 'snapshot_count': 0, 'latest_snapshots_count': 0, 'active_file_count': 0, 'has_active_data': False}
+        if not mirror.exists():
+            self._parent_warning(mirror, 'mirror_root', warnings)
+            return 'missing', default_catalog
+        if not mirror.is_dir():
+            blocking_errors.append('mirror_root exists but is not a directory')
+            return 'non_empty_unknown', default_catalog
+        catalog_path = mirror / '_catalog' / 'catalog.sqlite'
+        if catalog_path.exists():
+            try:
+                return 'existing_catalog', _catalog_counts_readonly(catalog_path)
+            except Exception as exc:
+                blocking_errors.append(f'existing mirror catalog is unreadable: {exc}')
+                return 'existing_catalog', default_catalog | {'present': True}
+        if not any(mirror.iterdir()):
+            return 'empty', default_catalog
+        blocking_errors.append('mirror_root is non-empty but has no _catalog/catalog.sqlite')
+        return 'non_empty_unknown', default_catalog
+
+    def _inspect_backup_target(self, backup: Path, warnings: list[str], blocking_errors: list[str]) -> tuple[str, dict[str, Any]]:
+        default_backup = {'present': False, 'backup_id': None, 'manifest_version': None, 'snapshot_scope': None, 'file_count': None, 'catalog_checksum_status': None, 'possible_mutation': False}
+        if not backup.exists():
+            self._parent_warning(backup, 'backup_target', warnings)
+            return 'missing', default_backup
+        if not backup.is_dir():
+            blocking_errors.append('backup_target exists but is not a directory')
+            return 'non_empty_unknown', default_backup
+        manifest = backup / 'manifest.json'
+        if manifest.exists():
+            inspect = BackupInspector().inspect(backup)
+            info = {
+                'present': True,
+                'backup_id': inspect.backup_id,
+                'manifest_version': inspect.manifest_version,
+                'snapshot_scope': inspect.snapshot_scope,
+                'file_count': inspect.file_count,
+                'catalog_checksum_status': inspect.catalog_checksum_status,
+                'possible_mutation': inspect.possible_mutation,
+                'manifest_validation_status': inspect.manifest_validation_status,
+            }
+            blocking_errors.append('backup_target already contains manifest.json; choose a new target or clear it explicitly')
+            return 'existing_manifest', info
+        if not any(backup.iterdir()):
+            return 'empty', default_backup
+        blocking_errors.append('backup_target is non-empty and is not a recognized backup artifact')
+        return 'non_empty_unknown', default_backup
+
+    def _path_relationship(self, mirror: Path, backup: Path) -> str:
+        if mirror == backup:
+            return 'same_path'
+        if _is_relative_to(backup, mirror):
+            return 'backup_inside_mirror'
+        if _is_relative_to(mirror, backup):
+            return 'mirror_inside_backup'
+        return 'ok'
+
+    def _disk_space_summary(self, mirror: Path, backup: Path, warnings: list[str]) -> dict[str, Any]:
+        mirror_free, mirror_warning = _disk_free(mirror)
+        backup_free, backup_warning = _disk_free(backup)
+        disk_warning = None
+        if mirror_warning or backup_warning:
+            disk_warning = '; '.join(filter(None, [mirror_warning, backup_warning]))
+            warnings.append(f'disk space could not be fully checked: {disk_warning}')
+        enough = None
+        if mirror_free is not None and backup_free is not None:
+            enough = mirror_free >= self.PILOT_SIZE_ESTIMATE_BYTES and backup_free >= self.PILOT_SIZE_ESTIMATE_BYTES
+            if not enough:
+                warnings.append('available disk space is below the rough one-month pilot estimate')
+        return {
+            'mirror_parent_free_bytes': mirror_free,
+            'backup_parent_free_bytes': backup_free,
+            'pilot_estimate_bytes': self.PILOT_SIZE_ESTIMATE_BYTES,
+            'expected_size_class': 'tens_of_mb',
+            'enough_for_pilot': enough,
+            'warning': disk_warning,
+        }
+
+    def _parent_warning(self, path: Path, label: str, warnings: list[str]) -> None:
+        if path.parent.exists():
+            return
+        warnings.append(f'{label} parent directory does not exist and must be created before execution: {path.parent}')
 
 
 class MirrorPlanner:

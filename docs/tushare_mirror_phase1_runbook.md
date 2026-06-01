@@ -1224,6 +1224,104 @@ python3 -m tushare_mirror --root "$MIRROR_ROOT" mirror-run \
 
 This command is intentionally not executed as part of Phase 3.1.
 
+
+## Phase 3.4 Durable Mirror Preflight
+
+Before moving a pilot mirror into durable local storage, run `mirror-preflight` against the intended source root and backup target. Preflight is read-only: it does not create a catalog, does not write raw/lake files, does not create runs/jobs/snapshots/validations, and does not send Tushare requests.
+
+Choose durable paths outside `/tmp`:
+
+```bash
+MIRROR_ROOT=/path/to/local/tushare-mirror
+MIRROR_BACKUP=/path/to/local/tushare-mirror-backup
+```
+
+Path rules:
+
+- `MIRROR_ROOT` and `MIRROR_BACKUP` must be different paths.
+- `MIRROR_BACKUP` must not be inside `MIRROR_ROOT`.
+- `MIRROR_ROOT` must not be inside `MIRROR_BACKUP`.
+- Empty or missing target directories are acceptable after review.
+- An existing mirror root with `_catalog/catalog.sqlite` is detected and summarized without mutation.
+- A backup target with `manifest.json` is detected as an existing backup artifact; choose a new target or clear it deliberately before executing a new backup.
+- Unknown non-empty directories are blocked to avoid mixing mirror data with unrelated files.
+
+Run preflight first:
+
+```bash
+python3 -m tushare_mirror mirror-preflight \
+  --mirror-root "$MIRROR_ROOT" \
+  --backup-target "$MIRROR_BACKUP" \
+  --scope low-risk-a-share \
+  --mode pilot \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --max-jobs-per-api 20
+```
+
+JSON output is available for automation:
+
+```bash
+python3 -m tushare_mirror mirror-preflight \
+  --mirror-root "$MIRROR_ROOT" \
+  --backup-target "$MIRROR_BACKUP" \
+  --scope low-risk-a-share \
+  --mode pilot \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --max-jobs-per-api 20 \
+  --json
+```
+
+Preflight checks:
+
+- path relationship and unknown non-empty directories
+- existing catalog summary when a mirror root already exists
+- existing backup manifest summary when a backup target already exists
+- `scope=low-risk-a-share` only
+- `mode=smoke` or `mode=pilot` only
+- `smoke --max-jobs-per-api <= 3`
+- `pilot --max-jobs-per-api <= 20` with explicit start/end dates
+- token presence without printing the token
+- rough local disk free-space information
+
+`/tmp` paths produce warnings because they are suitable for smoke tests but not durable storage. The one-month low-risk pilot is expected to be in the tens-of-MB size class based on the January 2025 pilot; multi-year local mirrors are larger and are not estimated in Phase 3.4.
+
+Recommended durable execution order:
+
+```bash
+python3 -m tushare_mirror mirror-preflight \
+  --mirror-root "$MIRROR_ROOT" \
+  --backup-target "$MIRROR_BACKUP" \
+  --scope low-risk-a-share \
+  --mode pilot \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --max-jobs-per-api 20
+
+python3 -m tushare_mirror --root "$MIRROR_ROOT" init-catalog
+
+python3 -m tushare_mirror --root "$MIRROR_ROOT" mirror-plan \
+  --scope low-risk-a-share \
+  --mode pilot \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --max-jobs-per-api 20 \
+  --json
+
+# Only after user confirmation:
+python3 -m tushare_mirror --root "$MIRROR_ROOT" mirror-run \
+  --scope low-risk-a-share \
+  --mode pilot \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --max-jobs-per-api 20 \
+  --backup-target "$MIRROR_BACKUP" \
+  --execute
+```
+
+Do not execute `mirror-run --execute` until preflight and mirror-plan have both been reviewed.
+
 ## Phase 3.4 Durable Pilot Mirror Execution
 
 Phase 3.4 moves the reviewed one-month pilot workflow from `/tmp` into user-selected durable local storage. This is still a one-month pilot, not a full Tushare mirror. Confirm disk capacity and paths before running it.
