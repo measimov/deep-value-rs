@@ -13,7 +13,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import MirrorOrchestrator, MirrorReviewer
+from tushare_mirror.mirror import MirrorOrchestrator, MirrorReadinessReporter, MirrorReviewer
 from tushare_mirror.validation import Validator
 
 
@@ -205,6 +205,82 @@ class FullMirrorReadinessReviewTests(unittest.TestCase):
             "blocking_errors",
         ]:
             self.assertIn(key, payload)
+        self.assertNotIn("fake-review-token", result.stdout)
+
+
+class FullMirrorReadinessReportTests(FullMirrorReadinessReviewTests):
+    def test_ready_pilot_returns_warning_status_and_true_readiness(self):
+        self.build_pilot()
+        before = self.counts()
+        report = MirrorReadinessReporter().report(root=self.root, backup=self.backup, scope="low-risk-a-share")
+        after = self.counts()
+        self.assertEqual(before, after)
+        self.assertEqual(report.readiness_status, "warning")
+        self.assertTrue(report.ready_for_controlled_full_backfill)
+        self.assertTrue(report.checks["catalog_opens"]["passed"])
+        self.assertTrue(report.checks["trade_cal_latest_exists"]["passed"])
+        self.assertTrue(report.checks["restore_check_succeeds"]["passed"])
+        self.assertTrue(report.checks["pilot_coverage_complete"]["passed"])
+        self.assertTrue(any("not a full mirror" in warning for warning in report.warnings))
+
+    def test_missing_backup_blocks_readiness(self):
+        self.build_pilot()
+        report = MirrorReadinessReporter().report(root=self.root, backup=self.base / "missing", scope="low-risk-a-share")
+        self.assertEqual(report.readiness_status, "blocked")
+        self.assertFalse(report.ready_for_controlled_full_backfill)
+        self.assertFalse(report.checks["backup_exists"]["passed"])
+
+    def test_mutated_backup_blocks_readiness(self):
+        self.build_pilot()
+        Validator(self.backup, CatalogStore(self.backup)).validate_latest_snapshots(record=True)
+        report = MirrorReadinessReporter().report(root=self.root, backup=self.backup, scope="low-risk-a-share")
+        self.assertEqual(report.readiness_status, "blocked")
+        self.assertFalse(report.checks["backup_possible_mutation_false"]["passed"])
+
+    def test_missing_trade_cal_blocks_readiness(self):
+        self.build_pilot()
+        with sqlite3.connect(self.catalog.db_path) as conn:
+            conn.execute("update snapshots set status='superseded' where api_name='trade_cal'")
+        report = MirrorReadinessReporter().report(root=self.root, backup=self.backup, scope="low-risk-a-share")
+        self.assertEqual(report.readiness_status, "blocked")
+        self.assertFalse(report.checks["trade_cal_latest_exists"]["passed"])
+
+    def test_incomplete_coverage_blocks_readiness(self):
+        result = MirrorOrchestrator(self.root, self.catalog, ReadinessFakeClient(), sleep=lambda _: None).run(
+            scope="low-risk-a-share",
+            mode="smoke",
+            max_jobs_per_api=3,
+        )
+        self.assertEqual(result.status, "succeeded")
+        plan = BackupPlanner(self.root, self.catalog).plan(self.backup)
+        BackupExecutor(self.root, self.catalog).backup(plan)
+        report = MirrorReadinessReporter().report(root=self.root, backup=self.backup, scope="low-risk-a-share")
+        self.assertEqual(report.readiness_status, "blocked")
+        self.assertFalse(report.checks["pilot_coverage_complete"]["passed"])
+
+    def test_cli_json_fields_and_no_side_effects_for_readiness(self):
+        self.build_pilot()
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-readiness",
+            "--root", str(self.root),
+            "--backup", str(self.backup),
+            "--scope", "low-risk-a-share",
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "readiness_status",
+            "ready_for_controlled_full_backfill",
+            "checks",
+            "warnings",
+            "blocking_errors",
+            "review",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["readiness_status"], "warning")
+        self.assertTrue(payload["ready_for_controlled_full_backfill"])
         self.assertNotIn("fake-review-token", result.stdout)
 
 

@@ -198,6 +198,30 @@ class MirrorReviewResult:
         }
 
 
+@dataclass(frozen=True)
+class MirrorReadinessResult:
+    root: str
+    backup: str
+    scope: str
+    readiness_status: str
+    ready_for_controlled_full_backfill: bool
+    checks: dict[str, Any]
+    warnings: list[str]
+    blocking_errors: list[str]
+    review: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "readiness_status": self.readiness_status,
+            "ready_for_controlled_full_backfill": self.ready_for_controlled_full_backfill,
+            "warnings": self.warnings,
+            "blocking_errors": self.blocking_errors,
+        }
+
+
 def ensure_mirror_scope(scope: str) -> None:
     if scope != "low-risk-a-share":
         raise ValueError("unknown mirror scope: %s; supported: low-risk-a-share" % scope)
@@ -537,6 +561,130 @@ class MirrorReviewer:
                 rows.append({"api_name": api, "status": "failed", "error": str(exc)})
                 blocking_errors.append(f"{api} coverage failed: {exc}")
         return rows
+
+
+class MirrorReadinessReporter:
+    CONTROLLED_FULL_BACKFILL_WARNINGS = [
+        "only 2025-01 pilot coverage has been proven; this is not a full mirror",
+        "event/company endpoints are not stock-looped",
+        "weekly/monthly do not use trading-days-only",
+        "financial/PIT/minute/tick/object/postgres datasets are not covered",
+        "remote disaster recovery is not implemented",
+        "compaction is not implemented",
+    ]
+
+    def report(
+        self,
+        *,
+        root: Path | str,
+        backup: Path | str,
+        scope: str = "low-risk-a-share",
+    ) -> MirrorReadinessResult:
+        ensure_mirror_scope(scope)
+        review = MirrorReviewer().review(
+            root=root,
+            backup=backup,
+            scope=scope,
+            mode="pilot",
+            start_date="20250101",
+            end_date="20250131",
+            calendar_exchange="SSE",
+        )
+        checks = self._checks(review, Path(root), Path(backup))
+        blocking_errors = list(review.blocking_errors)
+        for name, check in checks.items():
+            if check.get("required") and not check.get("passed"):
+                message = check.get("message") or f"{name} failed"
+                if message not in blocking_errors:
+                    blocking_errors.append(message)
+        warnings = list(dict.fromkeys([*review.warnings, *self.CONTROLLED_FULL_BACKFILL_WARNINGS]))
+        readiness_status = "blocked" if blocking_errors else ("warning" if warnings else "ready")
+        return MirrorReadinessResult(
+            root=str(root),
+            backup=str(backup),
+            scope=scope,
+            readiness_status=readiness_status,
+            ready_for_controlled_full_backfill=not blocking_errors,
+            checks=checks,
+            warnings=warnings,
+            blocking_errors=blocking_errors,
+            review=review.to_dict(),
+        )
+
+    def _checks(self, review: MirrorReviewResult, root: Path, backup: Path) -> dict[str, Any]:
+        endpoint_status = {row["endpoint"]: row for row in review.endpoint_summary}
+        coverage_complete = bool(review.coverage_summary) and all(
+            int(row.get("total_dates") or 0) > 0
+            and int(row.get("missing_dates") or 0) == 0
+            and int(row.get("failed_dates") or 0) == 0
+            and int(row.get("quarantined_dates") or 0) == 0
+            for row in review.coverage_summary
+        )
+        relationship = MirrorPreflightChecker(token_available=True)._path_relationship(_resolve_path(root), _resolve_path(backup))
+        schema_version = review.catalog_status.get("schema_version")
+        checks = {
+            "catalog_opens": {
+                "required": True,
+                "passed": review.root_status == "existing_catalog" and bool(review.catalog_status.get("schema_version")),
+                "message": "catalog cannot be opened",
+            },
+            "supported_schema": {
+                "required": True,
+                "passed": isinstance(schema_version, int) and schema_version >= 2,
+                "message": "catalog schema version is unsupported",
+            },
+            "latest_snapshots_exist": {
+                "required": True,
+                "passed": bool(review.latest_snapshots),
+                "message": "latest snapshots are missing",
+            },
+            "trade_cal_latest_exists": {
+                "required": True,
+                "passed": (endpoint_status.get("trade_cal") or {}).get("status") == "current",
+                "message": "trade_cal latest snapshot is missing",
+            },
+            "backup_exists": {
+                "required": True,
+                "passed": review.backup_status == "present",
+                "message": "backup artifact is missing",
+            },
+            "restore_check_succeeds": {
+                "required": True,
+                "passed": (review.backup_restore_check or {}).get("status") == "succeeded",
+                "message": "restore-check failed",
+            },
+            "backup_possible_mutation_false": {
+                "required": True,
+                "passed": not review.backup_possible_mutation,
+                "message": "backup possible_mutation is true",
+            },
+            "validate_no_record_succeeds": {
+                "required": True,
+                "passed": review.validation_status == "succeeded",
+                "message": "validate --snapshot latest --no-record failed",
+            },
+            "pilot_coverage_complete": {
+                "required": True,
+                "passed": coverage_complete,
+                "message": "pilot coverage is incomplete for one or more daily-like endpoints",
+            },
+            "token_plaintext_not_found": {
+                "required": True,
+                "passed": not review.token_plaintext_found,
+                "message": "token plaintext found in mirror or backup artifact",
+            },
+            "backup_not_nested_inside_mirror": {
+                "required": True,
+                "passed": relationship == "ok",
+                "message": f"unsafe backup path relationship: {relationship}",
+            },
+            "cli_guardrails_exist": {
+                "required": True,
+                "passed": MODE_MAX_JOBS.get("smoke") == 3 and MODE_MAX_JOBS.get("pilot") == 20,
+                "message": "mirror CLI max-jobs guardrails are missing",
+            },
+        }
+        return checks
 
 
 class MirrorPreflightChecker:
