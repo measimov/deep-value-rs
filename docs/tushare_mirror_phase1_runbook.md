@@ -1223,3 +1223,65 @@ python3 -m tushare_mirror --root "$MIRROR_ROOT" mirror-run \
 ```
 
 This command is intentionally not executed as part of Phase 3.1.
+
+## Phase 3.4 Durable Pilot Mirror Execution
+
+Phase 3.4 moves the reviewed one-month pilot workflow from `/tmp` into user-selected durable local storage. This is still a one-month pilot, not a full Tushare mirror. Confirm disk capacity and paths before running it.
+
+Use paths outside `/tmp` for any long-lived mirror:
+
+```bash
+# Replace these with durable local paths.
+MIRROR_ROOT=/path/to/local/tushare-mirror
+MIRROR_BACKUP=/path/to/local/tushare-mirror-backup
+```
+
+Keep `MIRROR_BACKUP` outside `MIRROR_ROOT`. The backup target is a separate immutable artifact, not a child directory inside the source lake.
+
+Initialize the catalog if the durable root is new:
+
+```bash
+python3 -m tushare_mirror --root "$MIRROR_ROOT" init-catalog
+```
+
+Review the pilot plan first:
+
+```bash
+python3 -m tushare_mirror --root "$MIRROR_ROOT" mirror-plan \
+  --scope low-risk-a-share \
+  --mode pilot \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --max-jobs-per-api 20 \
+  --json
+```
+
+Only after reviewing the plan and confirming the paths, execute the pilot:
+
+```bash
+python3 -m tushare_mirror --root "$MIRROR_ROOT" mirror-run \
+  --scope low-risk-a-share \
+  --mode pilot \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --max-jobs-per-api 20 \
+  --backup-target "$MIRROR_BACKUP" \
+  --execute
+```
+
+Validate and check the backup without mutating backup artifacts:
+
+```bash
+python3 -m tushare_mirror --root "$MIRROR_ROOT" validate --snapshot latest --no-record
+python3 -m tushare_mirror restore-check --backup "$MIRROR_BACKUP"
+python3 -m tushare_mirror backup-inspect --backup "$MIRROR_BACKUP"
+```
+
+Operational rules:
+
+- This pilot covers only `low-risk-a-share` for `20250101` through `20250131`.
+- It does not run a stock loop and does not cover full history.
+- It does not touch minute, tick, order-level, financial statement, PIT, PostgreSQL loader, remote backup, or restore-into workflows.
+- Later production backfills should proceed month by month, with explicit `mirror-plan` review before each `mirror-run`.
+- Every executed batch should end with `validate --no-record`, `backup`, and `restore-check`.
+- Do not use `/tmp` as a durable mirror location.
