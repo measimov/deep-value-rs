@@ -11,6 +11,7 @@ from pathlib import Path
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
+from tushare_mirror.io_utils import now_utc
 from tushare_mirror.planner import JobPlanner
 from tushare_mirror.reader import LakeReader
 from tushare_mirror.store import FileLakeStore
@@ -81,13 +82,16 @@ class Phase2LowRiskEndpointTests(unittest.TestCase):
 
     def test_phase2_planner_paths_and_no_dry_run_side_effects(self):
         planner = JobPlanner(self.root, self.catalog)
+        fallback_date = now_utc()[:10].replace("-", "")
+        fallback_year = fallback_date[:4]
+        fallback_month = fallback_date[4:6]
         expectations = {
             "weekly": "api=weekly/year=2025/month=01",
             "monthly": "api=monthly/year=2025/month=01",
             "suspend_d": "api=suspend_d/year=2025/month=01",
-            "namechange": "api=namechange/year=2026/month=05",
-            "hs_const": "api=hs_const/hs_type=SH/snapshot_date=20260531",
-            "stk_managers": "api=stk_managers/year=2026/month=05",
+            "namechange": f"api=namechange/year={fallback_year}/month={fallback_month}",
+            "hs_const": f"api=hs_const/hs_type=SH/snapshot_date={fallback_date}",
+            "stk_managers": f"api=stk_managers/year={fallback_year}/month={fallback_month}",
             "stk_rewards": "api=stk_rewards/period_year=2024",
         }
         for api_name in PHASE2:
@@ -103,10 +107,11 @@ class Phase2LowRiskEndpointTests(unittest.TestCase):
 
     def test_phase2_partition_fallback_for_empty_params(self):
         planner = JobPlanner(self.root, self.catalog)
-        self.assertEqual(planner.plan_single_fetch("suspend_d", {}).partition_values["event_date"], "20260531")
-        self.assertEqual(planner.plan_single_fetch("namechange", {}).partition_values["event_date"], "20260531")
-        self.assertEqual(planner.plan_single_fetch("hs_const", {}).partition_values["snapshot_date"], "20260531")
-        self.assertEqual(planner.plan_single_fetch("stk_rewards", {}).partition_values["period_date"], "20260531")
+        fallback_date = now_utc()[:10].replace("-", "")
+        self.assertEqual(planner.plan_single_fetch("suspend_d", {}).partition_values["event_date"], fallback_date)
+        self.assertEqual(planner.plan_single_fetch("namechange", {}).partition_values["event_date"], fallback_date)
+        self.assertEqual(planner.plan_single_fetch("hs_const", {}).partition_values["snapshot_date"], fallback_date)
+        self.assertEqual(planner.plan_single_fetch("stk_rewards", {}).partition_values["period_date"], fallback_date)
 
     def test_phase2_fake_fetch_validate_and_reader(self):
         store = FileLakeStore(self.root, self.catalog)
