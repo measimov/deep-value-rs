@@ -209,6 +209,34 @@ class Phase30MirrorOrchestratorTests(unittest.TestCase):
         show = self.run_cli("show-run", "--run-id", result.run_id).stdout
         self.assertIn("daily_basic", show)
 
+    def test_execute_pilot_runs_calendar_and_explicit_dates(self):
+        backup_target = Path(self.tmp.name) / "pilot-backup"
+        client = MirrorFakeClient()
+        result = MirrorOrchestrator(self.root, self.catalog, client, sleep=lambda _: None).run(
+            scope="low-risk-a-share",
+            mode="pilot",
+            start_date="20250101",
+            end_date="20250131",
+            max_jobs_per_api=20,
+            backup_target=str(backup_target),
+        )
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.summary["max_jobs_per_api"], 20)
+        self.assertEqual(result.summary["backup_status"], "succeeded")
+        self.assertEqual(result.summary["restore_check_status"], "succeeded")
+        self.assertEqual(RestoreChecker().check(backup_target).status, "succeeded")
+        endpoints = {item["endpoint"]: item for item in result.summary["items"]}
+        self.assertEqual(endpoints["daily"]["executed_jobs"], 7)
+        self.assertEqual(endpoints["adj_factor"]["executed_jobs"], 7)
+        self.assertEqual(endpoints["daily_basic"]["executed_jobs"], 7)
+        self.assertEqual(endpoints["suspend_d"]["executed_jobs"], 7)
+        self.assertEqual(endpoints["weekly"]["executed_jobs"], 5)
+        self.assertEqual(endpoints["monthly"]["executed_jobs"], 1)
+        self.assertNotIn("namechange", endpoints)
+        self.assertNotIn("stk_managers", endpoints)
+        self.assertNotIn("stk_rewards", endpoints)
+        self.assertNotIn("fake-token-for-hash-only", json.dumps(result.to_dict()))
+
     def test_permission_denied_non_dependency_is_blocked_without_global_failure(self):
         client = MirrorFakeClient(deny={"hs_const"})
         result = MirrorOrchestrator(self.root, self.catalog, client, sleep=lambda _: None).run(

@@ -419,6 +419,12 @@ class MirrorOrchestrator:
             return {"exchange": "SSE", "start_date": start_date, "end_date": end_date}
         return SMOKE_REFERENCE_FETCHES["trade_cal"]
 
+    def _pilot_weekly_dates(self, start_date: str, end_date: str) -> list[str]:
+        return [date for date in PILOT_JAN_2025_WEEKLY_DATES if start_date <= date <= end_date]
+
+    def _pilot_monthly_dates(self, start_date: str, end_date: str) -> list[str]:
+        return [date for date in PILOT_JAN_2025_MONTHLY_DATES if start_date <= date <= end_date]
+
     def _probe_all(self) -> dict[str, str]:
         statuses: dict[str, str] = {}
         thash = token_hash(getattr(self.client, "token", "mirror-client"))
