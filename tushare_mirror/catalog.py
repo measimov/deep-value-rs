@@ -243,9 +243,18 @@ class CatalogStore:
 
     def connect(self) -> sqlite3.Connection:
         if self.read_only:
-            uri = f"file:{self.db_path.resolve().as_posix()}?mode=ro"
-            conn = sqlite3.connect(uri, timeout=30, uri=True)
-            conn.execute("pragma query_only = on")
+            base = self.db_path.resolve().as_posix()
+            try:
+                conn = sqlite3.connect(f"file:{base}?mode=ro", timeout=30, uri=True)
+                conn.execute("pragma query_only = on")
+                conn.execute("select count(*) from sqlite_master").fetchone()
+            except sqlite3.OperationalError:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                conn = sqlite3.connect(f"file:{base}?mode=ro&immutable=1", timeout=30, uri=True)
+                conn.execute("pragma query_only = on")
         else:
             self.catalog_dir.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(self.db_path, timeout=30)
