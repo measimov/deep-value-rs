@@ -1383,3 +1383,168 @@ Operational rules:
 - Later production backfills should proceed month by month, with explicit `mirror-plan` review before each `mirror-run`.
 - Every executed batch should end with `validate --no-record`, `backup`, and `restore-check`.
 - Do not use `/tmp` as a durable mirror location.
+
+## Controlled Full Backfill Readiness
+
+The durable January 2025 pilot is a readiness artifact, not permission to start a
+full mirror. Before planning any next month, review the current mirror root and
+backup artifact with read-only commands:
+
+```bash
+MIRROR_ROOT=/mnt/gw/TuShare
+MIRROR_BACKUP=/mnt/gw/TuShare-backup
+
+python3 -m tushare_mirror mirror-review \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope low-risk-a-share
+
+python3 -m tushare_mirror mirror-readiness \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope low-risk-a-share
+```
+
+`mirror-review` is an inventory command. It opens the catalog, summarizes latest
+snapshots, runs validation in `--no-record` mode, checks coverage for the pilot
+range, runs backup inspection and restore-check, reports artifact size, and
+reports whether token plaintext was found. It does not fetch, backfill, create
+runs, create validation rows, or write the catalog.
+
+`mirror-readiness` is a gate. It returns `ready`, `warning`, or `blocked` and a
+`ready_for_controlled_full_backfill` boolean. A good January pilot normally
+returns `warning` rather than `ready`, because the mirror is still only a pilot
+and known out-of-scope datasets remain intentionally absent.
+
+Readiness must be blocked when any of these are true:
+
+- catalog cannot open or schema is unsupported
+- latest snapshots are missing
+- `trade_cal` latest snapshot is missing
+- backup artifact is missing
+- restore-check fails
+- backup reports `possible_mutation=true`
+- `validate --snapshot latest --no-record` fails
+- pilot coverage is incomplete for `daily`, `adj_factor`, `daily_basic`, or `suspend_d`
+- token plaintext is found
+- backup path is nested inside the mirror root
+- CLI max-job guardrails are missing
+
+Expected warnings include:
+
+- only the January 2025 pilot is covered
+- this is not a full mirror
+- event/company endpoints are not stock-looped
+- `weekly` and `monthly` do not use trading-days-only
+- financial/PIT/minute/tick/object/PostgreSQL datasets are not covered
+- no remote disaster recovery
+- no compaction
+
+## Monthly Batch Planning
+
+Use `mirror-batch-plan` to prepare the next bounded month. This command is
+read-only. It does not fetch `trade_cal`, does not execute backfill, does not
+write raw/lake files, does not create snapshots, and does not create validation
+runs.
+
+Recommended dry-run for the next month:
+
+```bash
+python3 -m tushare_mirror mirror-batch-plan \
+  --root "$MIRROR_ROOT" \
+  --scope low-risk-a-share \
+  --start-date 20250201 \
+  --end-date 20250228 \
+  --calendar-exchange SSE \
+  --max-jobs-per-api 20 \
+  --json
+```
+
+Batch planning semantics:
+
+- If local `trade_cal` does not cover the requested range, `trade_cal` is planned
+  first as a calendar dependency.
+- `daily`, `adj_factor`, `daily_basic`, and `suspend_d` stay blocked until local
+  `trade_cal` covers the requested range. They must not fall back to natural-day
+  planning.
+- `weekly` and `monthly` use bounded explicit date planning only. They do not use
+  `--trading-days-only`.
+- `stock_basic` and `hs_const` show refresh strategy. They are not blindly
+  refetched when latest data already exists.
+- `namechange`, `stk_managers`, and `stk_rewards` remain excluded from batch
+  execution because Phase 3 does not run stock loops.
+- If `--max-jobs-per-api` truncates a plan, the endpoint plan shows
+  `truncated=true`.
+- The output includes `estimated_request_count`, but execution still requires a
+  separate user-confirmed command.
+
+## User-confirmed Monthly Execution
+
+Do not execute the next batch until the user confirms the month, root, backup
+target, and plan. The execution command remains deliberately separate:
+
+```bash
+python3 -m tushare_mirror --root "$MIRROR_ROOT" mirror-run \
+  --scope low-risk-a-share \
+  --mode pilot \
+  --start-date 20250201 \
+  --end-date 20250228 \
+  --max-jobs-per-api 20 \
+  --backup-target "$MIRROR_BACKUP" \
+  --execute
+```
+
+This is still a controlled monthly batch. It is not a full mirror and must not be
+expanded into all history or all endpoints without another reviewed phase.
+
+## After-batch Validation and Backup
+
+After any user-confirmed monthly execution, run:
+
+```bash
+python3 -m tushare_mirror --root "$MIRROR_ROOT" validate --snapshot latest --no-record
+python3 -m tushare_mirror backup-inspect --backup "$MIRROR_BACKUP"
+python3 -m tushare_mirror restore-check --backup "$MIRROR_BACKUP"
+python3 -m tushare_mirror mirror-review --root "$MIRROR_ROOT" --backup "$MIRROR_BACKUP" --scope low-risk-a-share
+python3 -m tushare_mirror mirror-readiness --root "$MIRROR_ROOT" --backup "$MIRROR_BACKUP" --scope low-risk-a-share
+```
+
+Use `validate --no-record` on backup roots or immutable backup artifacts. Plain
+`validate` writes `validation_runs` and can intentionally make restore-check
+detect a mutated catalog.
+
+## Failure Recovery
+
+Do not expand scope when a batch fails. Classify the failure first:
+
+- `permission_denied`: record the endpoint status; do not broaden requests.
+- `rate_limited`: stop or wait; do not add retries beyond the existing bounded
+  logic.
+- `invalid_params` or field mismatch: make the smallest config/parser fix and
+  add a regression test.
+- missing `trade_cal` dependency: fetch only the bounded calendar range after
+  user confirmation, then re-plan.
+- validation failure: inspect latest snapshot files and quarantine state before
+  another execute.
+- backup or restore-check failure: repair backup safety before any new data
+  request.
+- schema quarantine: leave the quarantined data blocked until explicitly
+  reviewed.
+
+## Stop Conditions
+
+Stop before executing a next batch when any of these are present:
+
+- readiness is blocked
+- restore-check failed
+- backup `possible_mutation=true`
+- `trade_cal` dependency unresolved
+- `max_jobs_per_api > 20`
+- token missing
+- severe disk-space warning
+- unresolved validation failure
+- schema quarantine exists
+- inconsistent coverage
+
+The next batch must remain user-confirmed. Do not run `mirror-run --execute`
+from review, readiness, or batch-plan output alone.
