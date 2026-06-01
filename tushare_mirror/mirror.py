@@ -498,7 +498,7 @@ class MirrorReviewer:
         backup_possible_mutation = False
 
         root_status = "missing"
-        catalog = CatalogStore(mirror_root)
+        catalog = CatalogStore(mirror_root, read_only=True)
         if not catalog.db_path.exists():
             blocking_errors.append(f"catalog not found: {catalog.db_path}")
         else:

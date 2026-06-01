@@ -235,14 +235,20 @@ def loads(value: str | None) -> Any:
 
 
 class CatalogStore:
-    def __init__(self, root: Path | str):
+    def __init__(self, root: Path | str, read_only: bool = False):
         self.root = Path(root)
         self.catalog_dir = self.root / "_catalog"
         self.db_path = self.catalog_dir / "catalog.sqlite"
+        self.read_only = read_only
 
     def connect(self) -> sqlite3.Connection:
-        self.catalog_dir.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        if self.read_only:
+            uri = f"file:{self.db_path.resolve().as_posix()}?mode=ro"
+            conn = sqlite3.connect(uri, timeout=30, uri=True)
+            conn.execute("pragma query_only = on")
+        else:
+            self.catalog_dir.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("pragma foreign_keys = on")
         return conn

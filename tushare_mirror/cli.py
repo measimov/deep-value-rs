@@ -611,7 +611,9 @@ def cmd_mirror_readiness(args) -> int:
 
 def cmd_mirror_batch_plan(args) -> int:
     root = Path(args.mirror_root_arg)
-    catalog = _open_existing_catalog(root)
+    if not (root / '_catalog' / 'catalog.sqlite').exists():
+        raise SystemExit(f"catalog not found: {root / '_catalog' / 'catalog.sqlite'}; run init-catalog first")
+    catalog = CatalogStore(root, read_only=True)
     try:
         plan = MirrorBatchPlanner(root, catalog).plan(
             scope=args.scope,
