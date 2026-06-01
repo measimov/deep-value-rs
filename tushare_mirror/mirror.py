@@ -12,6 +12,7 @@ from typing import Any, Mapping
 from .backup import BackupExecutor, BackupInspector, BackupPlanner, RestoreChecker
 from .backfill import BackfillExecutor, BackfillPlanner, DatePlanner
 from .catalog import CatalogStore
+from .coverage import CoverageReporter
 from .client import classify_probe_response
 from .endpoints import load_into_catalog
 from .errors import classify_exception, retry_delay_seconds, should_retry
@@ -55,6 +56,7 @@ PILOT_JAN_2025_WEEKLY_DATES = ["20250103", "20250110", "20250117", "20250124", "
 PILOT_JAN_2025_MONTHLY_DATES = ["20250127"]
 
 PILOT_BACKFILL_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d", "weekly", "monthly"]
+DAILY_LIKE_MIRROR_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d"]
 MODE_MAX_JOBS = {"smoke": 3, "pilot": 20}
 
 
@@ -149,6 +151,50 @@ class MirrorRunResult:
             "validation": self.validation,
             "backup": self.backup,
             "restore_check": self.restore_check,
+        }
+
+
+@dataclass(frozen=True)
+class MirrorReviewResult:
+    root: str
+    backup: str
+    scope: str
+    mode: str
+    start_date: str
+    end_date: str
+    calendar_exchange: str
+    root_status: str
+    backup_status: str
+    catalog_status: dict[str, Any]
+    latest_snapshots: list[dict[str, Any]]
+    endpoint_summary: list[dict[str, Any]]
+    coverage_summary: list[dict[str, Any]]
+    validation_status: str
+    validation_results: list[dict[str, Any]]
+    backup_inspect: dict[str, Any] | None
+    backup_restore_check: dict[str, Any] | None
+    backup_catalog_checksum_status: str | None
+    backup_possible_mutation: bool
+    artifact_size: dict[str, Any]
+    token_plaintext_found: bool
+    ready_for_next_batch: bool
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "root_status": self.root_status,
+            "backup_status": self.backup_status,
+            "validation_status": self.validation_status,
+            "backup_catalog_checksum_status": self.backup_catalog_checksum_status,
+            "backup_possible_mutation": self.backup_possible_mutation,
+            "token_plaintext_found": self.token_plaintext_found,
+            "ready_for_next_batch": self.ready_for_next_batch,
+            "warnings": self.warnings,
+            "blocking_errors": self.blocking_errors,
         }
 
 
@@ -247,6 +293,70 @@ def _token_available_from_env() -> bool:
     return False
 
 
+def _token_value_from_env() -> str | None:
+    if os.environ.get("TUSHARE_TOKEN"):
+        return os.environ.get("TUSHARE_TOKEN")
+    env_path = Path(".env")
+    if not env_path.exists():
+        return None
+    try:
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == "TUSHARE_TOKEN" and value.strip():
+                return value.strip()
+    except OSError:
+        return None
+    return None
+
+
+def _contains_token_plaintext(paths: list[Path], token: str | None = None) -> bool:
+    secret = token if token is not None else _token_value_from_env()
+    if not secret or len(secret) < 8:
+        return False
+    needle = secret.encode()
+    for root in paths:
+        if not root.exists():
+            continue
+        files = [root] if root.is_file() else (path for path in root.rglob("*") if path.is_file())
+        for path in files:
+            try:
+                with path.open("rb") as handle:
+                    carry = b""
+                    while True:
+                        chunk = handle.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        data = carry + chunk
+                        if needle in data:
+                            return True
+                        carry = data[-max(len(needle) - 1, 0):]
+            except OSError:
+                continue
+    return False
+
+
+def _artifact_size(paths: list[Path]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for label, root in paths:
+        file_count = 0
+        total_size = 0
+        if root.exists():
+            files = [root] if root.is_file() else (path for path in root.rglob("*") if path.is_file())
+            for path in files:
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                file_count += 1
+                total_size += stat.st_size
+        summary[f"{label}_file_count"] = file_count
+        summary[f"{label}_total_size_bytes"] = total_size
+    return summary
+
+
 def _catalog_counts_readonly(catalog_path: Path) -> dict[str, Any]:
     uri = f"file:{catalog_path.resolve().as_posix()}?mode=ro&immutable=1"
     conn = sqlite3.connect(uri, uri=True)
@@ -266,6 +376,167 @@ def _catalog_counts_readonly(catalog_path: Path) -> dict[str, Any]:
         }
     finally:
         conn.close()
+
+
+class MirrorReviewer:
+    def review(
+        self,
+        *,
+        root: Path | str,
+        backup: Path | str,
+        scope: str = "low-risk-a-share",
+        mode: str = "pilot",
+        start_date: str = "20250101",
+        end_date: str = "20250131",
+        calendar_exchange: str = "SSE",
+    ) -> MirrorReviewResult:
+        ensure_mirror_scope(scope)
+        ensure_mirror_mode(mode)
+        mirror_root = Path(root)
+        backup_root = Path(backup)
+        warnings: list[str] = []
+        blocking_errors: list[str] = []
+        catalog_status: dict[str, Any] = {"present": False}
+        latest_snapshots: list[dict[str, Any]] = []
+        endpoint_summary: list[dict[str, Any]] = []
+        coverage_summary: list[dict[str, Any]] = []
+        validation_status = "not_checked"
+        validation_results: list[dict[str, Any]] = []
+        backup_inspect_dict: dict[str, Any] | None = None
+        backup_restore_dict: dict[str, Any] | None = None
+        backup_checksum_status: str | None = None
+        backup_possible_mutation = False
+
+        root_status = "missing"
+        catalog = CatalogStore(mirror_root)
+        if not catalog.db_path.exists():
+            blocking_errors.append(f"catalog not found: {catalog.db_path}")
+        else:
+            root_status = "existing_catalog"
+            try:
+                catalog_status = catalog.inspect_summary()
+                latest_snapshots = catalog.list_snapshots(latest=True, limit=100)
+                endpoint_summary = self._endpoint_summary(catalog)
+                ok, validation_results = Validator(mirror_root, catalog).validate_latest_snapshots(record=False)
+                validation_status = "succeeded" if ok else "failed"
+                if not ok:
+                    blocking_errors.append("validate --snapshot latest --no-record failed")
+                coverage_summary = self._coverage_summary(mirror_root, catalog, start_date, end_date, calendar_exchange, warnings, blocking_errors)
+            except Exception as exc:
+                blocking_errors.append(f"catalog review failed: {exc}")
+
+        backup_status = "missing"
+        if not backup_root.exists():
+            blocking_errors.append(f"backup not found: {backup_root}")
+        else:
+            backup_status = "present"
+            try:
+                inspect = BackupInspector().inspect(backup_root)
+                restore = RestoreChecker().check(backup_root)
+                backup_inspect_dict = inspect.to_dict()
+                backup_restore_dict = restore.to_dict()
+                backup_checksum_status = restore.catalog_checksum_status or inspect.catalog_checksum_status
+                backup_possible_mutation = bool(restore.possible_mutation or inspect.possible_mutation)
+                if inspect.status != "succeeded":
+                    blocking_errors.append("backup-inspect failed")
+                if restore.status != "succeeded":
+                    blocking_errors.append("restore-check failed")
+                if backup_possible_mutation:
+                    blocking_errors.append("backup catalog may have been modified after backup creation")
+            except Exception as exc:
+                blocking_errors.append(f"backup review failed: {exc}")
+
+        token_plaintext_found = _contains_token_plaintext([mirror_root, backup_root])
+        if token_plaintext_found:
+            blocking_errors.append("token plaintext found in mirror or backup artifact")
+
+        artifact_size = _artifact_size([("root", mirror_root), ("backup", backup_root)])
+        ready = not blocking_errors and not any("missing trading dates" in warning for warning in warnings)
+        return MirrorReviewResult(
+            root=str(mirror_root),
+            backup=str(backup_root),
+            scope=scope,
+            mode=mode,
+            start_date=start_date,
+            end_date=end_date,
+            calendar_exchange=calendar_exchange,
+            root_status=root_status,
+            backup_status=backup_status,
+            catalog_status=catalog_status,
+            latest_snapshots=latest_snapshots,
+            endpoint_summary=endpoint_summary,
+            coverage_summary=coverage_summary,
+            validation_status=validation_status,
+            validation_results=validation_results,
+            backup_inspect=backup_inspect_dict,
+            backup_restore_check=backup_restore_dict,
+            backup_catalog_checksum_status=backup_checksum_status,
+            backup_possible_mutation=backup_possible_mutation,
+            artifact_size=artifact_size,
+            token_plaintext_found=token_plaintext_found,
+            ready_for_next_batch=ready,
+            warnings=warnings,
+            blocking_errors=blocking_errors,
+        )
+
+    def _endpoint_summary(self, catalog: CatalogStore) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for endpoint in LOW_RISK_A_SHARE_ENDPOINTS:
+            snapshot = catalog.latest_snapshot(endpoint)
+            if not snapshot:
+                rows.append({
+                    "endpoint": endpoint,
+                    "status": "missing_snapshot",
+                    "snapshot_id": None,
+                    "record_count": 0,
+                    "raw_event_count": 0,
+                    "raw_files": 0,
+                    "lake_files": 0,
+                })
+                continue
+            files = catalog.files_for_snapshot(str(snapshot["snapshot_id"]))
+            rows.append({
+                "endpoint": endpoint,
+                "status": "current",
+                "snapshot_id": snapshot.get("snapshot_id"),
+                "record_count": sum(int(row.get("record_count") or 0) for row in files if row.get("content_type") == "lake"),
+                "raw_event_count": sum(int(row.get("raw_event_count") or 0) for row in files if row.get("content_type") == "raw"),
+                "raw_files": sum(1 for row in files if row.get("content_type") == "raw"),
+                "lake_files": sum(1 for row in files if row.get("content_type") == "lake"),
+            })
+        return rows
+
+    def _coverage_summary(
+        self,
+        root: Path,
+        catalog: CatalogStore,
+        start_date: str,
+        end_date: str,
+        calendar_exchange: str,
+        warnings: list[str],
+        blocking_errors: list[str],
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for api in DAILY_LIKE_MIRROR_APIS:
+            try:
+                report = CoverageReporter(root, catalog).report(
+                    api,
+                    start_date=start_date,
+                    end_date=end_date,
+                    trading_days_only=True,
+                    calendar_exchange=calendar_exchange,
+                )
+                data = report.to_dict()
+                data.pop("items", None)
+                data["active_exists_dates"] = [item.date for item in report.items if item.existing_status == "active_exists"]
+                data["missing_trading_dates"] = [item.date for item in report.items if item.existing_status == "missing"]
+                rows.append(data)
+                if report.missing_dates:
+                    warnings.append(f"{api} has {report.missing_dates} missing trading dates in review range")
+            except Exception as exc:
+                rows.append({"api_name": api, "status": "failed", "error": str(exc)})
+                blocking_errors.append(f"{api} coverage failed: {exc}")
+        return rows
 
 
 class MirrorPreflightChecker:

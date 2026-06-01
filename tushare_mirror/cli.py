@@ -25,7 +25,7 @@ from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
 from .hashing import token_hash
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, init_catalog_if_requested
+from .mirror import MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReviewer, init_catalog_if_requested
 from .planner import JobPlanner
 from .reader import LakeReader
 from .store import FileLakeStore
@@ -557,6 +557,30 @@ def cmd_mirror_preflight(args) -> int:
     return 1 if result.status == 'blocked' else 0
 
 
+def cmd_mirror_review(args) -> int:
+    try:
+        result = MirrorReviewer().review(
+            root=args.mirror_root_arg,
+            backup=args.backup,
+            scope=args.scope,
+            mode=args.mode,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            calendar_exchange=args.calendar_exchange,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+        if result.endpoint_summary:
+            _print_table(result.endpoint_summary, ['endpoint', 'status', 'snapshot_id', 'record_count', 'raw_event_count', 'raw_files', 'lake_files'])
+        if result.coverage_summary:
+            _print_table(result.coverage_summary, ['api_name', 'total_dates', 'covered_dates', 'missing_dates', 'failed_dates', 'quarantined_dates', 'coverage_ratio'])
+    return 1 if result.blocking_errors else 0
+
+
 def _print_mirror_plan(plan, as_json: bool) -> None:
     if as_json:
         _print_json(plan.to_dict())
@@ -972,6 +996,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--max-jobs-per-api', type=int)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_preflight)
+
+    p = sub.add_parser('mirror-review')
+    p.add_argument('--root', dest='mirror_root_arg', required=True)
+    p.add_argument('--backup', required=True)
+    p.add_argument('--scope', default='low-risk-a-share')
+    p.add_argument('--mode', default='pilot')
+    p.add_argument('--start-date', default='20250101')
+    p.add_argument('--end-date', default='20250131')
+    p.add_argument('--calendar-exchange', default='SSE')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_review)
 
     p = sub.add_parser('mirror-plan')
     p.add_argument('--scope', default='low-risk-a-share')
