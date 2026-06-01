@@ -19,6 +19,7 @@ from .errors import classify_exception, retry_delay_seconds, should_retry
 from .hashing import token_hash
 from .io_utils import now_utc
 from .planner import JobPlanner
+from .reader import LakeReader
 from .store import FileLakeStore
 from .validation import Validator
 
@@ -219,6 +220,71 @@ class MirrorReadinessResult:
             "ready_for_controlled_full_backfill": self.ready_for_controlled_full_backfill,
             "warnings": self.warnings,
             "blocking_errors": self.blocking_errors,
+        }
+
+
+@dataclass(frozen=True)
+class MirrorBatchEndpointPlan:
+    endpoint: str
+    category: str
+    requires_trade_cal: bool
+    plan_status: str
+    planned_action: str
+    total_candidate_jobs: int
+    planned_jobs: int
+    missing_jobs: int
+    skipped_jobs: int
+    blocked_jobs: int
+    max_jobs: int
+    truncated: bool
+    dates: list[str]
+    refresh_strategy: str | None = None
+    blocked_reason: str | None = None
+    warnings: list[str] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class MirrorBatchPlan:
+    batch_id: str
+    scope: str
+    root: str
+    start_date: str
+    end_date: str
+    calendar_exchange: str
+    max_jobs_per_api: int
+    endpoint_plans: list[MirrorBatchEndpointPlan]
+    total_candidate_jobs: int
+    total_planned_jobs: int
+    blocked_endpoints: int
+    warnings: list[str]
+    estimated_request_count: int
+    requires_execute_confirmation: bool
+    trade_cal_dependency_status: str
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["endpoint_plans"] = [item.to_dict() for item in self.endpoint_plans]
+        return data
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "batch_id": self.batch_id,
+            "scope": self.scope,
+            "root": self.root,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "calendar_exchange": self.calendar_exchange,
+            "max_jobs_per_api": self.max_jobs_per_api,
+            "total_candidate_jobs": self.total_candidate_jobs,
+            "total_planned_jobs": self.total_planned_jobs,
+            "blocked_endpoints": self.blocked_endpoints,
+            "estimated_request_count": self.estimated_request_count,
+            "requires_execute_confirmation": self.requires_execute_confirmation,
+            "trade_cal_dependency_status": self.trade_cal_dependency_status,
+            "warnings": self.warnings,
         }
 
 
@@ -685,6 +751,275 @@ class MirrorReadinessReporter:
             },
         }
         return checks
+
+
+class MirrorBatchPlanner:
+    REFERENCE_APIS = ["stock_basic", "hs_const"]
+    EVENT_APIS = ["namechange", "stk_managers", "stk_rewards"]
+
+    def __init__(self, root: Path | str, catalog: CatalogStore):
+        self.root = Path(root)
+        self.catalog = catalog
+
+    def plan(
+        self,
+        *,
+        scope: str,
+        start_date: str,
+        end_date: str,
+        calendar_exchange: str = "SSE",
+        max_jobs_per_api: int = 20,
+    ) -> MirrorBatchPlan:
+        ensure_mirror_scope(scope)
+        if max_jobs_per_api <= 0:
+            raise ValueError("--max-jobs-per-api must be positive")
+        if max_jobs_per_api > MODE_MAX_JOBS["pilot"]:
+            raise ValueError("mirror-batch-plan max-jobs-per-api cannot exceed 20")
+        start = DatePlanner(self.root, self.catalog)._normalize_date(start_date)
+        end = DatePlanner(self.root, self.catalog)._normalize_date(end_date)
+        if start > end:
+            raise ValueError("start_date must be <= end_date")
+        warnings = ["mirror-batch-plan is read-only; execute requires separate user confirmation"]
+        calendar = self._calendar_range(start, end, calendar_exchange)
+        endpoint_plans: list[MirrorBatchEndpointPlan] = []
+        endpoint_plans.append(self._trade_cal_plan(start, end, calendar_exchange, calendar))
+        for endpoint in self.REFERENCE_APIS:
+            endpoint_plans.append(self._reference_plan(endpoint))
+        for endpoint in DAILY_LIKE_MIRROR_APIS:
+            endpoint_plans.append(self._daily_like_plan(endpoint, start, end, calendar_exchange, max_jobs_per_api, calendar))
+        endpoint_plans.append(self._explicit_date_plan("weekly", self._weekly_dates(start, end), max_jobs_per_api, "weekly uses bounded explicit date planning only"))
+        endpoint_plans.append(self._explicit_date_plan("monthly", self._monthly_dates(start, end), max_jobs_per_api, "monthly uses bounded explicit date planning only"))
+        for endpoint in self.EVENT_APIS:
+            endpoint_plans.append(self._excluded_plan(endpoint))
+        total_candidate = sum(item.total_candidate_jobs for item in endpoint_plans)
+        total_planned = sum(item.planned_jobs for item in endpoint_plans)
+        blocked = sum(1 for item in endpoint_plans if item.plan_status.startswith("blocked"))
+        estimated = sum(item.missing_jobs for item in endpoint_plans if item.plan_status not in {"excluded_no_stock_loop"})
+        return MirrorBatchPlan(
+            batch_id=f"batch_{start}_{end}",
+            scope=scope,
+            root=str(self.root),
+            start_date=start,
+            end_date=end,
+            calendar_exchange=calendar_exchange.upper(),
+            max_jobs_per_api=max_jobs_per_api,
+            endpoint_plans=endpoint_plans,
+            total_candidate_jobs=total_candidate,
+            total_planned_jobs=total_planned,
+            blocked_endpoints=blocked,
+            warnings=warnings,
+            estimated_request_count=estimated,
+            requires_execute_confirmation=True,
+            trade_cal_dependency_status=calendar["status"],
+        )
+
+    def _calendar_range(self, start: str, end: str, exchange: str) -> dict[str, Any]:
+        natural = self._natural_dates(start, end)
+        snapshot = self.catalog.latest_snapshot("trade_cal")
+        if not snapshot:
+            return {
+                "status": "missing_snapshot",
+                "natural_dates": natural,
+                "open_dates": [],
+                "missing_calendar_dates": natural,
+                "filtered_non_trading_dates": [],
+            }
+        try:
+            table = LakeReader(self.root, self.catalog).scan_api("trade_cal", columns=["exchange", "cal_date", "is_open"])
+        except Exception as exc:
+            return {
+                "status": "unreadable",
+                "error": str(exc),
+                "natural_dates": natural,
+                "open_dates": [],
+                "missing_calendar_dates": natural,
+                "filtered_non_trading_dates": [],
+            }
+        exchange_upper = exchange.upper()
+        present: set[str] = set()
+        open_dates: set[str] = set()
+        if table.num_rows:
+            exchanges = table["exchange"].to_pylist()
+            cal_dates = table["cal_date"].to_pylist()
+            flags = table["is_open"].to_pylist()
+            planner = DatePlanner(self.root, self.catalog)
+            for source_exchange, cal_date, flag in zip(exchanges, cal_dates, flags):
+                if str(source_exchange).upper() != exchange_upper:
+                    continue
+                try:
+                    date = planner._normalize_date(str(cal_date))
+                except ValueError:
+                    continue
+                if start <= date <= end:
+                    present.add(date)
+                    if planner._is_open_flag(flag):
+                        open_dates.add(date)
+        missing = sorted(set(natural) - present)
+        open_sorted = sorted(open_dates)
+        return {
+            "status": "covered" if not missing else "missing_range",
+            "natural_dates": natural,
+            "open_dates": open_sorted,
+            "missing_calendar_dates": missing,
+            "filtered_non_trading_dates": sorted(set(natural) - set(open_sorted) - set(missing)),
+        }
+
+    def _trade_cal_plan(self, start: str, end: str, exchange: str, calendar: dict[str, Any]) -> MirrorBatchEndpointPlan:
+        missing = calendar["status"] != "covered"
+        return MirrorBatchEndpointPlan(
+            endpoint="trade_cal",
+            category="calendar_dependency",
+            requires_trade_cal=False,
+            plan_status="planned" if missing else "current",
+            planned_action="fetch_calendar_range" if missing else "skip_existing_range",
+            total_candidate_jobs=1,
+            planned_jobs=1 if missing else 0,
+            missing_jobs=1 if missing else 0,
+            skipped_jobs=0 if missing else 1,
+            blocked_jobs=0,
+            max_jobs=1,
+            truncated=False,
+            dates=[],
+            refresh_strategy=f"ensure SSE trade_cal coverage for {start}-{end}",
+            blocked_reason=None,
+            warnings=[f"missing calendar dates: {calendar['missing_calendar_dates']}"] if missing else [],
+        )
+
+    def _reference_plan(self, endpoint: str) -> MirrorBatchEndpointPlan:
+        snapshot = self.catalog.latest_snapshot(endpoint)
+        missing = snapshot is None
+        return MirrorBatchEndpointPlan(
+            endpoint=endpoint,
+            category="reference",
+            requires_trade_cal=False,
+            plan_status="planned" if missing else "current",
+            planned_action="fetch_reference_once" if missing else "skip_existing_reference",
+            total_candidate_jobs=1,
+            planned_jobs=1 if missing else 0,
+            missing_jobs=1 if missing else 0,
+            skipped_jobs=0 if missing else 1,
+            blocked_jobs=0,
+            max_jobs=1,
+            truncated=False,
+            dates=[],
+            refresh_strategy="fetch once if missing; do not refetch blindly",
+        )
+
+    def _daily_like_plan(self, endpoint: str, start: str, end: str, exchange: str, max_jobs: int, calendar: dict[str, Any]) -> MirrorBatchEndpointPlan:
+        if calendar["status"] != "covered":
+            return MirrorBatchEndpointPlan(
+                endpoint=endpoint,
+                category="daily_like",
+                requires_trade_cal=True,
+                plan_status="blocked_until_trade_cal",
+                planned_action="blocked",
+                total_candidate_jobs=0,
+                planned_jobs=0,
+                missing_jobs=0,
+                skipped_jobs=0,
+                blocked_jobs=1,
+                max_jobs=max_jobs,
+                truncated=False,
+                dates=[],
+                blocked_reason="missing_trade_cal_range",
+                warnings=["daily-like endpoints do not fall back to natural days"],
+            )
+        metadata = {
+            "calendar_source": "local trade_cal latest snapshot",
+            "exchange": exchange.upper(),
+            "requested_start_date": start,
+            "requested_end_date": end,
+            "natural_days": len(calendar["natural_dates"]),
+            "trading_days": len(calendar["open_dates"]),
+            "filtered_non_trading_days": len(calendar["filtered_non_trading_dates"]),
+            "filtered_non_trading_dates": calendar["filtered_non_trading_dates"],
+        }
+        plan = BackfillPlanner(self.root, self.catalog).plan_date_backfill(endpoint, calendar["open_dates"], max_jobs=max_jobs, calendar_metadata=metadata)
+        missing = sum(1 for job in plan.planned_jobs if job.planned_action in {"fetch", "retry_failed"})
+        skipped = sum(1 for job in plan.planned_jobs if job.planned_action == "skip_existing")
+        blocked = sum(1 for job in plan.planned_jobs if job.planned_action == "blocked_quarantined")
+        return MirrorBatchEndpointPlan(
+            endpoint=endpoint,
+            category="daily_like",
+            requires_trade_cal=True,
+            plan_status="planned" if missing else "current",
+            planned_action="calendar_backfill_missing",
+            total_candidate_jobs=plan.total_candidate_jobs,
+            planned_jobs=len(plan.planned_jobs),
+            missing_jobs=missing,
+            skipped_jobs=skipped,
+            blocked_jobs=blocked,
+            max_jobs=max_jobs,
+            truncated=plan.truncated_by_max_jobs,
+            dates=[job.date for job in plan.planned_jobs],
+            warnings=plan.warnings,
+        )
+
+    def _explicit_date_plan(self, endpoint: str, dates: list[str], max_jobs: int, notes: str) -> MirrorBatchEndpointPlan:
+        plan = BackfillPlanner(self.root, self.catalog).plan_date_backfill(endpoint, dates, max_jobs=max_jobs)
+        missing = sum(1 for job in plan.planned_jobs if job.planned_action in {"fetch", "retry_failed"})
+        skipped = sum(1 for job in plan.planned_jobs if job.planned_action == "skip_existing")
+        blocked = sum(1 for job in plan.planned_jobs if job.planned_action == "blocked_quarantined")
+        return MirrorBatchEndpointPlan(
+            endpoint=endpoint,
+            category="date_based",
+            requires_trade_cal=False,
+            plan_status="planned" if missing else "current",
+            planned_action="bounded_explicit_date_plan",
+            total_candidate_jobs=plan.total_candidate_jobs,
+            planned_jobs=len(plan.planned_jobs),
+            missing_jobs=missing,
+            skipped_jobs=skipped,
+            blocked_jobs=blocked,
+            max_jobs=max_jobs,
+            truncated=plan.truncated_by_max_jobs,
+            dates=[job.date for job in plan.planned_jobs],
+            refresh_strategy=notes,
+            warnings=plan.warnings,
+        )
+
+    def _excluded_plan(self, endpoint: str) -> MirrorBatchEndpointPlan:
+        return MirrorBatchEndpointPlan(
+            endpoint=endpoint,
+            category="event_company",
+            requires_trade_cal=False,
+            plan_status="excluded_no_stock_loop",
+            planned_action="excluded",
+            total_candidate_jobs=0,
+            planned_jobs=0,
+            missing_jobs=0,
+            skipped_jobs=0,
+            blocked_jobs=0,
+            max_jobs=0,
+            truncated=False,
+            dates=[],
+            refresh_strategy="excluded from controlled batch planning; no stock loop",
+        )
+
+    def _natural_dates(self, start: str, end: str) -> list[str]:
+        current = datetime.strptime(start, "%Y%m%d")
+        stop = datetime.strptime(end, "%Y%m%d")
+        out = []
+        while current <= stop:
+            out.append(current.strftime("%Y%m%d"))
+            current += timedelta(days=1)
+        return out
+
+    def _weekly_dates(self, start: str, end: str) -> list[str]:
+        dates = []
+        for date in self._natural_dates(start, end):
+            if datetime.strptime(date, "%Y%m%d").weekday() == 4:
+                dates.append(date)
+        return dates
+
+    def _monthly_dates(self, start: str, end: str) -> list[str]:
+        dates = self._natural_dates(start, end)
+        if not dates:
+            return []
+        by_month: dict[str, str] = {}
+        for date in dates:
+            by_month[date[:6]] = date
+        return sorted(by_month.values())
 
 
 class MirrorPreflightChecker:

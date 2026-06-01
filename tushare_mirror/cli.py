@@ -25,7 +25,7 @@ from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
 from .hashing import token_hash
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, init_catalog_if_requested
+from .mirror import MirrorBatchPlanner, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, init_catalog_if_requested
 from .planner import JobPlanner
 from .reader import LakeReader
 from .store import FileLakeStore
@@ -609,6 +609,30 @@ def cmd_mirror_readiness(args) -> int:
     return 1 if result.readiness_status == 'blocked' else 0
 
 
+def cmd_mirror_batch_plan(args) -> int:
+    root = Path(args.mirror_root_arg)
+    catalog = _open_existing_catalog(root)
+    try:
+        plan = MirrorBatchPlanner(root, catalog).plan(
+            scope=args.scope,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            calendar_exchange=args.calendar_exchange,
+            max_jobs_per_api=args.max_jobs_per_api,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _print_json(plan.to_dict())
+    else:
+        _print_table(
+            [item.to_dict() for item in plan.endpoint_plans],
+            ['endpoint', 'category', 'requires_trade_cal', 'plan_status', 'planned_action', 'total_candidate_jobs', 'planned_jobs', 'missing_jobs', 'skipped_jobs', 'blocked_jobs', 'max_jobs', 'truncated', 'blocked_reason', 'refresh_strategy'],
+        )
+        _print_key_values(plan.summary())
+    return 0
+
+
 def _print_mirror_plan(plan, as_json: bool) -> None:
     if as_json:
         _print_json(plan.to_dict())
@@ -1042,6 +1066,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--scope', default='low-risk-a-share')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_readiness)
+
+    p = sub.add_parser('mirror-batch-plan')
+    p.add_argument('--root', dest='mirror_root_arg', required=True)
+    p.add_argument('--scope', default='low-risk-a-share')
+    p.add_argument('--start-date', required=True)
+    p.add_argument('--end-date', required=True)
+    p.add_argument('--calendar-exchange', default='SSE')
+    p.add_argument('--max-jobs-per-api', type=int, required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_batch_plan)
 
     p = sub.add_parser('mirror-plan')
     p.add_argument('--scope', default='low-risk-a-share')

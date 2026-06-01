@@ -13,7 +13,8 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import MirrorOrchestrator, MirrorReadinessReporter, MirrorReviewer
+from tushare_mirror.mirror import MirrorBatchPlanner, MirrorOrchestrator, MirrorReadinessReporter, MirrorReviewer
+from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
 
@@ -78,6 +79,37 @@ class ReadinessFakeClient:
             else:
                 values.append(1.0)
         return values
+
+
+class FebruaryCalendarClient(ReadinessFakeClient):
+    def query_paginated(self, api_name, params, fields, page_size=None):
+        if api_name != "trade_cal":
+            return super().query_paginated(api_name, params, fields, page_size)
+        start = params.get("start_date", "20250201")
+        end = params.get("end_date", "20250228")
+        fields_list = ["exchange", "cal_date", "is_open", "pretrade_date"]
+        from datetime import datetime, timedelta
+
+        current = datetime.strptime(start, "%Y%m%d")
+        stop = datetime.strptime(end, "%Y%m%d")
+        rows = []
+        previous_open = "20250127"
+        while current <= stop:
+            date = current.strftime("%Y%m%d")
+            is_open = 1 if current.weekday() < 5 else 0
+            rows.append(["SSE", date, is_open, previous_open])
+            if is_open:
+                previous_open = date
+            current += timedelta(days=1)
+        event = {
+            "code": 0,
+            "msg": None,
+            "data": {"fields": fields_list, "items": rows, "has_more": False},
+            "_http_status": 200,
+            "_page_index": 0,
+            "_request_params": dict(params),
+        }
+        return QueryResult(events=[event], fields=fields_list, items=rows)
 
 
 class FullMirrorReadinessReviewTests(unittest.TestCase):
@@ -282,6 +314,99 @@ class FullMirrorReadinessReportTests(FullMirrorReadinessReviewTests):
         self.assertEqual(payload["readiness_status"], "warning")
         self.assertTrue(payload["ready_for_controlled_full_backfill"])
         self.assertNotIn("fake-review-token", result.stdout)
+
+
+class FullMirrorBatchPlanTests(FullMirrorReadinessReviewTests):
+    def fetch_feb_trade_cal(self):
+        result = FileLakeStore(self.root, self.catalog).fetch(
+            "trade_cal",
+            {"exchange": "SSE", "start_date": "20250201", "end_date": "20250228"},
+            FebruaryCalendarClient(),
+        )
+        self.assertTrue(result.snapshot_id)
+
+    def test_202502_batch_plan_blocks_daily_like_until_trade_cal_range_exists(self):
+        self.build_pilot()
+        before = self.counts()
+        plan = MirrorBatchPlanner(self.root, self.catalog).plan(
+            scope="low-risk-a-share",
+            start_date="20250201",
+            end_date="20250228",
+            calendar_exchange="SSE",
+            max_jobs_per_api=20,
+        )
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(plan.trade_cal_dependency_status, "missing_range")
+        by_endpoint = {item.endpoint: item for item in plan.endpoint_plans}
+        self.assertEqual(by_endpoint["trade_cal"].planned_action, "fetch_calendar_range")
+        for endpoint in ["daily", "adj_factor", "daily_basic", "suspend_d"]:
+            self.assertEqual(by_endpoint[endpoint].plan_status, "blocked_until_trade_cal")
+            self.assertEqual(by_endpoint[endpoint].blocked_reason, "missing_trade_cal_range")
+        self.assertEqual(by_endpoint["namechange"].plan_status, "excluded_no_stock_loop")
+
+    def test_fake_trade_cal_range_plans_daily_like_by_trading_days(self):
+        self.fetch_feb_trade_cal()
+        plan = MirrorBatchPlanner(self.root, self.catalog).plan(
+            scope="low-risk-a-share",
+            start_date="20250201",
+            end_date="20250228",
+            calendar_exchange="SSE",
+            max_jobs_per_api=20,
+        )
+        self.assertEqual(plan.trade_cal_dependency_status, "covered")
+        by_endpoint = {item.endpoint: item for item in plan.endpoint_plans}
+        self.assertEqual(by_endpoint["trade_cal"].planned_jobs, 0)
+        self.assertEqual(by_endpoint["daily"].total_candidate_jobs, 20)
+        self.assertEqual(by_endpoint["daily"].planned_jobs, 20)
+        self.assertEqual(by_endpoint["daily"].missing_jobs, 20)
+        self.assertFalse(by_endpoint["daily"].truncated)
+        self.assertEqual(by_endpoint["weekly"].dates, ["20250207", "20250214", "20250221", "20250228"])
+        self.assertEqual(by_endpoint["monthly"].dates, ["20250228"])
+
+    def test_max_jobs_truncation_and_json_output(self):
+        self.fetch_feb_trade_cal()
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-batch-plan",
+            "--root", str(self.root),
+            "--scope", "low-risk-a-share",
+            "--start-date", "20250201",
+            "--end-date", "20250228",
+            "--calendar-exchange", "SSE",
+            "--max-jobs-per-api", "2",
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "batch_id",
+            "scope",
+            "start_date",
+            "end_date",
+            "calendar_exchange",
+            "max_jobs_per_api",
+            "endpoint_plans",
+            "total_candidate_jobs",
+            "total_planned_jobs",
+            "blocked_endpoints",
+            "warnings",
+            "estimated_request_count",
+            "requires_execute_confirmation",
+        ]:
+            self.assertIn(key, payload)
+        daily = next(item for item in payload["endpoint_plans"] if item["endpoint"] == "daily")
+        self.assertTrue(daily["truncated"])
+        self.assertEqual(daily["planned_jobs"], 2)
+
+    def test_unknown_scope_is_blocked(self):
+        with self.assertRaises(ValueError):
+            MirrorBatchPlanner(self.root, self.catalog).plan(
+                scope="all",
+                start_date="20250201",
+                end_date="20250228",
+                calendar_exchange="SSE",
+                max_jobs_per_api=20,
+            )
 
 
 if __name__ == "__main__":
