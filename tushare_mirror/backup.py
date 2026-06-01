@@ -595,6 +595,8 @@ class BackupExecutor:
         else:
             raise ValueError("backup target must not be inside the source root")
         if target.exists() and not overwrite:
+            if target.is_dir() and not any(target.iterdir()):
+                return
             raise FileExistsError(f"backup target already exists: {target}; pass --overwrite to replace it")
 
     def _remove_existing_target(self, target: Path) -> None:

@@ -143,6 +143,12 @@ class Phase28BackupRestoreTests(unittest.TestCase):
         self.assertEqual(check.checked_raw_file_count, 2)
         self.assertEqual(check.checked_lake_file_count, 2)
 
+        empty_target = self.base / "empty-backup-target"
+        empty_target.mkdir()
+        empty_backup = self.run_cli("backup", "--target", str(empty_target))
+        self.assertIn("status", empty_backup.stdout)
+        self.assertEqual(RestoreChecker().check(empty_target).status, "succeeded")
+
         no_overwrite = self.run_cli("backup", "--target", str(target), check=False)
         self.assertNotEqual(no_overwrite.returncode, 0)
         self.assertIn("already exists", no_overwrite.stderr)
