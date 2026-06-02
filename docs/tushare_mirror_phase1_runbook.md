@@ -1778,6 +1778,118 @@ Stop immediately if any of these occur:
 - validation failure
 - quarantine or staged data requiring manual review
 
+## Object, Text, Intraday, and Compaction Readiness Roadmap
+
+Object/text, intraday, storage estimate, rate policy, enablement checklist, and
+compaction planning commands are infrastructure-only. They are meant to make
+future endpoint enablement observable before any high-volume or object-download
+execution path exists.
+
+Plan object/text endpoints without fetching or downloading content:
+
+```bash
+python3 -m tushare_mirror object-plan \
+  --api anns \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --json
+
+python3 -m tushare_mirror object-plan \
+  --api news \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --json
+```
+
+Plan intraday bucket layout without requesting minute/tick/order data:
+
+```bash
+python3 -m tushare_mirror intraday-plan \
+  --api stk_mins \
+  --freq 1min \
+  --start-date 20250102 \
+  --end-date 20250103 \
+  --bucket-count 64 \
+  --json
+```
+
+Estimate storage and review advisory rate/failure policy:
+
+```bash
+python3 -m tushare_mirror storage-estimate \
+  --scope low-risk-a-share \
+  --start-date 20250101 \
+  --end-date 20251231 \
+  --json
+
+python3 -m tushare_mirror rate-policy --scope low-risk-a-share --json
+python3 -m tushare_mirror rate-policy --category intraday --json
+```
+
+Inspect compaction readiness without rewriting files:
+
+```bash
+python3 -m tushare_mirror compaction-plan \
+  --root "$MIRROR_ROOT" \
+  --api daily_basic \
+  --json
+```
+
+Review endpoint enablement prerequisites:
+
+```bash
+python3 -m tushare_mirror endpoint-enable-checklist --api fina_indicator --json
+python3 -m tushare_mirror endpoint-enable-checklist --api anns --json
+python3 -m tushare_mirror endpoint-enable-checklist --api stk_mins --json
+```
+
+Important guardrails:
+
+- `object-plan` is plan-only. It does not fetch indexes, download PDFs, fetch
+  news/research content, write catalog rows, or create validation rows.
+- `intraday-plan` is plan-only. It does not request minute, tick, order, or
+  realtime data.
+- `compaction-plan` is plan-only. It reads local catalog metadata and does not
+  rewrite files, create snapshots, or modify the catalog.
+- `storage-estimate` is approximate. Intraday estimates are low-confidence
+  warnings, not capacity guarantees.
+- `rate-policy` is advisory and does not execute retries or batches.
+- `endpoint-enable-checklist` is required before enabling a disabled inventory
+  endpoint.
+- Object/text execution remains blocked until object index, object store,
+  content-addressed deduplication, validation, retention, and backup semantics
+  are designed and tested.
+- Intraday execution remains blocked until bucket partitioning, storage
+  estimates, query benchmarks, rate limits, and compaction semantics are
+  designed and tested.
+- Compaction execution remains blocked until a snapshot rewrite protocol,
+  backup/restore-check behavior, and query benchmark flow exist.
+
+Future enablement must stay narrow:
+
+1. Choose one endpoint.
+2. Complete metadata and execution policy for that endpoint.
+3. Add fake-client tests for planner, policy, writer, validation, reader,
+   backup, restore-check, and failure behavior.
+4. Run only the plan command first.
+5. Review `storage-estimate`, `rate-policy`, and
+   `endpoint-enable-checklist`.
+6. Run a user-confirmed tiny real smoke only after tests and backup path pass.
+7. Expand only after the smoke remains bounded, observable, backed up, and
+   restore-checkable.
+
+Stop immediately if any of these occur:
+
+- object metadata lacks stable object IDs or source URL fields
+- object download would be required before object store exists
+- intraday storage estimate is severe or unknown
+- bucket or compaction policy is unresolved
+- query benchmark is missing
+- backup or restore-check is missing or failing
+- schema incompatibility or quarantine appears
+- rate-limit behavior is unknown
+- any command would require a stock loop, full mirror, or unbounded history
+
 ## All Tushare API Infrastructure Roadmap
 
 The current executable scope is deliberately narrow: `low-risk-a-share` covers
