@@ -13,7 +13,9 @@ from tushare_mirror.capabilities import (
     normalize_endpoint_capability,
 )
 from tushare_mirror.catalog import CatalogStore
-from tushare_mirror.endpoints import load_into_catalog
+from tushare_mirror.endpoints import load_into_catalog, load_inventory_configs, validate_inventory_config
+from tushare_mirror.mirror import MirrorPlanner
+from tushare_mirror.planner import JobPlanner
 from tushare_mirror.planner_registry import BLOCKED_PLANNER_INFRA, PlannerRegistry, PlannerRegistryRequest, planner_registry_summary
 
 
@@ -177,3 +179,57 @@ class PlannerRegistryTests(unittest.TestCase):
         for planner_kind in ["code_list", "code_date_matrix", "period", "object_download", "bucketed_intraday", "realtime_poll"]:
             self.assertIn(planner_kind, summary["blocked_planner_kinds"])
             self.assertIn(planner_kind, summary["blocked_missing_infrastructure"])
+
+
+class DisabledEndpointInventoryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.catalog = CatalogStore(self.root)
+        self.catalog.init()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_inventory_stubs_parse_and_remain_disabled(self):
+        inventory = load_inventory_configs()
+        self.assertGreaterEqual(len(inventory), 10)
+        api_names = {item["api_name"] for item in inventory}
+        self.assertIn("income", api_names)
+        self.assertIn("anns", api_names)
+        self.assertIn("stk_mins", api_names)
+        self.assertTrue(all(item["execution_status"] == "disabled" for item in inventory))
+        self.assertTrue(all(item["required_infra"] for item in inventory))
+
+    def test_disabled_inventory_endpoints_do_not_enter_executable_catalog_or_scope(self):
+        load_into_catalog(self.root, self.catalog)
+        executable = {row["api_name"] for row in self.catalog.list_endpoints()}
+        inventory = {item["api_name"] for item in load_inventory_configs()}
+        self.assertTrue(inventory.isdisjoint(executable))
+        self.assertEqual(len(executable), 12)
+        plan = MirrorPlanner(self.root, self.catalog).plan(scope="low-risk-a-share", mode="smoke", max_jobs_per_api=3)
+        planned = {item.endpoint for item in plan.items}
+        self.assertTrue(inventory.isdisjoint(planned))
+
+    def test_disabled_endpoint_cannot_be_planned_for_fetch_without_enablement(self):
+        load_into_catalog(self.root, self.catalog)
+        with self.assertRaisesRegex(KeyError, "endpoint not found"):
+            JobPlanner(self.root, self.catalog).plan_single_fetch("income", {})
+
+    def test_malformed_inventory_fails_clearly(self):
+        with self.assertRaisesRegex(ValueError, "malformed inventory endpoint"):
+            validate_inventory_config({"api_name": "bad_inventory"}, "bad.yaml")
+        with self.assertRaisesRegex(ValueError, "must be disabled"):
+            validate_inventory_config(
+                {
+                    "api_name": "bad_inventory",
+                    "endpoint_kind": "macro",
+                    "planner_kind": "period",
+                    "execution_status": "enabled",
+                    "reason_disabled": "test",
+                    "required_infra": ["period planner"],
+                    "risk_level": "medium",
+                    "notes": "test",
+                },
+                "bad.yaml",
+            )

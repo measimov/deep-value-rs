@@ -1,0 +1,1 @@
+"""Disabled endpoint inventory stubs."""

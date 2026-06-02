@@ -10,12 +10,33 @@ import yaml
 from .capabilities import normalize_endpoint_capability
 from .hashing import partition_spec_id, table_id
 
+INVENTORY_REQUIRED_FIELDS = {
+    "api_name",
+    "endpoint_kind",
+    "planner_kind",
+    "execution_status",
+    "reason_disabled",
+    "required_infra",
+    "risk_level",
+    "notes",
+}
+
 
 def bundled_endpoint_files() -> list[Path]:
     root = resources.files("tushare_mirror.endpoint_configs")
     out: list[Path] = []
     for item in root.iterdir():
         if item.name.endswith(('.yaml', '.yml')):
+            with resources.as_file(item) as path:
+                out.append(Path(path))
+    return out
+
+
+def bundled_inventory_files() -> list[Path]:
+    root = resources.files("tushare_mirror.endpoint_configs.inventory")
+    out: list[Path] = []
+    for item in root.iterdir():
+        if item.name.endswith((".yaml", ".yml")):
             with resources.as_file(item) as path:
                 out.append(Path(path))
     return out
@@ -41,6 +62,26 @@ def load_endpoint_configs(root: Path) -> list[dict[str, Any]]:
             cfg = dict(cfg)
             cfg["_source_file"] = str(path)
             configs.append(cfg)
+    return configs
+
+
+def validate_inventory_config(cfg: dict[str, Any], source: str = "<inventory>") -> dict[str, Any]:
+    missing = sorted(field for field in INVENTORY_REQUIRED_FIELDS if field not in cfg)
+    if missing:
+        raise ValueError(f"malformed inventory endpoint in {source}: missing {', '.join(missing)}")
+    if cfg.get("execution_status") != "disabled":
+        raise ValueError(f"inventory endpoint must be disabled in {source}: {cfg.get('api_name')}")
+    return cfg
+
+
+def load_inventory_configs() -> list[dict[str, Any]]:
+    configs: list[dict[str, Any]] = []
+    for path in sorted(bundled_inventory_files()):
+        data = yaml.safe_load(path.read_text()) or {}
+        for cfg in data.get("endpoints", []):
+            item = validate_inventory_config(dict(cfg), str(path))
+            item["_source_file"] = str(path)
+            configs.append(item)
     return configs
 
 

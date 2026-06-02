@@ -1,0 +1,36 @@
+endpoints:
+  - api_name: stk_mins
+    endpoint_kind: minute_bar
+    planner_kind: bucketed_intraday
+    execution_status: disabled
+    reason_disabled: "minute data requires bucketed intraday storage and compaction policy"
+    required_infra:
+      - bucketed intraday planner
+      - compaction policy
+      - volume guardrails
+    risk_level: high
+    notes: "Inventory only; minute execution is forbidden in current goal."
+
+  - api_name: tick
+    endpoint_kind: tick
+    planner_kind: bucketed_intraday
+    execution_status: disabled
+    reason_disabled: "tick data requires bucketed storage and strict volume controls"
+    required_infra:
+      - bucketed intraday planner
+      - compaction policy
+      - volume guardrails
+    risk_level: high
+    notes: "Inventory only."
+
+  - api_name: realtime_quote
+    endpoint_kind: realtime
+    planner_kind: realtime_poll
+    execution_status: disabled
+    reason_disabled: "realtime polling policy is not implemented"
+    required_infra:
+      - realtime polling policy
+      - rate-limit policy
+      - retention policy
+    risk_level: high
+    notes: "Inventory only."

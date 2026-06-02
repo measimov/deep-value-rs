@@ -1,0 +1,22 @@
+endpoints:
+  - api_name: moneyflow
+    endpoint_kind: daily_metric
+    planner_kind: calendar_backfill
+    execution_status: disabled
+    reason_disabled: "daily-like but not yet scoped for low-risk mirror execution"
+    required_infra:
+      - field contract tests
+      - calendar-aware backfill tests
+    risk_level: medium
+    notes: "May be considered after low-risk date-based endpoints are stable."
+
+  - api_name: stk_limit
+    endpoint_kind: daily_metric
+    planner_kind: calendar_backfill
+    execution_status: disabled
+    reason_disabled: "requires endpoint-specific validation and volume review"
+    required_infra:
+      - volume estimate
+      - calendar-aware backfill tests
+    risk_level: medium
+    notes: "Inventory only."

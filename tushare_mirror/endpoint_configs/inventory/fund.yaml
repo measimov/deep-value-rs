@@ -1,0 +1,22 @@
+endpoints:
+  - api_name: fund_basic
+    endpoint_kind: fund
+    planner_kind: single_snapshot
+    execution_status: disabled
+    reason_disabled: "fund family is not in current executable mirror scope"
+    required_infra:
+      - fund scope definition
+      - endpoint contract tests
+    risk_level: medium
+    notes: "Inventory only."
+
+  - api_name: fund_nav
+    endpoint_kind: fund
+    planner_kind: code_date_matrix
+    execution_status: disabled
+    reason_disabled: "requires fund code traversal guardrails"
+    required_infra:
+      - fund code-list source
+      - bounded code/date planner
+    risk_level: high
+    notes: "Inventory only."

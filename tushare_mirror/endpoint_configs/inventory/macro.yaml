@@ -1,0 +1,22 @@
+endpoints:
+  - api_name: cn_gdp
+    endpoint_kind: macro
+    planner_kind: period
+    execution_status: disabled
+    reason_disabled: "macro period planner is not implemented"
+    required_infra:
+      - period planner
+      - macro family validation
+    risk_level: medium
+    notes: "Inventory only."
+
+  - api_name: us_tycr
+    endpoint_kind: macro
+    planner_kind: period
+    execution_status: disabled
+    reason_disabled: "macro period planner is not implemented"
+    required_infra:
+      - period planner
+      - macro family validation
+    risk_level: medium
+    notes: "Inventory only."

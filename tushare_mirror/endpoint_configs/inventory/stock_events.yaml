@@ -1,0 +1,23 @@
+endpoints:
+  - api_name: dividend
+    endpoint_kind: event
+    planner_kind: code_date_matrix
+    execution_status: disabled
+    reason_disabled: "would require stock code traversal guardrails"
+    required_infra:
+      - explicit code-list source
+      - max-code and max-job policy
+      - event dedupe policy
+    risk_level: high
+    notes: "Do not execute until code-loop infrastructure exists."
+
+  - api_name: pledge_stat
+    endpoint_kind: event
+    planner_kind: code_date_matrix
+    execution_status: disabled
+    reason_disabled: "would require code/date matrix planning"
+    required_infra:
+      - explicit code-list source
+      - bounded matrix planner
+    risk_level: high
+    notes: "Inventory only; no stock loop is allowed."

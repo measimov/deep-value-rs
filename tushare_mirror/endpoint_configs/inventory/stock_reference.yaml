@@ -1,0 +1,22 @@
+endpoints:
+  - api_name: stock_company
+    endpoint_kind: reference_snapshot
+    planner_kind: single_snapshot
+    execution_status: disabled
+    reason_disabled: "inventory only; not part of executable low-risk mirror scope"
+    required_infra:
+      - endpoint contract probe
+      - explicit enablement review
+    risk_level: low
+    notes: "Company reference metadata can be enabled later after scoped fake and real smoke tests."
+
+  - api_name: new_share
+    endpoint_kind: event
+    planner_kind: date_backfill
+    execution_status: disabled
+    reason_disabled: "requires separate event date planning and field validation"
+    required_infra:
+      - event planner review
+      - bounded date smoke
+    risk_level: medium
+    notes: "Inventory stub only; not loaded into CatalogStore endpoints."

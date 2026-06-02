@@ -1,0 +1,34 @@
+endpoints:
+  - api_name: anns
+    endpoint_kind: object_document
+    planner_kind: object_index
+    execution_status: disabled
+    reason_disabled: "PDF/object endpoints require object index and object store policy"
+    required_infra:
+      - object index planner
+      - object store layout
+      - size and retention policy
+    risk_level: high
+    notes: "Do not fetch announcement PDFs in current infrastructure work."
+
+  - api_name: news
+    endpoint_kind: text_news
+    planner_kind: object_index
+    execution_status: disabled
+    reason_disabled: "news/text endpoints require text policy and object handling"
+    required_infra:
+      - text retention policy
+      - object index planner
+    risk_level: high
+    notes: "Inventory only; no news fetch is allowed."
+
+  - api_name: report_rc
+    endpoint_kind: text_news
+    planner_kind: object_index
+    execution_status: disabled
+    reason_disabled: "research report text/object handling is not implemented"
+    required_infra:
+      - text retention policy
+      - object index planner
+    risk_level: high
+    notes: "Inventory only."

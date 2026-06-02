@@ -1,0 +1,22 @@
+endpoints:
+  - api_name: index_basic
+    endpoint_kind: index
+    planner_kind: single_snapshot
+    execution_status: disabled
+    reason_disabled: "index family is not in current executable mirror scope"
+    required_infra:
+      - endpoint contract probe
+      - scope definition
+    risk_level: medium
+    notes: "Inventory only."
+
+  - api_name: index_daily
+    endpoint_kind: index
+    planner_kind: code_date_matrix
+    execution_status: disabled
+    reason_disabled: "requires explicit index code-list guardrails"
+    required_infra:
+      - index code-list source
+      - code/date matrix planner
+    risk_level: high
+    notes: "Inventory only."

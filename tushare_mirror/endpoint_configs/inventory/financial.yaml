@@ -1,0 +1,47 @@
+endpoints:
+  - api_name: income
+    endpoint_kind: financial_statement
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "financial statements require PIT safety infrastructure"
+    required_infra:
+      - PIT policy
+      - announcement-date handling
+      - code/period matrix planner
+    risk_level: high
+    notes: "Explicitly outside current executable scope."
+
+  - api_name: balancesheet
+    endpoint_kind: financial_statement
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "financial statements require PIT safety infrastructure"
+    required_infra:
+      - PIT policy
+      - announcement-date handling
+      - code/period matrix planner
+    risk_level: high
+    notes: "Inventory only."
+
+  - api_name: cashflow
+    endpoint_kind: financial_statement
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "financial statements require PIT safety infrastructure"
+    required_infra:
+      - PIT policy
+      - announcement-date handling
+      - code/period matrix planner
+    risk_level: high
+    notes: "Inventory only."
+
+  - api_name: fina_indicator
+    endpoint_kind: financial_indicator
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "financial indicators require PIT policy before execution"
+    required_infra:
+      - PIT policy
+      - code/period matrix planner
+    risk_level: high
+    notes: "Inventory only."
