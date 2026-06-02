@@ -12,7 +12,7 @@ from pathlib import Path
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.code_period_planner import CodePeriodPlanner
-from tushare_mirror.endpoints import enrich_endpoint_config
+from tushare_mirror.endpoints import enrich_endpoint_config, load_inventory_configs
 from tushare_mirror.endpoints import load_into_catalog
 from tushare_mirror.period_planner import PeriodPlanner
 from tushare_mirror.periods import (
@@ -320,7 +320,7 @@ class PeriodPlannerCliTests(unittest.TestCase):
             check=check,
         )
 
-    def test_income_period_plan_blocks_on_incomplete_pit_metadata_without_side_effects(self):
+    def test_income_period_plan_uses_inventory_pit_metadata_without_side_effects(self):
         before = self.counts()
         result = self.run_cli(
             "period-plan",
@@ -330,15 +330,17 @@ class PeriodPlannerCliTests(unittest.TestCase):
         )
         after = self.counts()
         payload = json.loads(result.stdout)
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 0)
         self.assertEqual(before, after)
-        self.assertTrue(payload["blocked"])
+        self.assertFalse(payload["blocked"])
         self.assertFalse(payload["execution_allowed"])
         self.assertEqual(payload["periods"], ["20240331", "20240630"])
         self.assertEqual(payload["candidate_jobs"], 2)
         self.assertTrue(payload["pit_required"])
-        self.assertEqual(payload["pit_safety_status"], "blocked")
-        self.assertIn("pit:unknown_pit_safety", payload["blocking_errors"])
+        self.assertEqual(payload["pit_safety_status"], "complete")
+        self.assertEqual(payload["blocking_errors"], [])
+        self.assertEqual(payload["items"][0]["existing_status"], "missing")
+        self.assertEqual(payload["items"][0]["planned_action"], "fetch")
         self.assertNotIn("secret-token-should-not-appear", result.stdout)
         self.assertNotIn("secret-token-should-not-appear", result.stderr)
 
@@ -350,11 +352,11 @@ class PeriodPlannerCliTests(unittest.TestCase):
             period_frequency="quarterly",
             max_periods=4,
         )
-        self.assertTrue(plan.blocked)
+        self.assertFalse(plan.blocked)
         self.assertEqual(plan.periods, ["20240331", "20240630", "20240930", "20241231"])
         self.assertEqual(plan.period_count, 4)
         self.assertEqual(plan.max_periods, 4)
-        self.assertIn("pit:unknown_pit_safety", plan.blocking_errors)
+        self.assertEqual(plan.pit_safety_status, "complete")
 
     def test_max_periods_and_invalid_period_are_rejected(self):
         too_many = self.run_cli(
@@ -486,7 +488,7 @@ class PeriodPlannerCliTests(unittest.TestCase):
         self.assertTrue(plan.summary.truncated_by_period_limit)
         self.assertTrue(plan.summary.truncated_by_candidate_limit)
 
-    def test_inventory_income_code_period_blocks_on_incomplete_pit_metadata(self):
+    def test_inventory_income_code_period_uses_pit_metadata_as_plan_only(self):
         self.seed_stock_basic()
         plan = CodePeriodPlanner(self.root, self.catalog).plan(
             api_name="income",
@@ -494,9 +496,35 @@ class PeriodPlannerCliTests(unittest.TestCase):
             limit_codes=2,
             periods="20240331",
         )
-        self.assertTrue(plan.blocked)
-        self.assertIn("pit:unknown_pit_safety", plan.summary.blocking_errors)
-        self.assertEqual(plan.items, [])
+        self.assertFalse(plan.blocked)
+        self.assertEqual(plan.summary.pit_safety_status, "complete")
+        self.assertEqual(plan.summary.planned_jobs, 2)
+        self.assertEqual(len(plan.items), 2)
+        self.assertEqual(plan.items[0].existing_status, "missing")
+        self.assertFalse(plan.items[0].execution_allowed)
+
+    def test_financial_inventory_pit_metadata_is_present_and_disabled(self):
+        financial = {
+            item["api_name"]: item
+            for item in load_inventory_configs()
+            if item.get("endpoint_kind") in {"financial_statement", "financial_indicator"}
+        }
+        for api_name in [
+            "income",
+            "balancesheet",
+            "cashflow",
+            "fina_indicator",
+            "forecast",
+            "express",
+            "dividend",
+            "fina_audit",
+            "fina_mainbz",
+        ]:
+            with self.subTest(api_name=api_name):
+                item = financial[api_name]
+                self.assertEqual(item["execution_status"], "disabled")
+                self.assertEqual(validate_pit_safety(item).status, "complete")
+                self.assertEqual(item["pit_safety"]["period_field"], "period")
 
     def test_period_plan_active_exists_becomes_skip_existing(self):
         self.upsert_period_endpoint()

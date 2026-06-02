@@ -3,45 +3,260 @@ endpoints:
     endpoint_kind: financial_statement
     planner_kind: code_period_matrix
     execution_status: disabled
-    reason_disabled: "financial statements require PIT safety infrastructure"
+    reason_disabled: "financial statements require PIT-safe execution infrastructure"
     required_infra:
-      - PIT policy
-      - announcement-date handling
+      - PIT usable-after derivation
       - code/period matrix planner
+      - endpoint-specific fake tests
+      - rate-limit policy
     risk_level: high
-    notes: "Explicitly outside current executable scope."
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+      - f_ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+        - f_ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "execution disabled until PIT validation is implemented"
+    notes: "Inventory only. Plan-only period/code-period infrastructure may inspect this metadata, but execution is blocked."
 
   - api_name: balancesheet
     endpoint_kind: financial_statement
     planner_kind: code_period_matrix
     execution_status: disabled
-    reason_disabled: "financial statements require PIT safety infrastructure"
+    reason_disabled: "financial statements require PIT-safe execution infrastructure"
     required_infra:
-      - PIT policy
-      - announcement-date handling
+      - PIT usable-after derivation
       - code/period matrix planner
+      - endpoint-specific fake tests
+      - rate-limit policy
     risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+      - f_ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+        - f_ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "execution disabled until PIT validation is implemented"
     notes: "Inventory only."
 
   - api_name: cashflow
     endpoint_kind: financial_statement
     planner_kind: code_period_matrix
     execution_status: disabled
-    reason_disabled: "financial statements require PIT safety infrastructure"
+    reason_disabled: "financial statements require PIT-safe execution infrastructure"
     required_infra:
-      - PIT policy
-      - announcement-date handling
+      - PIT usable-after derivation
       - code/period matrix planner
+      - endpoint-specific fake tests
+      - rate-limit policy
     risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+      - f_ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+        - f_ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "execution disabled until PIT validation is implemented"
     notes: "Inventory only."
 
   - api_name: fina_indicator
     endpoint_kind: financial_indicator
     planner_kind: code_period_matrix
     execution_status: disabled
-    reason_disabled: "financial indicators require PIT policy before execution"
+    reason_disabled: "financial indicators require PIT-safe execution infrastructure"
     required_infra:
-      - PIT policy
+      - PIT usable-after derivation
       - code/period matrix planner
+      - endpoint-specific fake tests
+      - rate-limit policy
     risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "execution disabled until PIT validation is implemented"
+    notes: "Inventory only."
+
+  - api_name: forecast
+    endpoint_kind: financial_indicator
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "forecast endpoints require PIT policy and endpoint-specific tests"
+    required_infra:
+      - PIT usable-after derivation
+      - code/period matrix planner
+      - endpoint-specific fake tests
+      - rate-limit policy
+    risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "execution disabled until PIT validation is implemented"
+    notes: "Inventory only."
+
+  - api_name: express
+    endpoint_kind: financial_indicator
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "express report endpoints require PIT policy and endpoint-specific tests"
+    required_infra:
+      - PIT usable-after derivation
+      - code/period matrix planner
+      - endpoint-specific fake tests
+      - rate-limit policy
+    risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "execution disabled until PIT validation is implemented"
+    notes: "Inventory only."
+
+  - api_name: dividend
+    endpoint_kind: financial_indicator
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "dividend data requires PIT policy and endpoint-specific tests"
+    required_infra:
+      - PIT usable-after derivation
+      - code/period matrix planner
+      - endpoint-specific fake tests
+      - rate-limit policy
+    risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+      - record_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+        - record_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "execution disabled until PIT validation is implemented"
+    notes: "Inventory only."
+
+  - api_name: fina_audit
+    endpoint_kind: financial_indicator
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "audit endpoints require PIT policy and endpoint-specific tests"
+    required_infra:
+      - PIT usable-after derivation
+      - code/period matrix planner
+      - endpoint-specific fake tests
+      - rate-limit policy
+    risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "execution disabled until PIT validation is implemented"
+    notes: "Inventory only."
+
+  - api_name: fina_mainbz
+    endpoint_kind: financial_indicator
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "main business composition requires PIT policy and endpoint-specific tests"
+    required_infra:
+      - PIT usable-after derivation
+      - code/period matrix planner
+      - endpoint-specific fake tests
+      - rate-limit policy
+    risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - end_date
+      - ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - end_date
+        - ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "execution disabled until PIT validation is implemented"
     notes: "Inventory only."
