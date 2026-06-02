@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
+from tushare_mirror.catalog import CatalogStore
+from tushare_mirror.endpoints import load_into_catalog
+from tushare_mirror.period_planner import PeriodPlanner
 from tushare_mirror.periods import (
     MAX_PERIODS,
     PeriodRangePlanner,
@@ -178,6 +187,106 @@ class PITSafetyMetadataTests(unittest.TestCase):
         self.assertIn("missing_period_field", result.errors)
         self.assertIn("missing_announcement_date_fields", result.errors)
         self.assertIn("missing_usable_after_strategy", result.errors)
+
+
+class PeriodPlannerCliTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.catalog = CatalogStore(self.root)
+        self.catalog.init()
+        load_into_catalog(self.root, self.catalog)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def counts(self):
+        with sqlite3.connect(self.root / "_catalog" / "catalog.sqlite") as conn:
+            return {
+                "runs": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+                "jobs": conn.execute("select count(*) from jobs").fetchone()[0],
+                "files": conn.execute("select count(*) from files").fetchone()[0],
+                "snapshots": conn.execute("select count(*) from snapshots").fetchone()[0],
+                "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
+            }
+
+    def run_cli(self, *args, check=False):
+        env = dict(os.environ)
+        env["TUSHARE_TOKEN"] = "secret-token-should-not-appear"
+        return subprocess.run(
+            [sys.executable, "-m", "tushare_mirror", "--root", str(self.root), *args],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            check=check,
+        )
+
+    def test_income_period_plan_blocks_on_incomplete_pit_metadata_without_side_effects(self):
+        before = self.counts()
+        result = self.run_cli(
+            "period-plan",
+            "--api", "income",
+            "--periods", "20240331,20240630",
+            "--json",
+        )
+        after = self.counts()
+        payload = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(before, after)
+        self.assertTrue(payload["blocked"])
+        self.assertFalse(payload["execution_allowed"])
+        self.assertEqual(payload["periods"], ["20240331", "20240630"])
+        self.assertEqual(payload["candidate_jobs"], 2)
+        self.assertTrue(payload["pit_required"])
+        self.assertEqual(payload["pit_safety_status"], "blocked")
+        self.assertIn("pit:unknown_pit_safety", payload["blocking_errors"])
+        self.assertNotIn("secret-token-should-not-appear", result.stdout)
+        self.assertNotIn("secret-token-should-not-appear", result.stderr)
+
+    def test_fina_indicator_period_range_blocks_but_plans_bounded_periods(self):
+        plan = PeriodPlanner(self.root, self.catalog).plan(
+            api_name="fina_indicator",
+            start_period="2024Q1",
+            end_period="2024Q4",
+            period_frequency="quarterly",
+            max_periods=4,
+        )
+        self.assertTrue(plan.blocked)
+        self.assertEqual(plan.periods, ["20240331", "20240630", "20240930", "20241231"])
+        self.assertEqual(plan.period_count, 4)
+        self.assertEqual(plan.max_periods, 4)
+        self.assertIn("pit:unknown_pit_safety", plan.blocking_errors)
+
+    def test_max_periods_and_invalid_period_are_rejected(self):
+        too_many = self.run_cli(
+            "period-plan",
+            "--api", "income",
+            "--start-period", "2024Q1",
+            "--end-period", "2024Q4",
+            "--max-periods", "21",
+            "--json",
+        )
+        invalid = self.run_cli(
+            "period-plan",
+            "--api", "income",
+            "--periods", "20240101",
+            "--json",
+        )
+        self.assertEqual(too_many.returncode, 1)
+        self.assertIn("max_periods exceeds phase limit", too_many.stdout)
+        self.assertEqual(invalid.returncode, 1)
+        self.assertIn("unsupported period end date", invalid.stdout)
+
+    def test_non_period_endpoint_blocks_clearly(self):
+        plan = PeriodPlanner(self.root, self.catalog).plan(
+            api_name="daily",
+            periods="20240331",
+        )
+        self.assertTrue(plan.blocked)
+        self.assertIn("planner_kind_not_period_compatible:calendar_backfill", plan.blocking_errors)
+        self.assertFalse(plan.pit_required)
 
 
 if __name__ == "__main__":

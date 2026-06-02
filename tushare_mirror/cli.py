@@ -30,6 +30,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .missing_backfill import MissingBackfillPlanner
 from .mirror import MirrorBatchPlanner, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, init_catalog_if_requested
+from .period_planner import PeriodPlanner
 from .planner import JobPlanner
 from .reader import LakeReader
 from .store import FileLakeStore
@@ -746,6 +747,25 @@ def cmd_code_date_matrix_plan(args) -> int:
     return 1 if plan.blocked else 0
 
 
+def cmd_period_plan(args) -> int:
+    root = Path(args.root)
+    catalog = CatalogStore(root, read_only=True)
+    plan = PeriodPlanner(root, catalog).plan(
+        api_name=args.api,
+        periods=args.periods,
+        start_period=args.start_period,
+        end_period=args.end_period,
+        period_frequency=args.period_frequency,
+        max_periods=args.max_periods,
+    )
+    payload = plan.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_key_values(payload)
+    return 1 if plan.blocked else 0
+
+
 def _print_mirror_plan(plan, as_json: bool) -> None:
     if as_json:
         _print_json(plan.to_dict())
@@ -1221,6 +1241,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--calendar-exchange', default='SSE')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_code_date_matrix_plan)
+
+    p = sub.add_parser('period-plan')
+    p.add_argument('--api', required=True)
+    p.add_argument('--periods')
+    p.add_argument('--start-period')
+    p.add_argument('--end-period')
+    p.add_argument('--period-frequency', choices=['quarterly', 'annual'], default='quarterly')
+    p.add_argument('--max-periods', type=int, default=20)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_period_plan)
 
     p = sub.add_parser('mirror-plan')
     p.add_argument('--scope', default='low-risk-a-share')
