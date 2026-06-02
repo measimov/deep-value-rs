@@ -1549,6 +1549,68 @@ Stop before executing a next batch when any of these are present:
 The next batch must remain user-confirmed. Do not run `mirror-run --execute`
 from review, readiness, or batch-plan output alone.
 
+## Bounded Code-list Planning Infrastructure
+
+Code-list planning is infrastructure-only in this phase. It exists so future
+stock-code-scoped endpoints can be planned from local data before any execution
+path is enabled.
+
+Local code universes come only from local latest snapshots:
+
+- `a_share_listed`, `a_share_active`, `a_share_mainboard`, `a_share_sme`,
+  `a_share_chinext`, and `a_share_star` read local `stock_basic`.
+- `hs_const_sh` and `hs_const_sz` read local `hs_const`.
+- If the required local latest snapshot is missing, the command returns a
+  blocked result. It never fetches `stock_basic` or `hs_const` implicitly.
+
+Inspect a local universe:
+
+```bash
+python3 -m tushare_mirror --root "$MIRROR_ROOT" code-universe \
+  --universe a_share_listed \
+  --limit 20
+
+python3 -m tushare_mirror --root "$MIRROR_ROOT" code-universe \
+  --universe hs_const_sh \
+  --limit 20 \
+  --json
+```
+
+Generate a bounded code-list plan:
+
+```bash
+python3 -m tushare_mirror --root "$MIRROR_ROOT" code-list-plan \
+  --api namechange \
+  --universe a_share_listed \
+  --limit-codes 5 \
+  --json
+```
+
+Important guardrails:
+
+- `code-list-plan` is dry-run only.
+- `--limit-codes` is mandatory.
+- Phase code-list planning has a hard max of 20 codes.
+- The planner reads local lake/catalog data only.
+- It does not fetch, backfill, write raw/lake/snapshot data, create
+  `validation_runs`, or enable real execution.
+- It does not run a full stock loop.
+- Disabled inventory endpoints remain blocked even if a local universe exists.
+- Any actual fetch or `mirror-run` path for `code_list` or `code_date_matrix`
+  planners remains blocked by execution policy.
+
+Future endpoint enablement should stay narrow and explicit:
+
+1. Choose one endpoint.
+2. Promote that endpoint into enabled config explicitly; do not bulk-load
+   inventory stubs.
+3. Add fake-client tests for params, response fields, writer, validation,
+   reader, backup, and restore-check behavior.
+4. Plan 1-5 local codes with `code-list-plan`.
+5. Run a user-confirmed real smoke only for that endpoint and tiny code set.
+6. Add coverage/reporting for the new endpoint shape.
+7. Expand only after the small smoke and backup/restore-check path pass.
+
 ## All Tushare API Infrastructure Roadmap
 
 The current executable scope is deliberately narrow: `low-risk-a-share` covers
