@@ -18,6 +18,7 @@ from tushare_mirror.capabilities import (
     normalize_endpoint_capability,
 )
 from tushare_mirror.catalog import CatalogStore
+from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import enrich_endpoint_config, load_into_catalog, load_inventory_configs, validate_inventory_config
 from tushare_mirror.errors import MirrorError
 from tushare_mirror.mirror import MirrorPlanner
@@ -145,7 +146,25 @@ class PlannerRegistryTests(unittest.TestCase):
                 "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
             }
 
+    def seed_stock_basic(self):
+        class FakeClient:
+            def query_paginated(self, api_name, params, fields, page_size=None):
+                source_fields = ["ts_code", "symbol", "name", "area", "industry", "market", "list_date"]
+                items = [["000001.SZ", "000001", "name", "area", "industry", "主板", "20200101"]]
+                event = {
+                    "code": 0,
+                    "msg": None,
+                    "data": {"fields": source_fields, "items": items, "has_more": False},
+                    "_http_status": 200,
+                    "_page_index": 0,
+                    "_request_params": dict(params),
+                }
+                return QueryResult(events=[event], fields=source_fields, items=items)
+
+        FileLakeStore(self.root, self.catalog).fetch("stock_basic", {"list_status": "L"}, FakeClient())
+
     def test_supported_planner_kinds_resolve_without_catalog_mutation(self):
+        self.seed_stock_basic()
         registry = PlannerRegistry(self.root, self.catalog)
         before = self.counts()
         cases = [
@@ -153,12 +172,13 @@ class PlannerRegistryTests(unittest.TestCase):
             PlannerRegistryRequest("daily", "calendar_backfill", dates=["20250102"], max_jobs=1),
             PlannerRegistryRequest("adj_factor", "date_backfill", dates=["20250102"], max_jobs=1),
             PlannerRegistryRequest("weekly", "explicit_dates", dates=["20250103"], max_jobs=1),
+            PlannerRegistryRequest("stk_managers", "code_date_matrix", universe="a_share_listed", limit_codes=1, dates=["20250102"], max_dates=1),
         ]
         results = [registry.plan(case) for case in cases]
         after = self.counts()
         self.assertEqual(before, after)
-        self.assertTrue(all(result.status == "supported" for result in results))
-        self.assertEqual([result.planner_kind for result in results], ["single_snapshot", "calendar_backfill", "date_backfill", "explicit_dates"])
+        self.assertEqual([result.status for result in results], ["supported", "supported", "supported", "supported", "plan_only"])
+        self.assertEqual([result.planner_kind for result in results], ["single_snapshot", "calendar_backfill", "date_backfill", "explicit_dates", "code_date_matrix"])
         for result in results:
             payload = result.to_dict()
             self.assertIn("requires_real_requests", payload)
@@ -183,8 +203,8 @@ class PlannerRegistryTests(unittest.TestCase):
 
     def test_planner_registry_summary_is_stable(self):
         summary = planner_registry_summary()
-        self.assertEqual(summary["supported_planner_kinds"], ["calendar_backfill", "date_backfill", "explicit_dates", "single_snapshot"])
-        for planner_kind in ["code_list", "code_date_matrix", "period", "object_download", "bucketed_intraday", "realtime_poll"]:
+        self.assertEqual(summary["supported_planner_kinds"], ["calendar_backfill", "code_date_matrix", "date_backfill", "explicit_dates", "single_snapshot"])
+        for planner_kind in ["code_list", "period", "object_download", "bucketed_intraday", "realtime_poll"]:
             self.assertIn(planner_kind, summary["blocked_planner_kinds"])
             self.assertIn(planner_kind, summary["blocked_missing_infrastructure"])
 
@@ -350,6 +370,29 @@ class ExecutionPolicyGuardrailTests(unittest.TestCase):
         self.assertEqual(decision.max_codes_required, 5)
         self.assertIsNone(decision.blocked_reason)
 
+    def test_code_date_matrix_plan_is_policy_dry_run_only(self):
+        cfg = dict(self.catalog.get_endpoint_config("stk_managers"))
+        cfg["planner_kind"] = "code_date_matrix"
+        policy = EndpointExecutionPolicy()
+        decision = policy.decide(
+            ExecutionPolicyRequest(
+                endpoint_config=cfg,
+                scope="low-risk-a-share",
+                mode="pilot",
+                user_command="code-date-matrix-plan",
+                requires_real_requests=False,
+                requires_code_loop=True,
+                requires_date_loop=True,
+                max_codes_required=3,
+            )
+        )
+        self.assertEqual(decision.decision, "dry_run_only")
+        self.assertFalse(decision.allowed)
+        self.assertTrue(decision.requires_code_loop)
+        self.assertTrue(decision.requires_date_loop)
+        self.assertFalse(decision.execution_allowed)
+        self.assertIsNone(decision.blocked_reason)
+
     def test_direct_fetch_for_code_list_endpoint_is_blocked_without_client_call(self):
         cfg = dict(self.catalog.get_endpoint_config("namechange"))
         cfg["api_name"] = "namechange_code_loop"
@@ -383,6 +426,24 @@ class ExecutionPolicyGuardrailTests(unittest.TestCase):
 
         with self.assertRaisesRegex(MirrorError, "endpoint execution blocked"):
             FileLakeStore(self.root, self.catalog).fetch("disabled_namechange_code_loop", {"ts_code": "000001.SZ"}, NoCallClient(), max_attempts=1)
+        after = self.counts()
+        self.assertEqual(before, after)
+
+    def test_direct_fetch_for_code_date_matrix_endpoint_is_blocked_without_client_call(self):
+        cfg = dict(self.catalog.get_endpoint_config("stk_managers"))
+        cfg["api_name"] = "stk_managers_code_date_matrix"
+        cfg["planner_kind"] = "code_date_matrix"
+        cfg["execution_status"] = "enabled"
+        enriched, table_id, partition_spec_id = enrich_endpoint_config(cfg)
+        self.catalog.upsert_endpoint(enriched, table_id, partition_spec_id)
+        before = self.counts()
+
+        class NoCallClient:
+            def query_paginated(self, *args, **kwargs):
+                raise AssertionError("code-date matrix endpoint should not call Tushare client")
+
+        with self.assertRaisesRegex(MirrorError, "endpoint execution blocked"):
+            FileLakeStore(self.root, self.catalog).fetch("stk_managers_code_date_matrix", {"ts_code": "000001.SZ", "ann_date": "20250102"}, NoCallClient(), max_attempts=1)
         after = self.counts()
         self.assertEqual(before, after)
 
@@ -426,7 +487,8 @@ class ApiInfraReadinessReportTests(unittest.TestCase):
         self.assertEqual(payload["enabled_executable_endpoint_count"], 12)
         self.assertGreaterEqual(payload["disabled_inventory_endpoint_count"], 10)
         self.assertIn("calendar_backfill", payload["supported_planner_kinds"])
-        self.assertIn("code_date_matrix", payload["blocked_planner_kinds"])
+        self.assertIn("code_date_matrix", payload["supported_planner_kinds"])
+        self.assertNotIn("code_date_matrix", payload["blocked_planner_kinds"])
         self.assertIn("income", payload["missing_infrastructure_by_category"]["needs_pit"])
         self.assertIn("anns", payload["missing_infrastructure_by_category"]["needs_object_store"])
         self.assertIn("stk_mins", payload["missing_infrastructure_by_category"]["needs_intraday_bucket"])

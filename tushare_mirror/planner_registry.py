@@ -7,6 +7,7 @@ from typing import Any, Mapping
 from .backfill import BackfillPlanner
 from .capabilities import PLANNER_KIND_VALUES
 from .catalog import CatalogStore
+from .code_date_matrix_planner import CodeDateMatrixPlanner
 from .planner import JobPlanner
 
 
@@ -15,6 +16,7 @@ SUPPORTED_PLANNER_KINDS = {
     "date_backfill",
     "calendar_backfill",
     "explicit_dates",
+    "code_date_matrix",
 }
 
 BLOCKED_PLANNER_INFRA = {
@@ -41,6 +43,13 @@ class PlannerRegistryRequest:
     max_jobs: int = 1
     fields: list[str] | None = None
     calendar_metadata: dict[str, Any] | None = None
+    universe: str | None = None
+    limit_codes: int | None = None
+    max_dates: int | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    trading_days_only: bool = False
+    calendar_exchange: str = "SSE"
 
 
 @dataclass(frozen=True)
@@ -102,6 +111,31 @@ class PlannerRegistry:
                 warnings=[],
             )
         dates = list(request.dates or [])
+        if kind == "code_date_matrix":
+            plan = CodeDateMatrixPlanner(self.root, self.catalog).plan(
+                api_name=request.api_name,
+                universe=request.universe or "",
+                limit_codes=request.limit_codes,
+                dates=dates,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                max_dates=request.max_dates,
+                trading_days_only=request.trading_days_only,
+                calendar_exchange=request.calendar_exchange,
+            )
+            return PlannerRegistryResult(
+                api_name=request.api_name,
+                planner_kind=kind,
+                status="plan_only" if not plan.blocked else "blocked",
+                plan_type=kind if not plan.blocked else "blocked",
+                planned_jobs=plan.summary.planned_jobs if not plan.blocked else 0,
+                blocked_reason=";".join(plan.summary.blocking_errors) if plan.blocked else None,
+                missing_infrastructure=None if not plan.blocked else ";".join(plan.summary.blocking_errors),
+                requires_real_requests=not plan.blocked and plan.summary.planned_jobs > 0,
+                requires_user_confirmation=not plan.blocked and plan.summary.planned_jobs > 0,
+                plan=plan.to_dict(),
+                warnings=list(plan.summary.warnings),
+            )
         if kind in {"date_backfill", "calendar_backfill", "explicit_dates"}:
             plan = BackfillPlanner(self.root, self.catalog).plan_date_backfill(
                 request.api_name,
