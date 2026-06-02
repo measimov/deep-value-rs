@@ -25,6 +25,16 @@ READINESS_CATEGORIES = [
     "needs_intraday_bucket",
     "needs_compaction",
     "needs_realtime_policy",
+    "object_store_index",
+    "object_download_validation",
+    "text_dedup_policy",
+    "intraday_bucket_partition",
+    "compaction_executor",
+    "query_benchmark",
+    "storage_capacity_plan",
+    "remote_disaster_recovery",
+    "realtime_policy",
+    "postgres_derived_layer",
     "unsupported",
 ]
 
@@ -48,6 +58,15 @@ class ApiInfraReadinessReport:
     code_period_matrix_planner: str
     pit_safety_metadata: str
     pit_readiness_report: str
+    object_text_planner: str
+    object_download_execution: bool
+    intraday_bucket_planner: str
+    intraday_execution: bool
+    compaction_planner: str
+    compaction_execution: bool
+    storage_estimate: str
+    rate_policy_report: str
+    endpoint_enable_checklist: str
     executable_code_loop: bool
     executable_code_date_matrix: bool
     executable_period_loop: bool
@@ -103,6 +122,15 @@ class ApiInfrastructureReadinessReporter:
             code_period_matrix_planner="plan_only",
             pit_safety_metadata="implemented",
             pit_readiness_report="implemented",
+            object_text_planner="plan_only",
+            object_download_execution=False,
+            intraday_bucket_planner="plan_only",
+            intraday_execution=False,
+            compaction_planner="plan_only",
+            compaction_execution=False,
+            storage_estimate="implemented",
+            rate_policy_report="implemented",
+            endpoint_enable_checklist="implemented",
             executable_code_loop=False,
             executable_code_date_matrix=False,
             executable_period_loop=False,
@@ -142,11 +170,19 @@ class ApiInfrastructureReadinessReporter:
             categories.add("needs_pit")
         if endpoint_kind in {"object_document", "text_news"} or planner_kind in {"object_index", "object_download"}:
             categories.add("needs_object_store")
+            categories.add("object_store_index")
+            categories.add("object_download_validation")
+            categories.add("text_dedup_policy")
         if endpoint_kind in {"minute_bar", "tick"} or planner_kind == "bucketed_intraday":
             categories.add("needs_intraday_bucket")
             categories.add("needs_compaction")
+            categories.add("intraday_bucket_partition")
+            categories.add("compaction_executor")
+            categories.add("query_benchmark")
+            categories.add("storage_capacity_plan")
         if endpoint_kind == "realtime" or planner_kind == "realtime_poll":
             categories.add("needs_realtime_policy")
+            categories.add("realtime_policy")
         if endpoint_kind not in ENDPOINT_KIND_VALUES or planner_kind == "unsupported":
             categories.add("unsupported")
         if not categories:
