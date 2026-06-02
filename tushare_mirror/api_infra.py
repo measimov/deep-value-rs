@@ -10,7 +10,9 @@ from .code_date_matrix_planner import (
     MAX_CODE_DATE_MATRIX_DATES,
 )
 from .code_list_planner import MAX_CODE_LIST_PLAN_CODES
+from .code_period_planner import MAX_CODE_PERIOD_CANDIDATES, MAX_CODE_PERIOD_CODES, MAX_CODE_PERIOD_PERIODS
 from .endpoints import load_bundled_endpoint_configs, load_inventory_configs
+from .periods import MAX_PERIODS
 from .planner_registry import planner_registry_summary
 
 
@@ -42,11 +44,19 @@ class ApiInfraReadinessReport:
     code_list_planner: str
     code_date_matrix_planner: str
     code_date_matrix_existing_status: str
+    period_planner: str
+    code_period_matrix_planner: str
+    pit_safety_metadata: str
+    pit_readiness_report: str
     executable_code_loop: bool
     executable_code_date_matrix: bool
+    executable_period_loop: bool
+    executable_code_period_loop: bool
+    financial_execution: bool
     max_safe_code_plan_limit: int
     max_safe_code_limit: int
     max_safe_date_limit: int
+    max_safe_period_limit: int
     max_safe_candidate_jobs: int
     missing_for_execution: list[str]
     warnings: list[str]
@@ -78,7 +88,7 @@ class ApiInfrastructureReadinessReporter:
             missing_infrastructure_by_category=missing,
             next_recommended_infra_phases=[
                 "code-list and bounded code/date planner",
-                "period and code/period planner with PIT safety",
+                "PIT-safe period and code/period execution enablement",
                 "object index/store policy for PDF, news, and research endpoints",
                 "intraday bucket storage and compaction policy",
                 "realtime polling policy",
@@ -89,21 +99,29 @@ class ApiInfrastructureReadinessReporter:
             code_list_planner="plan_only",
             code_date_matrix_planner="plan_only",
             code_date_matrix_existing_status="implemented",
+            period_planner="plan_only",
+            code_period_matrix_planner="plan_only",
+            pit_safety_metadata="implemented",
+            pit_readiness_report="implemented",
             executable_code_loop=False,
             executable_code_date_matrix=False,
+            executable_period_loop=False,
+            executable_code_period_loop=False,
+            financial_execution=False,
             max_safe_code_plan_limit=MAX_CODE_LIST_PLAN_CODES,
-            max_safe_code_limit=MAX_CODE_DATE_MATRIX_CODES,
+            max_safe_code_limit=min(MAX_CODE_DATE_MATRIX_CODES, MAX_CODE_PERIOD_CODES),
             max_safe_date_limit=MAX_CODE_DATE_MATRIX_DATES,
-            max_safe_candidate_jobs=MAX_CODE_DATE_MATRIX_CANDIDATES,
+            max_safe_period_limit=min(MAX_PERIODS, MAX_CODE_PERIOD_PERIODS),
+            max_safe_candidate_jobs=min(MAX_CODE_DATE_MATRIX_CANDIDATES, MAX_CODE_PERIOD_CANDIDATES),
             missing_for_execution=[
-                "explicit endpoint enablement",
+                "endpoint enablement",
+                "PIT safe usable_after generation",
                 "per-endpoint fake tests",
-                "rate-limit policy",
-                "user confirmation",
                 "small real smoke",
+                "rate-limit policy",
                 "resume strategy for code/date loops",
                 "failure aggregation",
-                "coverage semantics",
+                "strategy-safe derived layer",
             ],
             warnings=[
                 "inventory endpoints are disabled and not executable",
