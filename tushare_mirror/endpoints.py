@@ -7,6 +7,7 @@ from typing import Any
 
 import yaml
 
+from .capabilities import normalize_endpoint_capability
 from .hashing import partition_spec_id, table_id
 
 
@@ -44,6 +45,7 @@ def load_endpoint_configs(root: Path) -> list[dict[str, Any]]:
 
 
 def enrich_endpoint_config(cfg: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
+    cfg = normalize_endpoint_capability(cfg)
     namespace = cfg.get("namespace") or f"tushare.{cfg.get('family', 'unknown')}"
     cfg["namespace"] = namespace
     if not cfg.get("partition"):
