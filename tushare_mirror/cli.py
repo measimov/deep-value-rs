@@ -37,6 +37,7 @@ from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
 from .planner import JobPlanner
+from .rate_policy import RatePolicyReporter
 from .reader import LakeReader
 from .store import FileLakeStore
 from .storage_estimate import StorageEstimator
@@ -764,6 +765,16 @@ def cmd_compaction_plan(args) -> int:
     return 1 if plan.blocking_errors else 0
 
 
+def cmd_rate_policy(args) -> int:
+    policy = RatePolicyReporter().report(scope=args.scope, category=args.category)
+    payload = policy.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_key_values(payload)
+    return 1 if policy.blocking_errors else 0
+
+
 def cmd_code_universe(args) -> int:
     root = Path(args.root)
     catalog = CatalogStore(root, read_only=True)
@@ -1370,6 +1381,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--api', required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_compaction_plan)
+
+    p = sub.add_parser('rate-policy')
+    p.add_argument('--scope')
+    p.add_argument('--category')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_rate_policy)
 
     p = sub.add_parser('code-universe')
     p.add_argument('--universe', required=True)

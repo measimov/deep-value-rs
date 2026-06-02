@@ -539,5 +539,56 @@ class CompactionPlanTests(unittest.TestCase):
         self.assertIn("no latest snapshot", " ".join(payload["warnings"]))
 
 
+class RatePolicyCliTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "unused-root"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *args, check=True):
+        env = dict(os.environ)
+        env["TUSHARE_TOKEN"] = "secret-token-should-not-appear"
+        return subprocess.run(
+            [sys.executable, "-m", "tushare_mirror", "--root", str(self.root), *args],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            check=check,
+        )
+
+    def test_low_risk_policy_is_present_and_read_only(self):
+        result = self.run_cli("rate-policy", "--scope", "low-risk-a-share", "--json")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["scope"], "low-risk-a-share")
+        self.assertEqual(payload["max_requests_per_batch"], 20)
+        self.assertTrue(payload["execution_allowed"])
+        self.assertIn("rate_limited", payload["retryable_errors"])
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+    def test_financial_and_intraday_policies_block_execution(self):
+        for category in ["financial", "intraday"]:
+            with self.subTest(category=category):
+                result = self.run_cli("rate-policy", "--category", category, "--json", check=False)
+                self.assertNotEqual(result.returncode, 0)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload["category"], category)
+                self.assertFalse(payload["execution_allowed"])
+                self.assertIn(f"{category}_execution_blocked", payload["blocking_errors"])
+                self.assertNotIn("secret-token-should-not-appear", result.stdout)
+                self.assertNotIn("secret-token-should-not-appear", result.stderr)
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+    def test_rate_policy_invalid_input_is_clear(self):
+        result = self.run_cli("rate-policy", "--category", "unknown", "--json", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertIn("unsupported category", payload["blocking_errors"][0])
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
