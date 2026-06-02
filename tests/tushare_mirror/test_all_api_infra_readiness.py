@@ -13,10 +13,13 @@ from tushare_mirror.capabilities import (
     normalize_endpoint_capability,
 )
 from tushare_mirror.catalog import CatalogStore
-from tushare_mirror.endpoints import load_into_catalog, load_inventory_configs, validate_inventory_config
+from tushare_mirror.endpoints import enrich_endpoint_config, load_into_catalog, load_inventory_configs, validate_inventory_config
+from tushare_mirror.errors import MirrorError
 from tushare_mirror.mirror import MirrorPlanner
+from tushare_mirror.policy import EndpointExecutionPolicy, ExecutionPolicyRequest
 from tushare_mirror.planner import JobPlanner
 from tushare_mirror.planner_registry import BLOCKED_PLANNER_INFRA, PlannerRegistry, PlannerRegistryRequest, planner_registry_summary
+from tushare_mirror.store import FileLakeStore
 
 
 class EndpointCapabilityTaxonomyTests(unittest.TestCase):
@@ -233,3 +236,88 @@ class DisabledEndpointInventoryTests(unittest.TestCase):
                 },
                 "bad.yaml",
             )
+
+
+class ExecutionPolicyGuardrailTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.catalog = CatalogStore(self.root)
+        self.catalog.init()
+        load_into_catalog(self.root, self.catalog)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def counts(self):
+        with sqlite3.connect(self.root / "_catalog" / "catalog.sqlite") as conn:
+            return {
+                "runs": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+                "jobs": conn.execute("select count(*) from jobs").fetchone()[0],
+                "files": conn.execute("select count(*) from files").fetchone()[0],
+                "snapshots": conn.execute("select count(*) from snapshots").fetchone()[0],
+                "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
+            }
+
+    def test_low_risk_existing_endpoints_are_allowed_by_policy(self):
+        policy = EndpointExecutionPolicy()
+        for row in self.catalog.list_endpoints():
+            cfg = self.catalog.get_endpoint_config(row["api_name"])
+            decision = policy.decide(ExecutionPolicyRequest(endpoint_config=cfg, scope="low-risk-a-share", mode="pilot", user_command="fetch", max_jobs=1))
+            self.assertEqual(decision.decision, "allow", cfg["api_name"])
+            self.assertTrue(decision.allowed)
+            self.assertFalse(decision.missing_infrastructure)
+
+    def test_disabled_and_unsupported_inventory_endpoints_block_with_clear_json(self):
+        policy = EndpointExecutionPolicy()
+        inventory = {item["api_name"]: item for item in load_inventory_configs()}
+        for api_name in ["income", "fina_indicator", "stk_mins", "tick", "anns", "news", "dividend"]:
+            decision = policy.decide(ExecutionPolicyRequest(endpoint_config=inventory[api_name], scope="low-risk-a-share", mode="pilot", user_command="fetch", max_jobs=1))
+            self.assertEqual(decision.decision, "blocked")
+            payload = decision.to_dict()
+            self.assertEqual(payload["api_name"], api_name)
+            self.assertIn(payload["reason"], {"endpoint_disabled", "missing_required_infrastructure"})
+            self.assertTrue(payload["missing_infrastructure"])
+            self.assertTrue(payload["requires_user_confirmation"])
+
+    def test_policy_blocks_high_risk_classes_even_if_misconfigured_as_enabled(self):
+        policy = EndpointExecutionPolicy()
+        risky = {
+            "api_name": "income",
+            "endpoint_kind": "financial_statement",
+            "planner_kind": "code_period_matrix",
+            "execution_status": "enabled",
+        }
+        decision = policy.decide(ExecutionPolicyRequest(endpoint_config=risky, user_command="fetch", max_jobs=1))
+        self.assertEqual(decision.decision, "blocked")
+        self.assertIn("PIT", " ".join(decision.missing_infrastructure))
+
+    def test_disabled_catalog_endpoint_cannot_fetch_or_mutate_catalog(self):
+        cfg = {
+            "api_name": "disabled_stock_basic",
+            "family": "stock_reference",
+            "market": "a",
+            "domain": "stock",
+            "permission_class": "regular",
+            "volume_class": "S0_STATIC",
+            "partition_template": "snapshot_date",
+            "supported_params": ["list_status"],
+            "default_fields": ["ts_code", "name"],
+            "probe": {"params": {"list_status": "L"}, "fields": ["ts_code", "name"]},
+            "page_size": 5000,
+            "endpoint_kind": "reference_snapshot",
+            "planner_kind": "single_snapshot",
+            "execution_status": "disabled",
+        }
+        enriched, table_id, partition_spec_id = enrich_endpoint_config(cfg)
+        self.catalog.upsert_endpoint(enriched, table_id, partition_spec_id)
+        before = self.counts()
+
+        class NoCallClient:
+            def query_paginated(self, *args, **kwargs):
+                raise AssertionError("disabled endpoint should not call Tushare client")
+
+        with self.assertRaisesRegex(MirrorError, "endpoint execution blocked"):
+            FileLakeStore(self.root, self.catalog).fetch("disabled_stock_basic", {"list_status": "L"}, NoCallClient(), max_attempts=1)
+        after = self.counts()
+        self.assertEqual(before, after)

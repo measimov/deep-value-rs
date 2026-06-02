@@ -15,6 +15,7 @@ from .client import QueryResult
 from .errors import ErrorType, MirrorError, classify_exception, retry_delay_seconds, should_retry
 from .hashing import params_hash, row_hash, sha256_hex
 from .io_utils import atomic_move, ensure_dir, move_tree_to_quarantine, now_utc, sha256_file, write_jsonl_zst
+from .policy import EndpointExecutionPolicy, ExecutionPolicyRequest
 from .planner import JobPlanner
 from .schema import SchemaRegistry
 from .validation import Validator
@@ -60,6 +61,16 @@ class FileLakeStore:
         run_type: str = "fetch",
     ) -> FetchResult:
         cfg = self.catalog.get_endpoint_config(api_name)
+        policy = EndpointExecutionPolicy().decide(
+            ExecutionPolicyRequest(
+                endpoint_config=cfg,
+                user_command=run_type,
+                max_jobs=1,
+                requires_real_requests=True,
+            )
+        )
+        if not policy.allowed:
+            raise MirrorError(ErrorType.INVALID_ENDPOINT, f"endpoint execution blocked: {policy.to_dict()}")
         plan = JobPlanner(self.root, self.catalog).plan_single_fetch(api_name, params, fields)
         if plan.existing_active_data:
             snap = self.catalog.latest_snapshot(api_name)
