@@ -75,13 +75,15 @@ class CodeListPlanner:
                 return self._blocked(api_name, universe, "endpoint_disabled_inventory")
             return self._blocked(api_name, universe, "endpoint_not_found")
         cfg = self.catalog.get_endpoint_config(api_name)
-        if cfg.get("execution_status") != "enabled":
+        execution_status = str(cfg.get("execution_status") or "enabled")
+        if execution_status != "enabled":
             return self._blocked(api_name, universe, "endpoint_not_enabled")
         supported_params = set(cfg.get("supported_params") or [])
         if "ts_code" not in supported_params:
             return self._blocked(api_name, universe, "endpoint_does_not_support_ts_code")
-        if cfg.get("planner_kind") not in {"single_snapshot", "code_list", "code_date_matrix"}:
-            return self._blocked(api_name, universe, f"planner_kind_not_code_list_compatible:{cfg.get('planner_kind')}")
+        planner_kind = str(cfg.get("planner_kind") or "single_snapshot")
+        if planner_kind not in {"single_snapshot", "code_list", "code_date_matrix"}:
+            return self._blocked(api_name, universe, f"planner_kind_not_code_list_compatible:{planner_kind}")
 
         universe_result = CodeUniverseProvider(self.root, self.catalog).get(universe, limit=limit_codes)
         if universe_result.blocked:

@@ -227,6 +227,23 @@ class BoundedCodeListPlannerTests(unittest.TestCase):
         self.assertTrue(all(item.would_require_real_request for item in plan.items))
         self.assertTrue(all(item.job_key for item in plan.items))
 
+    def test_legacy_enabled_endpoint_without_capability_fields_can_be_planned(self):
+        cfg = dict(self.catalog.get_endpoint_config("namechange"))
+        table_id = cfg["table_id"]
+        partition_spec_id = cfg["partition_spec_id"]
+        cfg.pop("execution_status", None)
+        cfg.pop("planner_kind", None)
+        cfg.pop("endpoint_kind", None)
+        self.catalog.upsert_endpoint(cfg, table_id, partition_spec_id)
+        self.seed_stock_basic()
+        before = self.counts()
+        plan = CodeListPlanner(self.root, self.catalog).plan("namechange", "a_share_listed", limit_codes=1)
+        after = self.counts()
+        self.assertEqual(before, after)
+        self.assertFalse(plan.blocked)
+        self.assertEqual(plan.candidate_jobs, 1)
+        self.assertEqual(plan.items[0].ts_code, "000001.SZ")
+
     def test_stk_managers_plan_with_date_range_and_json_cli(self):
         self.seed_stock_basic()
         before = self.counts()
