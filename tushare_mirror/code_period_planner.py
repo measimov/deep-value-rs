@@ -219,8 +219,10 @@ class CodePeriodPlanner:
                     fetch_plan = planner.plan_single_fetch(api_name, params)
                     job_key = fetch_plan.job_key
                     params = fetch_plan.params
+                    existing_status, planned_action = self._existing_status_and_action(api_name, job_key, fetch_plan.existing_active_data)
                 else:
                     job_key = make_job_key(api_name, params, [], f"inventory_{api_name}_code_period_v1")
+                    existing_status, planned_action = "missing", "fetch"
                 items.append(
                     CodePeriodPlanItem(
                         api_name=api_name,
@@ -228,13 +230,13 @@ class CodePeriodPlanner:
                         period=period,
                         params=params,
                         job_key=job_key,
-                        existing_status="missing",
-                        planned_action="fetch",
+                        existing_status=existing_status,
+                        planned_action=planned_action,
                         pit_required=pit_result.pit_required,
                         pit_safety_status=pit_result.status,
-                        would_require_real_request=True,
+                        would_require_real_request=planned_action in {"fetch", "retry_failed"},
                         execution_allowed=False,
-                        blocked_reason=None,
+                        blocked_reason=self._blocked_reason_for_action(planned_action),
                     )
                 )
         return CodePeriodPlan(summary=summary, items=items)
@@ -279,6 +281,28 @@ class CodePeriodPlanner:
     def _params_for_period(self, cfg: dict[str, Any], ts_code: str, period: str) -> dict[str, Any]:
         period_field = cfg.get("period_field") or (cfg.get("pit_safety") or {}).get("period_field") or "period"
         return {"ts_code": ts_code, str(period_field): period}
+
+    def _existing_status_and_action(self, api_name: str, job_key: str, active_exists: bool) -> tuple[str, str]:
+        if active_exists:
+            return "active_exists", "skip_existing"
+        if self.catalog.quarantine_exists_for_job(job_key):
+            return "quarantined_exists", "blocked_quarantined"
+        statuses = self.catalog.file_statuses_for_job(job_key, api_name)
+        if "staged" in statuses:
+            return "staged_exists", "blocked_staged"
+        job = self.catalog.get_job(job_key)
+        if job and job.get("status") == "failed":
+            return "failed_exists", "retry_failed"
+        if job:
+            return "unknown", "fetch"
+        return "missing", "fetch"
+
+    def _blocked_reason_for_action(self, planned_action: str) -> str | None:
+        if planned_action == "blocked_quarantined":
+            return "quarantined_exists"
+        if planned_action == "blocked_staged":
+            return "staged_exists"
+        return None
 
     def _blocked(
         self,

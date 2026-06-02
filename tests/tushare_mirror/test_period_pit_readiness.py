@@ -25,6 +25,7 @@ from tushare_mirror.periods import (
     period_year,
 )
 from tushare_mirror.pit import pit_metadata_from_config, validate_pit_safety
+from tushare_mirror.planner import JobPlanner
 from tushare_mirror.store import FileLakeStore
 
 
@@ -267,6 +268,45 @@ class PeriodPlannerCliTests(unittest.TestCase):
         enriched, table_id, partition_spec_id = enrich_endpoint_config(cfg)
         self.catalog.upsert_endpoint(enriched, table_id, partition_spec_id)
 
+    def upsert_period_endpoint(self, api_name: str = "cn_gdp"):
+        cfg = {
+            "api_name": api_name,
+            "family": "macro",
+            "market": "cn",
+            "domain": "macro",
+            "namespace": "tushare.macro",
+            "volume_class": "M1_MACRO",
+            "endpoint_kind": "macro",
+            "planner_kind": "single_snapshot",
+            "execution_status": "enabled",
+            "partition_template": "period_year",
+            "primary_date_field": "period",
+            "period_field": "period",
+            "supported_params": ["period"],
+            "default_fields": ["period", "value"],
+            "probe": {"params": {"period": "20240331"}, "fields": ["period", "value"]},
+            "pit_safety": {"pit_required": False},
+        }
+        enriched, table_id, partition_spec_id = enrich_endpoint_config(cfg)
+        self.catalog.upsert_endpoint(enriched, table_id, partition_spec_id)
+
+    def fetch_period_endpoint(self, api_name: str, period: str):
+        class FakeClient:
+            def query_paginated(self, api_name, params, fields, page_size=None):
+                source_fields = ["period", "value"]
+                items = [[params["period"], 1.0]]
+                event = {
+                    "code": 0,
+                    "msg": None,
+                    "data": {"fields": source_fields, "items": items, "has_more": False},
+                    "_http_status": 200,
+                    "_page_index": 0,
+                    "_request_params": dict(params),
+                }
+                return QueryResult(events=[event], fields=source_fields, items=items)
+
+        return FileLakeStore(self.root, self.catalog).fetch(api_name, {"period": period}, FakeClient())
+
     def run_cli(self, *args, check=False):
         env = dict(os.environ)
         env["TUSHARE_TOKEN"] = "secret-token-should-not-appear"
@@ -457,6 +497,87 @@ class PeriodPlannerCliTests(unittest.TestCase):
         self.assertTrue(plan.blocked)
         self.assertIn("pit:unknown_pit_safety", plan.summary.blocking_errors)
         self.assertEqual(plan.items, [])
+
+    def test_period_plan_active_exists_becomes_skip_existing(self):
+        self.upsert_period_endpoint()
+        self.fetch_period_endpoint("cn_gdp", "20240331")
+        before = self.counts()
+        plan = PeriodPlanner(self.root, self.catalog).plan(
+            api_name="cn_gdp",
+            periods="20240331,20240630",
+        )
+        after = self.counts()
+        self.assertEqual(before, after)
+        by_period = {item.period: item for item in plan.items}
+        self.assertEqual(by_period["20240331"].existing_status, "active_exists")
+        self.assertEqual(by_period["20240331"].planned_action, "skip_existing")
+        self.assertEqual(by_period["20240630"].existing_status, "missing")
+        self.assertEqual(by_period["20240630"].planned_action, "fetch")
+        self.assertFalse(by_period["20240331"].execution_allowed)
+
+    def test_code_period_failed_staged_and_quarantined_statuses_are_reported(self):
+        self.seed_stock_basic()
+        self.upsert_financial_endpoint("income", "financial_statement")
+        job_planner = JobPlanner(self.root, self.catalog)
+        run_id = self.catalog.create_run("test")
+        setup = [
+            ("000001.SZ", "failed_exists"),
+            ("000002.SZ", "staged_exists"),
+            ("000004.SZ", "quarantined_exists"),
+        ]
+        cfg = self.catalog.get_endpoint_config("income")
+        for ts_code, status in setup:
+            fetch_plan = job_planner.plan_single_fetch("income", {"ts_code": ts_code, "period": "20240331"})
+            self.catalog.upsert_job(fetch_plan.job_key, run_id, "income", fetch_plan.params, fetch_plan.fields, "running")
+            if status == "failed_exists":
+                self.catalog.update_job_failed(fetch_plan.job_key, "boom", "schema_incompatible")
+            elif status == "staged_exists":
+                self.catalog.insert_file(
+                    table_id=cfg["table_id"],
+                    api_name="income",
+                    content_type="lake",
+                    file_format="parquet",
+                    relative_path=f"lake/test/{fetch_plan.job_key}.parquet",
+                    staged_path=None,
+                    partition_values=fetch_plan.partition_values,
+                    record_count=0,
+                    source_item_count=0,
+                    raw_event_count=None,
+                    error_event_count=0,
+                    size_bytes=0,
+                    sha256="0",
+                    schema_id=None,
+                    status="staged",
+                    run_id=run_id,
+                    job_key=fetch_plan.job_key,
+                )
+            else:
+                self.catalog.record_quarantine(
+                    run_id,
+                    fetch_plan.job_key,
+                    "income",
+                    "schema_incompatible",
+                    f"_quarantine/{fetch_plan.job_key}.jsonl.zst",
+                    1,
+                    "0",
+                )
+        before = self.counts()
+        plan = CodePeriodPlanner(self.root, self.catalog).plan(
+            api_name="income",
+            universe="a_share_listed",
+            limit_codes=3,
+            periods="20240331",
+        )
+        after = self.counts()
+        self.assertEqual(before, after)
+        by_code = {item.ts_code: item for item in plan.items}
+        self.assertEqual(by_code["000001.SZ"].existing_status, "failed_exists")
+        self.assertEqual(by_code["000001.SZ"].planned_action, "retry_failed")
+        self.assertEqual(by_code["000002.SZ"].existing_status, "staged_exists")
+        self.assertEqual(by_code["000002.SZ"].planned_action, "blocked_staged")
+        self.assertEqual(by_code["000004.SZ"].existing_status, "quarantined_exists")
+        self.assertEqual(by_code["000004.SZ"].planned_action, "blocked_quarantined")
+        self.assertFalse(by_code["000004.SZ"].would_require_real_request)
 
 
 if __name__ == "__main__":
