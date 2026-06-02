@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from .capabilities import ENDPOINT_KIND_VALUES, normalize_endpoint_capability
+from .code_list_planner import MAX_CODE_LIST_PLAN_CODES
 from .endpoints import load_bundled_endpoint_configs, load_inventory_configs
 from .planner_registry import planner_registry_summary
 
@@ -32,6 +33,12 @@ class ApiInfraReadinessReport:
     next_recommended_infra_phases: list[str]
     executable_api_names: list[str]
     disabled_inventory_api_names: list[str]
+    code_universe_provider: str
+    code_list_planner: str
+    code_date_matrix_planner: str
+    executable_code_loop: bool
+    max_safe_code_plan_limit: int
+    missing_for_execution: list[str]
     warnings: list[str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -68,6 +75,18 @@ class ApiInfrastructureReadinessReporter:
             ],
             executable_api_names=executable_api_names,
             disabled_inventory_api_names=disabled_api_names,
+            code_universe_provider="implemented",
+            code_list_planner="plan_only",
+            code_date_matrix_planner="plan_only",
+            executable_code_loop=False,
+            max_safe_code_plan_limit=MAX_CODE_LIST_PLAN_CODES,
+            missing_for_execution=[
+                "explicit enablement workflow",
+                "per-endpoint tests",
+                "rate-limit policy",
+                "user confirmation",
+                "small real smoke",
+            ],
             warnings=[
                 "inventory endpoints are disabled and not executable",
                 "all-api readiness is infrastructure-only; it does not run mirror-run, fetch, or backfill",

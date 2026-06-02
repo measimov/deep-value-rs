@@ -651,6 +651,12 @@ def cmd_api_infra_readiness(args) -> int:
                 "supported_endpoint_kinds": payload["supported_endpoint_kinds"],
                 "supported_planner_kinds": payload["supported_planner_kinds"],
                 "blocked_planner_kinds": payload["blocked_planner_kinds"],
+                "code_universe_provider": payload["code_universe_provider"],
+                "code_list_planner": payload["code_list_planner"],
+                "code_date_matrix_planner": payload["code_date_matrix_planner"],
+                "executable_code_loop": payload["executable_code_loop"],
+                "max_safe_code_plan_limit": payload["max_safe_code_plan_limit"],
+                "missing_for_execution": payload["missing_for_execution"],
                 "warnings": payload["warnings"],
             }
         )

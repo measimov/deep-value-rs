@@ -432,6 +432,12 @@ class ApiInfraReadinessReportTests(unittest.TestCase):
         self.assertIn("stk_mins", payload["missing_infrastructure_by_category"]["needs_intraday_bucket"])
         self.assertIn("realtime_quote", payload["missing_infrastructure_by_category"]["needs_realtime_policy"])
         self.assertIn("daily_basic", payload["missing_infrastructure_by_category"]["low_risk_ready"])
+        self.assertEqual(payload["code_universe_provider"], "implemented")
+        self.assertEqual(payload["code_list_planner"], "plan_only")
+        self.assertEqual(payload["code_date_matrix_planner"], "plan_only")
+        self.assertFalse(payload["executable_code_loop"])
+        self.assertEqual(payload["max_safe_code_plan_limit"], 20)
+        self.assertIn("small real smoke", payload["missing_for_execution"])
 
     def test_cli_json_fields_and_no_side_effects(self):
         result = self.run_cli("--root", str(self.root), "api-infra-readiness", "--json")
@@ -439,6 +445,9 @@ class ApiInfraReadinessReportTests(unittest.TestCase):
         self.assertIn("supported_endpoint_kinds", payload)
         self.assertIn("missing_infrastructure_by_category", payload)
         self.assertIn("next_recommended_infra_phases", payload)
+        self.assertEqual(payload["code_universe_provider"], "implemented")
+        self.assertEqual(payload["code_list_planner"], "plan_only")
+        self.assertFalse(payload["executable_code_loop"])
         self.assertNotIn("secret-token-should-not-appear", result.stdout)
         self.assertNotIn("secret-token-should-not-appear", result.stderr)
         self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
@@ -446,5 +455,6 @@ class ApiInfraReadinessReportTests(unittest.TestCase):
     def test_cli_table_output_is_read_only(self):
         result = self.run_cli("--root", str(self.root), "api-infra-readiness")
         self.assertIn("enabled_executable_endpoint_count", result.stdout)
+        self.assertIn("code_list_planner", result.stdout)
         self.assertIn("needs_pit", result.stdout)
         self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
