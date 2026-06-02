@@ -25,6 +25,7 @@ from .code_period_planner import CodePeriodPlanner
 from .code_date_matrix_planner import CodeDateMatrixPlanner
 from .code_list_planner import CodeListPlanner
 from .code_universe import CodeUniverseProvider
+from .compaction import CompactionPlanner
 from .coverage import CoverageReporter
 from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
@@ -749,6 +750,20 @@ def cmd_storage_estimate(args) -> int:
     return 1 if estimate.blocking_errors else 0
 
 
+def cmd_compaction_plan(args) -> int:
+    root = Path(args.compaction_root or args.root)
+    plan = CompactionPlanner(root).plan(args.api)
+    payload = plan.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_table([item.to_dict() for item in plan.candidate_partitions], ["partition_key", "file_count", "small_file_count", "oversized_file_count", "total_size_bytes", "estimated_action"])
+        summary = dict(payload)
+        summary.pop("candidate_partitions", None)
+        _print_key_values(summary)
+    return 1 if plan.blocking_errors else 0
+
+
 def cmd_code_universe(args) -> int:
     root = Path(args.root)
     catalog = CatalogStore(root, read_only=True)
@@ -1349,6 +1364,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--bucket-count', type=int)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_storage_estimate)
+
+    p = sub.add_parser('compaction-plan')
+    p.add_argument('--root', dest='compaction_root')
+    p.add_argument('--api', required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_compaction_plan)
 
     p = sub.add_parser('code-universe')
     p.add_argument('--universe', required=True)

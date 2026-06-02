@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.capabilities import ENDPOINT_KIND_VALUES
+from tushare_mirror.compaction import CompactionPlanner
 from tushare_mirror.intraday import intraday_metadata_from_config, validate_intraday_metadata
 from tushare_mirror.object_text import object_text_metadata_from_config, validate_object_text_metadata
 
@@ -429,6 +432,111 @@ class StorageEstimateCliTests(unittest.TestCase):
         self.assertNotIn("secret-token-should-not-appear", result.stdout)
         self.assertNotIn("secret-token-should-not-appear", result.stderr)
         self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+
+class CompactionPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.catalog = CatalogStore(self.root)
+        self.catalog.init()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def counts(self):
+        with sqlite3.connect(self.root / "_catalog" / "catalog.sqlite") as conn:
+            return {
+                "runs": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+                "jobs": conn.execute("select count(*) from jobs").fetchone()[0],
+                "files": conn.execute("select count(*) from files").fetchone()[0],
+                "snapshots": conn.execute("select count(*) from snapshots").fetchone()[0],
+                "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
+            }
+
+    def add_lake_snapshot(self, api_name: str, sizes: list[int], partition: dict[str, str]):
+        file_ids = []
+        for idx, size in enumerate(sizes):
+            file_ids.append(
+                self.catalog.insert_file(
+                    table_id="tbl_test",
+                    api_name=api_name,
+                    content_type="lake",
+                    file_format="parquet",
+                    relative_path=f"lake/api={api_name}/part-{idx}.parquet",
+                    staged_path=None,
+                    partition_values=partition,
+                    record_count=1,
+                    source_item_count=None,
+                    raw_event_count=None,
+                    error_event_count=None,
+                    size_bytes=size,
+                    sha256=f"{idx:064x}",
+                    schema_id=None,
+                    status="staged",
+                    run_id="run_test",
+                    job_key=f"job_{idx}",
+                )
+            )
+        return self.catalog.commit_snapshot(
+            api_name=api_name,
+            table_id="tbl_test",
+            file_ids=file_ids,
+            run_id="run_test",
+            checkpoint_key=f"ckpt_{api_name}",
+            cursor="test",
+        )
+
+    def test_no_candidates_is_read_only(self):
+        self.add_lake_snapshot("daily_basic", [2 * 1024 * 1024, 3 * 1024 * 1024], {"year": "2025", "month": "01"})
+        before = self.counts()
+        plan = CompactionPlanner(self.root, self.catalog).plan("daily_basic")
+        after = self.counts()
+        self.assertEqual(before, after)
+        self.assertEqual(plan.partitions_checked, 1)
+        self.assertEqual(plan.candidate_partitions, [])
+        self.assertFalse(plan.execution_allowed)
+
+    def test_fake_small_file_candidates(self):
+        self.add_lake_snapshot("daily_basic", [128] * 5, {"year": "2025", "month": "01"})
+        plan = CompactionPlanner(self.root, self.catalog).plan("daily_basic")
+        self.assertEqual(len(plan.candidate_partitions), 1)
+        self.assertEqual(plan.small_file_count, 5)
+        self.assertEqual(plan.candidate_partitions[0].estimated_action, "compact_small_files")
+
+    def test_oversized_file_candidate(self):
+        self.add_lake_snapshot("daily_basic", [2 * 1024 * 1024 * 1024], {"year": "2025", "month": "01"})
+        plan = CompactionPlanner(self.root, self.catalog).plan("daily_basic")
+        self.assertEqual(len(plan.candidate_partitions), 1)
+        self.assertEqual(plan.oversized_file_count, 1)
+        self.assertEqual(plan.candidate_partitions[0].estimated_action, "split_or_rewrite_oversized_files")
+
+    def test_cli_json_no_snapshot_and_no_side_effects(self):
+        before = self.counts()
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tushare_mirror",
+                "compaction-plan",
+                "--root",
+                str(self.root),
+                "--api",
+                "daily_basic",
+                "--json",
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        after = self.counts()
+        self.assertEqual(before, after)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["api_name"], "daily_basic")
+        self.assertFalse(payload["execution_allowed"])
+        self.assertIn("no latest snapshot", " ".join(payload["warnings"]))
 
 
 if __name__ == "__main__":
