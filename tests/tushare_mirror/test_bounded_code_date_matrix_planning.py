@@ -18,6 +18,7 @@ from tushare_mirror.code_date_matrix_planner import (
     CodeDateMatrixSummary,
 )
 from tushare_mirror.endpoints import load_into_catalog
+from tushare_mirror.planner import JobPlanner
 from tushare_mirror.store import FileLakeStore
 
 
@@ -313,6 +314,82 @@ class CodeDateMatrixPlannerCliTests(unittest.TestCase):
         self.assertEqual(plan.summary.planned_jobs, 100)
         self.assertEqual(len(plan.items), 100)
         self.assertTrue(plan.summary.truncated_by_candidate_limit)
+
+    def test_existing_active_data_becomes_skip_existing(self):
+        self.seed_stock_basic()
+        fields = ["ts_code", "ann_date", "name", "gender", "lev", "title", "edu", "national", "birthday", "begin_date", "end_date"]
+        items = [["000001.SZ", "20250102", "manager", "M", "1", "title", "edu", "CN", "19800101", "20200101", None]]
+        FileLakeStore(self.root, self.catalog).fetch(
+            "stk_managers",
+            {"ts_code": "000001.SZ", "ann_date": "20250102"},
+            CodeDateMatrixFakeClient(fields, items),
+        )
+        before = self.counts()
+        plan = CodeDateMatrixPlanner(self.root, self.catalog).plan(
+            api_name="stk_managers",
+            universe="a_share_listed",
+            limit_codes=1,
+            dates="20250102",
+        )
+        after = self.counts()
+        self.assertEqual(before, after)
+        self.assertEqual(plan.items[0].existing_status, "active_exists")
+        self.assertEqual(plan.items[0].planned_action, "skip_existing")
+        self.assertFalse(plan.items[0].would_require_real_request)
+
+    def test_failed_staged_and_quarantined_statuses_are_reported(self):
+        self.seed_stock_basic(count=3)
+        planner = JobPlanner(self.root, self.catalog)
+        rows = [
+            ("000001.SZ", "20250102", "failed_exists", "retry_failed"),
+            ("000002.SZ", "20250102", "staged_exists", "retry_failed"),
+            ("000004.SZ", "20250102", "quarantined_exists", "blocked_quarantined"),
+        ]
+        for ts_code, date, status, _action in rows:
+            fetch_plan = planner.plan_single_fetch("stk_managers", {"ts_code": ts_code, "ann_date": date})
+            run_id = self.catalog.create_run("test")
+            self.catalog.upsert_job(fetch_plan.job_key, run_id, "stk_managers", fetch_plan.params, fetch_plan.fields, "running")
+            if status == "failed_exists":
+                self.catalog.update_job_failed(fetch_plan.job_key, "failed for test", "rate_limited")
+            elif status == "staged_exists":
+                self.catalog.insert_file(
+                    table_id=fetch_plan.table_id,
+                    api_name="stk_managers",
+                    content_type="lake",
+                    file_format="parquet",
+                    relative_path=fetch_plan.lake_path,
+                    staged_path=None,
+                    partition_values=fetch_plan.partition_values,
+                    record_count=1,
+                    source_item_count=1,
+                    raw_event_count=None,
+                    error_event_count=0,
+                    size_bytes=1,
+                    sha256="abc",
+                    schema_id=None,
+                    status="staged",
+                    run_id=run_id,
+                    job_key=fetch_plan.job_key,
+                )
+            elif status == "quarantined_exists":
+                self.catalog.record_quarantine(run_id, fetch_plan.job_key, "stk_managers", "schema incompatible", "_quarantine/test", None, None)
+        before = self.counts()
+        plan = CodeDateMatrixPlanner(self.root, self.catalog).plan(
+            api_name="stk_managers",
+            universe="a_share_listed",
+            limit_codes=3,
+            dates="20250102",
+        )
+        after = self.counts()
+        self.assertEqual(before, after)
+        by_code = {item.ts_code: item for item in plan.items}
+        self.assertEqual(by_code["000001.SZ"].existing_status, "failed_exists")
+        self.assertEqual(by_code["000001.SZ"].planned_action, "retry_failed")
+        self.assertEqual(by_code["000002.SZ"].existing_status, "staged_exists")
+        self.assertEqual(by_code["000002.SZ"].planned_action, "retry_failed")
+        self.assertEqual(by_code["000004.SZ"].existing_status, "quarantined_exists")
+        self.assertEqual(by_code["000004.SZ"].planned_action, "blocked_quarantined")
+        self.assertFalse(by_code["000004.SZ"].execution_allowed)
 
 
 if __name__ == "__main__":

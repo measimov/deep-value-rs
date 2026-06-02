@@ -220,8 +220,11 @@ class CodeDateMatrixPlanner:
             for date in selected_dates:
                 params = self._params_for_date(cfg, ts_code, date)
                 fetch_plan = job_planner.plan_single_fetch(api_name, params)
-                existing_status = "active_exists" if fetch_plan.existing_active_data else "missing"
-                planned_action = "skip_existing" if fetch_plan.existing_active_data else "fetch"
+                existing_status, planned_action = self._existing_status_and_action(
+                    api_name,
+                    fetch_plan.job_key,
+                    fetch_plan.existing_active_data,
+                )
                 items.append(
                     CodeDateMatrixItem(
                         api_name=api_name,
@@ -231,8 +234,9 @@ class CodeDateMatrixPlanner:
                         job_key=fetch_plan.job_key,
                         existing_status=existing_status,
                         planned_action=planned_action,
-                        would_require_real_request=not fetch_plan.existing_active_data,
+                        would_require_real_request=planned_action in {"fetch", "retry_failed"},
                         execution_allowed=False,
+                        blocked_reason="quarantined_exists" if planned_action == "blocked_quarantined" else None,
                     )
                 )
         return CodeDateMatrixPlan(summary=summary, items=items)
@@ -296,6 +300,21 @@ class CodeDateMatrixPlanner:
         else:
             params["date"] = date
         return params
+
+    def _existing_status_and_action(self, api_name: str, job_key: str, active_exists: bool) -> tuple[str, str]:
+        if active_exists:
+            return "active_exists", "skip_existing"
+        if self.catalog.quarantine_exists_for_job(job_key):
+            return "quarantined_exists", "blocked_quarantined"
+        statuses = self.catalog.file_statuses_for_job(job_key, api_name)
+        if "staged" in statuses:
+            return "staged_exists", "retry_failed"
+        job = self.catalog.get_job(job_key)
+        if job and job.get("status") == "failed":
+            return "failed_exists", "retry_failed"
+        if job:
+            return "unknown", "fetch"
+        return "missing", "fetch"
 
     def _warnings(self, calendar_metadata: dict[str, Any] | None) -> list[str]:
         if not calendar_metadata:
