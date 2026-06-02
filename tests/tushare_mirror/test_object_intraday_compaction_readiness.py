@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from tushare_mirror.capabilities import ENDPOINT_KIND_VALUES
+from tushare_mirror.intraday import intraday_metadata_from_config, validate_intraday_metadata
 from tushare_mirror.object_text import object_text_metadata_from_config, validate_object_text_metadata
 
 
@@ -178,6 +179,61 @@ class ObjectPlanCliTests(unittest.TestCase):
         self.assertIn("execution_allowed", result.stdout)
         self.assertIn("object_index_store_policy_missing", result.stdout)
         self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+
+class IntradayBucketMetadataTests(unittest.TestCase):
+    def test_intraday_endpoint_kinds_are_allowed(self):
+        for endpoint_kind in ["minute_bar", "tick", "order", "realtime"]:
+            self.assertIn(endpoint_kind, ENDPOINT_KIND_VALUES)
+
+    def test_minute_metadata_defaults_are_valid_and_block_execution(self):
+        result = validate_intraday_metadata({"api_name": "stk_mins", "endpoint_kind": "minute_bar"})
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(result.metadata.freq, "1min")
+        self.assertEqual(result.metadata.bucket_count, 64)
+        self.assertTrue(result.metadata.compaction_required)
+        self.assertTrue(result.metadata.execution_blocked_until_bucket_policy_enabled)
+        rendered = json.dumps(result.to_dict(), sort_keys=True)
+        self.assertIn('"bucket_count": 64', rendered)
+        self.assertIn('"compaction_required": true', rendered)
+
+    def test_tick_metadata_defaults_to_larger_bucket_count(self):
+        metadata = intraday_metadata_from_config({"api_name": "tick", "endpoint_kind": "tick"})
+        self.assertEqual(metadata.bucket_count, 128)
+        self.assertEqual(metadata.target_file_size_mb, 256)
+        self.assertEqual(metadata.max_file_size_mb, 1024)
+
+    def test_invalid_bucket_count_is_rejected(self):
+        result = validate_intraday_metadata(
+            {
+                "api_name": "stk_mins",
+                "endpoint_kind": "minute_bar",
+                "intraday_strategy": {
+                    "freq": "1min",
+                    "bucket_count": 63,
+                    "compaction_required": True,
+                    "execution_blocked_until_bucket_policy_enabled": True,
+                },
+            }
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("invalid_bucket_count", result.errors)
+
+    def test_compaction_required_and_execution_block_are_enforced(self):
+        result = validate_intraday_metadata(
+            {
+                "api_name": "tick",
+                "endpoint_kind": "tick",
+                "intraday_strategy": {
+                    "bucket_count": 128,
+                    "compaction_required": False,
+                    "execution_blocked_until_bucket_policy_enabled": False,
+                },
+            }
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("compaction_required_false", result.errors)
+        self.assertIn("execution_not_blocked", result.errors)
 
 
 if __name__ == "__main__":

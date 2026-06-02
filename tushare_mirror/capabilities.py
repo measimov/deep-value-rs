@@ -28,6 +28,7 @@ ENDPOINT_KIND_VALUES = {
     "unknown_object_text",
     "minute_bar",
     "tick",
+    "order",
     "realtime",
     "unknown",
 }
