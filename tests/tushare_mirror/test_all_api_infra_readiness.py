@@ -327,6 +327,77 @@ class ExecutionPolicyGuardrailTests(unittest.TestCase):
         after = self.counts()
         self.assertEqual(before, after)
 
+    def test_code_list_plan_is_policy_dry_run_only(self):
+        cfg = dict(self.catalog.get_endpoint_config("namechange"))
+        cfg["planner_kind"] = "code_list"
+        policy = EndpointExecutionPolicy()
+        decision = policy.decide(
+            ExecutionPolicyRequest(
+                endpoint_config=cfg,
+                scope="low-risk-a-share",
+                mode="pilot",
+                user_command="code-list-plan",
+                requires_real_requests=False,
+                requires_code_loop=True,
+                max_codes_required=5,
+            )
+        )
+        self.assertEqual(decision.decision, "dry_run_only")
+        self.assertFalse(decision.allowed)
+        self.assertFalse(decision.execution_allowed)
+        self.assertFalse(decision.user_confirmation_required)
+        self.assertTrue(decision.requires_code_loop)
+        self.assertEqual(decision.max_codes_required, 5)
+        self.assertIsNone(decision.blocked_reason)
+
+    def test_direct_fetch_for_code_list_endpoint_is_blocked_without_client_call(self):
+        cfg = dict(self.catalog.get_endpoint_config("namechange"))
+        cfg["api_name"] = "namechange_code_loop"
+        cfg["planner_kind"] = "code_list"
+        cfg["execution_status"] = "enabled"
+        enriched, table_id, partition_spec_id = enrich_endpoint_config(cfg)
+        self.catalog.upsert_endpoint(enriched, table_id, partition_spec_id)
+        before = self.counts()
+
+        class NoCallClient:
+            def query_paginated(self, *args, **kwargs):
+                raise AssertionError("code-list endpoint should not call Tushare client")
+
+        with self.assertRaisesRegex(MirrorError, "endpoint execution blocked"):
+            FileLakeStore(self.root, self.catalog).fetch("namechange_code_loop", {"ts_code": "000001.SZ"}, NoCallClient(), max_attempts=1)
+        after = self.counts()
+        self.assertEqual(before, after)
+
+    def test_direct_fetch_for_disabled_code_list_endpoint_is_blocked_without_client_call(self):
+        cfg = dict(self.catalog.get_endpoint_config("namechange"))
+        cfg["api_name"] = "disabled_namechange_code_loop"
+        cfg["planner_kind"] = "code_list"
+        cfg["execution_status"] = "disabled"
+        enriched, table_id, partition_spec_id = enrich_endpoint_config(cfg)
+        self.catalog.upsert_endpoint(enriched, table_id, partition_spec_id)
+        before = self.counts()
+
+        class NoCallClient:
+            def query_paginated(self, *args, **kwargs):
+                raise AssertionError("disabled code-list endpoint should not call Tushare client")
+
+        with self.assertRaisesRegex(MirrorError, "endpoint execution blocked"):
+            FileLakeStore(self.root, self.catalog).fetch("disabled_namechange_code_loop", {"ts_code": "000001.SZ"}, NoCallClient(), max_attempts=1)
+        after = self.counts()
+        self.assertEqual(before, after)
+
+    def test_mirror_run_scope_excludes_code_loop_inventory(self):
+        plan = MirrorPlanner(self.root, self.catalog).plan(
+            scope="low-risk-a-share",
+            mode="pilot",
+            start_date="20250101",
+            end_date="20250131",
+            max_jobs_per_api=20,
+        )
+        planned = {item.endpoint for item in plan.items}
+        self.assertNotIn("dividend", planned)
+        self.assertNotIn("pledge_stat", planned)
+
 
 class ApiInfraReadinessReportTests(unittest.TestCase):
     def setUp(self):

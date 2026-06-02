@@ -46,6 +46,7 @@ class ExecutionPolicyRequest:
     requires_real_requests: bool = True
     requires_object_download: bool | None = None
     requires_pit_handling: bool | None = None
+    max_codes_required: int | None = None
 
 
 @dataclass(frozen=True)
@@ -57,19 +58,36 @@ class ExecutionPolicyDecision:
     reason: str | None
     requires_real_requests: bool
     requires_user_confirmation: bool
+    user_confirmation_required: bool
+    requires_code_loop: bool
+    max_codes_required: int | None
+    execution_allowed: bool
+    blocked_reason: str | None
     missing_infrastructure: list[str]
     warnings: list[str]
 
     @property
     def allowed(self) -> bool:
-        return self.decision == "allow"
+        return self.execution_allowed
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 class EndpointExecutionPolicy:
-    DRY_RUN_COMMANDS = {"probe", "fetch-dry-run", "backfill-plan", "coverage", "mirror-plan", "mirror-review", "mirror-readiness", "mirror-batch-plan", "api-infra-readiness"}
+    DRY_RUN_COMMANDS = {
+        "probe",
+        "fetch-dry-run",
+        "backfill-plan",
+        "coverage",
+        "mirror-plan",
+        "mirror-review",
+        "mirror-readiness",
+        "mirror-batch-plan",
+        "api-infra-readiness",
+        "code-universe",
+        "code-list-plan",
+    }
 
     def decide(self, request: ExecutionPolicyRequest) -> ExecutionPolicyDecision:
         cfg = request.endpoint_config
@@ -77,6 +95,9 @@ class EndpointExecutionPolicy:
         endpoint_kind = cfg.get("endpoint_kind")
         planner_kind = cfg.get("planner_kind")
         execution_status = str(cfg.get("execution_status") or "enabled")
+        requires_code_loop = request.requires_code_loop
+        if requires_code_loop is None:
+            requires_code_loop = planner_kind in {"code_list", "code_date_matrix", "code_period_matrix"}
         missing: list[str] = []
         warnings: list[str] = []
 
@@ -89,17 +110,55 @@ class EndpointExecutionPolicy:
                 reason="read_only_command",
                 requires_real_requests=False,
                 requires_user_confirmation=False,
+                user_confirmation_required=False,
+                requires_code_loop=bool(requires_code_loop),
+                max_codes_required=request.max_codes_required,
+                execution_allowed=False,
+                blocked_reason=None,
                 missing_infrastructure=[],
                 warnings=[],
             )
 
         if execution_status == "disabled":
             missing.extend(_list_required_infra(cfg))
-            return self._decision("blocked", api_name, endpoint_kind, planner_kind, "endpoint_disabled", request.requires_real_requests, missing, warnings)
+            return self._decision(
+                "blocked",
+                api_name,
+                endpoint_kind,
+                planner_kind,
+                "endpoint_disabled",
+                request.requires_real_requests,
+                missing,
+                warnings,
+                requires_code_loop=bool(requires_code_loop),
+                max_codes_required=request.max_codes_required,
+            )
         if execution_status == "unsupported":
-            return self._decision("unsupported", api_name, endpoint_kind, planner_kind, "endpoint_unsupported", request.requires_real_requests, _list_required_infra(cfg), warnings)
+            return self._decision(
+                "unsupported",
+                api_name,
+                endpoint_kind,
+                planner_kind,
+                "endpoint_unsupported",
+                request.requires_real_requests,
+                _list_required_infra(cfg),
+                warnings,
+                requires_code_loop=bool(requires_code_loop),
+                max_codes_required=request.max_codes_required,
+            )
         if execution_status != "enabled":
-            return self._decision("blocked", api_name, endpoint_kind, planner_kind, f"unknown_execution_status:{execution_status}", request.requires_real_requests, _list_required_infra(cfg), warnings)
+            return self._decision(
+                "blocked",
+                api_name,
+                endpoint_kind,
+                planner_kind,
+                f"unknown_execution_status:{execution_status}",
+                request.requires_real_requests,
+                _list_required_infra(cfg),
+                warnings,
+                requires_code_loop=bool(requires_code_loop),
+                max_codes_required=request.max_codes_required,
+            )
 
         if endpoint_kind in BLOCKED_ENDPOINT_KINDS:
             missing.append(BLOCKED_ENDPOINT_KINDS[str(endpoint_kind)])
@@ -108,9 +167,6 @@ class EndpointExecutionPolicy:
         if planner_kind and planner_kind not in SUPPORTED_EXECUTABLE_PLANNER_KINDS:
             missing.append(f"planner kind is not executable: {planner_kind}")
 
-        requires_code_loop = request.requires_code_loop
-        if requires_code_loop is None:
-            requires_code_loop = planner_kind in {"code_list", "code_date_matrix", "code_period_matrix"}
         if requires_code_loop:
             missing.append("explicit code-list guardrails are required")
 
@@ -128,7 +184,18 @@ class EndpointExecutionPolicy:
 
         if missing:
             deduped = sorted(set(missing))
-            return self._decision("blocked", api_name, endpoint_kind, planner_kind, "missing_required_infrastructure", request.requires_real_requests, deduped, warnings)
+            return self._decision(
+                "blocked",
+                api_name,
+                endpoint_kind,
+                planner_kind,
+                "missing_required_infrastructure",
+                request.requires_real_requests,
+                deduped,
+                warnings,
+                requires_code_loop=bool(requires_code_loop),
+                max_codes_required=request.max_codes_required,
+            )
 
         return ExecutionPolicyDecision(
             decision="allow",
@@ -138,6 +205,11 @@ class EndpointExecutionPolicy:
             reason=None,
             requires_real_requests=request.requires_real_requests,
             requires_user_confirmation=request.requires_real_requests,
+            user_confirmation_required=request.requires_real_requests,
+            requires_code_loop=bool(requires_code_loop),
+            max_codes_required=request.max_codes_required,
+            execution_allowed=True,
+            blocked_reason=None,
             missing_infrastructure=[],
             warnings=warnings,
         )
@@ -152,6 +224,8 @@ class EndpointExecutionPolicy:
         requires_real_requests: bool,
         missing_infrastructure: list[str],
         warnings: list[str],
+        requires_code_loop: bool = False,
+        max_codes_required: int | None = None,
     ) -> ExecutionPolicyDecision:
         return ExecutionPolicyDecision(
             decision=decision,
@@ -161,6 +235,11 @@ class EndpointExecutionPolicy:
             reason=reason,
             requires_real_requests=requires_real_requests,
             requires_user_confirmation=True,
+            user_confirmation_required=True,
+            requires_code_loop=requires_code_loop,
+            max_codes_required=max_codes_required,
+            execution_allowed=False,
+            blocked_reason=reason,
             missing_infrastructure=missing_infrastructure,
             warnings=warnings,
         )
