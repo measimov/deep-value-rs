@@ -27,6 +27,7 @@ from .code_list_planner import CodeListPlanner
 from .code_universe import CodeUniverseProvider
 from .compaction import CompactionPlanner
 from .coverage import CoverageReporter
+from .enablement import EndpointEnablementChecklistReporter
 from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
 from .hashing import token_hash
@@ -775,6 +776,16 @@ def cmd_rate_policy(args) -> int:
     return 1 if policy.blocking_errors else 0
 
 
+def cmd_endpoint_enable_checklist(args) -> int:
+    checklist = EndpointEnablementChecklistReporter().report(args.api)
+    payload = checklist.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_key_values(payload)
+    return 1 if checklist.blocking_errors and checklist.current_execution_status is None else 0
+
+
 def cmd_code_universe(args) -> int:
     root = Path(args.root)
     catalog = CatalogStore(root, read_only=True)
@@ -1387,6 +1398,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--category')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_rate_policy)
+
+    p = sub.add_parser('endpoint-enable-checklist')
+    p.add_argument('--api', required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_endpoint_enable_checklist)
 
     p = sub.add_parser('code-universe')
     p.add_argument('--universe', required=True)

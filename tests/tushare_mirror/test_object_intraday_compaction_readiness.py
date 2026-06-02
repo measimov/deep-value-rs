@@ -590,5 +590,62 @@ class RatePolicyCliTests(unittest.TestCase):
         self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
 
 
+class EndpointEnablementChecklistCliTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "unused-root"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *args, check=True):
+        env = dict(os.environ)
+        env["TUSHARE_TOKEN"] = "secret-token-should-not-appear"
+        return subprocess.run(
+            [sys.executable, "-m", "tushare_mirror", "--root", str(self.root), *args],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            check=check,
+        )
+
+    def test_financial_object_and_intraday_checklists_are_blocked(self):
+        cases = {
+            "fina_indicator": "PIT metadata tests",
+            "anns": "object metadata tests",
+            "stk_mins": "intraday bucket metadata tests",
+            "tick": "intraday bucket metadata tests",
+        }
+        for api_name, expected_test in cases.items():
+            with self.subTest(api_name=api_name):
+                result = self.run_cli("endpoint-enable-checklist", "--api", api_name, "--json")
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload["api_name"], api_name)
+                self.assertFalse(payload["execution_allowed"])
+                self.assertIn(expected_test, payload["required_tests"])
+                self.assertTrue(payload["required_infra"])
+                self.assertNotIn("secret-token-should-not-appear", result.stdout)
+                self.assertNotIn("secret-token-should-not-appear", result.stderr)
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+    def test_unknown_api_returns_clear_error_without_side_effects(self):
+        result = self.run_cli("endpoint-enable-checklist", "--api", "not_real", "--json", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertIn("endpoint_not_found", payload["blocking_errors"])
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+    def test_enabled_low_risk_endpoint_checklist_allows_existing_bounded_path(self):
+        result = self.run_cli("endpoint-enable-checklist", "--api", "daily_basic", "--json")
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["current_execution_status"], "enabled")
+        self.assertTrue(payload["execution_allowed"])
+        self.assertIn("existing low-risk fetch/backfill fake tests", payload["required_tests"])
+        self.assertIn("use existing bounded low-risk command", payload["allowed_next_action"])
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
