@@ -655,8 +655,13 @@ def cmd_api_infra_readiness(args) -> int:
                 "code_universe_provider": payload["code_universe_provider"],
                 "code_list_planner": payload["code_list_planner"],
                 "code_date_matrix_planner": payload["code_date_matrix_planner"],
+                "code_date_matrix_existing_status": payload["code_date_matrix_existing_status"],
                 "executable_code_loop": payload["executable_code_loop"],
+                "executable_code_date_matrix": payload["executable_code_date_matrix"],
                 "max_safe_code_plan_limit": payload["max_safe_code_plan_limit"],
+                "max_safe_code_limit": payload["max_safe_code_limit"],
+                "max_safe_date_limit": payload["max_safe_date_limit"],
+                "max_safe_candidate_jobs": payload["max_safe_candidate_jobs"],
                 "missing_for_execution": payload["missing_for_execution"],
                 "warnings": payload["warnings"],
             }

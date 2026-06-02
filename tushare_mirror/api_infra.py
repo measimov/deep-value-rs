@@ -4,6 +4,11 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from .capabilities import ENDPOINT_KIND_VALUES, normalize_endpoint_capability
+from .code_date_matrix_planner import (
+    MAX_CODE_DATE_MATRIX_CANDIDATES,
+    MAX_CODE_DATE_MATRIX_CODES,
+    MAX_CODE_DATE_MATRIX_DATES,
+)
 from .code_list_planner import MAX_CODE_LIST_PLAN_CODES
 from .endpoints import load_bundled_endpoint_configs, load_inventory_configs
 from .planner_registry import planner_registry_summary
@@ -36,8 +41,13 @@ class ApiInfraReadinessReport:
     code_universe_provider: str
     code_list_planner: str
     code_date_matrix_planner: str
+    code_date_matrix_existing_status: str
     executable_code_loop: bool
+    executable_code_date_matrix: bool
     max_safe_code_plan_limit: int
+    max_safe_code_limit: int
+    max_safe_date_limit: int
+    max_safe_candidate_jobs: int
     missing_for_execution: list[str]
     warnings: list[str]
 
@@ -78,14 +88,22 @@ class ApiInfrastructureReadinessReporter:
             code_universe_provider="implemented",
             code_list_planner="plan_only",
             code_date_matrix_planner="plan_only",
+            code_date_matrix_existing_status="implemented",
             executable_code_loop=False,
+            executable_code_date_matrix=False,
             max_safe_code_plan_limit=MAX_CODE_LIST_PLAN_CODES,
+            max_safe_code_limit=MAX_CODE_DATE_MATRIX_CODES,
+            max_safe_date_limit=MAX_CODE_DATE_MATRIX_DATES,
+            max_safe_candidate_jobs=MAX_CODE_DATE_MATRIX_CANDIDATES,
             missing_for_execution=[
-                "explicit enablement workflow",
-                "per-endpoint tests",
+                "explicit endpoint enablement",
+                "per-endpoint fake tests",
                 "rate-limit policy",
                 "user confirmation",
                 "small real smoke",
+                "resume strategy for code/date loops",
+                "failure aggregation",
+                "coverage semantics",
             ],
             warnings=[
                 "inventory endpoints are disabled and not executable",
