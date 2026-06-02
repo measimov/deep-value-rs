@@ -29,6 +29,7 @@ from .coverage import CoverageReporter
 from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
 from .hashing import token_hash
+from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
 from .mirror import MirrorBatchPlanner, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, init_catalog_if_requested
 from .object_plan import ObjectPlanner
@@ -713,6 +714,22 @@ def cmd_object_plan(args) -> int:
     return 1 if plan.blocking_errors else 0
 
 
+def cmd_intraday_plan(args) -> int:
+    plan = IntradayPlanner().plan(
+        api_name=args.api,
+        freq=args.freq,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        bucket_count=args.bucket_count,
+    )
+    payload = plan.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_key_values(payload)
+    return 1 if plan.blocking_errors else 0
+
+
 def cmd_code_universe(args) -> int:
     root = Path(args.root)
     catalog = CatalogStore(root, read_only=True)
@@ -1293,6 +1310,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--end-date', required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_object_plan)
+
+    p = sub.add_parser('intraday-plan')
+    p.add_argument('--api', required=True)
+    p.add_argument('--freq')
+    p.add_argument('--start-date', required=True)
+    p.add_argument('--end-date', required=True)
+    p.add_argument('--bucket-count', type=int, required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_intraday_plan)
 
     p = sub.add_parser('code-universe')
     p.add_argument('--universe', required=True)

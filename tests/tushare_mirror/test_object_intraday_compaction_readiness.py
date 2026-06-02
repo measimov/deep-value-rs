@@ -236,5 +236,114 @@ class IntradayBucketMetadataTests(unittest.TestCase):
         self.assertIn("execution_not_blocked", result.errors)
 
 
+class IntradayPlanCliTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "unused-root"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *args, check=True):
+        env = dict(os.environ)
+        env["TUSHARE_TOKEN"] = "secret-token-should-not-appear"
+        return subprocess.run(
+            [sys.executable, "-m", "tushare_mirror", "--root", str(self.root), *args],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            check=check,
+        )
+
+    def test_minute_and_tick_plans_are_blocked_and_read_only(self):
+        cases = [
+            ("stk_mins", ["--freq", "1min"], 64),
+            ("tick", [], 128),
+        ]
+        for api_name, freq_args, bucket_count in cases:
+            with self.subTest(api_name=api_name):
+                result = self.run_cli(
+                    "intraday-plan",
+                    "--api",
+                    api_name,
+                    *freq_args,
+                    "--start-date",
+                    "20250102",
+                    "--end-date",
+                    "20250103",
+                    "--bucket-count",
+                    str(bucket_count),
+                    "--json",
+                )
+                payload = json.loads(result.stdout)
+                self.assertTrue(payload["blocked"])
+                self.assertFalse(payload["execution_allowed"])
+                self.assertEqual(payload["bucket_count"], bucket_count)
+                self.assertEqual(payload["blocked_reason"], "bucket_policy_missing")
+                self.assertIn("compaction policy", payload["required_infra"])
+                self.assertNotIn("secret-token-should-not-appear", result.stdout)
+                self.assertNotIn("secret-token-should-not-appear", result.stderr)
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+    def test_invalid_bucket_and_date_range_return_errors_without_catalog(self):
+        result = self.run_cli(
+            "intraday-plan",
+            "--api",
+            "stk_mins",
+            "--freq",
+            "1min",
+            "--start-date",
+            "20250102",
+            "--end-date",
+            "20250103",
+            "--bucket-count",
+            "63",
+            "--json",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertIn("invalid_bucket_count", payload["required_infra"])
+        self.assertFalse(payload["execution_allowed"])
+
+        result = self.run_cli(
+            "intraday-plan",
+            "--api",
+            "tick",
+            "--start-date",
+            "20250199",
+            "--end-date",
+            "20250103",
+            "--bucket-count",
+            "128",
+            "--json",
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertIn("invalid start-date", payload["blocking_errors"][0])
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+    def test_intraday_plan_table_output_is_stable(self):
+        result = self.run_cli(
+            "intraday-plan",
+            "--api",
+            "stk_mins",
+            "--freq",
+            "1min",
+            "--start-date",
+            "20250102",
+            "--end-date",
+            "20250103",
+            "--bucket-count",
+            "64",
+        )
+        self.assertIn("estimated_partition_strategy", result.stdout)
+        self.assertIn("bucket_policy_missing", result.stdout)
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
