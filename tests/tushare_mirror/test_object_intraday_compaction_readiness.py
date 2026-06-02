@@ -345,5 +345,91 @@ class IntradayPlanCliTests(unittest.TestCase):
         self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
 
 
+class StorageEstimateCliTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "unused-root"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *args, check=True):
+        env = dict(os.environ)
+        env["TUSHARE_TOKEN"] = "secret-token-should-not-appear"
+        return subprocess.run(
+            [sys.executable, "-m", "tushare_mirror", "--root", str(self.root), *args],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            check=check,
+        )
+
+    def test_low_risk_estimate_uses_pilot_reference_without_side_effects(self):
+        result = self.run_cli(
+            "storage-estimate",
+            "--scope",
+            "low-risk-a-share",
+            "--start-date",
+            "20250101",
+            "--end-date",
+            "20251231",
+            "--json",
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["scope"], "low-risk-a-share")
+        self.assertEqual(payload["confidence"], "medium")
+        self.assertGreater(payload["estimated_raw_files"], 0)
+        self.assertGreater(payload["estimated_lake_files"], 0)
+        self.assertIn("January 2025 low-risk pilot", " ".join(payload["assumptions"]))
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+    def test_intraday_estimate_warns_low_confidence(self):
+        result = self.run_cli(
+            "storage-estimate",
+            "--category",
+            "intraday",
+            "--api",
+            "stk_mins",
+            "--freq",
+            "1min",
+            "--start-date",
+            "20250102",
+            "--end-date",
+            "20250131",
+            "--bucket-count",
+            "64",
+            "--json",
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["category"], "intraday")
+        self.assertEqual(payload["confidence"], "low")
+        self.assertEqual(payload["estimated_size_class"], "potentially_large")
+        self.assertIn("bucketed intraday execution", " ".join(payload["warnings"]))
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+    def test_storage_estimate_invalid_input_returns_error_without_catalog(self):
+        result = self.run_cli(
+            "storage-estimate",
+            "--scope",
+            "low-risk-a-share",
+            "--category",
+            "intraday",
+            "--start-date",
+            "20250101",
+            "--end-date",
+            "20250131",
+            "--json",
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertIn("choose either scope or category", payload["blocking_errors"][0])
+        self.assertNotIn("secret-token-should-not-appear", result.stdout)
+        self.assertNotIn("secret-token-should-not-appear", result.stderr)
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

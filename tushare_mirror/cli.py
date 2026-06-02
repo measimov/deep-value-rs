@@ -38,6 +38,7 @@ from .pit import PITReadinessReporter
 from .planner import JobPlanner
 from .reader import LakeReader
 from .store import FileLakeStore
+from .storage_estimate import StorageEstimator
 from .validation import Validator
 
 
@@ -730,6 +731,24 @@ def cmd_intraday_plan(args) -> int:
     return 1 if plan.blocking_errors else 0
 
 
+def cmd_storage_estimate(args) -> int:
+    estimate = StorageEstimator().estimate(
+        scope=args.scope,
+        category=args.category,
+        api_name=args.api,
+        freq=args.freq,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        bucket_count=args.bucket_count,
+    )
+    payload = estimate.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_key_values(payload)
+    return 1 if estimate.blocking_errors else 0
+
+
 def cmd_code_universe(args) -> int:
     root = Path(args.root)
     catalog = CatalogStore(root, read_only=True)
@@ -1319,6 +1338,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--bucket-count', type=int, required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_intraday_plan)
+
+    p = sub.add_parser('storage-estimate')
+    p.add_argument('--scope')
+    p.add_argument('--category')
+    p.add_argument('--api')
+    p.add_argument('--freq')
+    p.add_argument('--start-date', required=True)
+    p.add_argument('--end-date', required=True)
+    p.add_argument('--bucket-count', type=int)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_storage_estimate)
 
     p = sub.add_parser('code-universe')
     p.add_argument('--universe', required=True)
