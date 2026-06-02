@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .api_infra import ApiInfrastructureReadinessReporter
 from .backup import BackupExecutor, BackupInspector, BackupPlanner, RestoreChecker
 from .backfill import (
     BackfillExecutor,
@@ -635,6 +636,30 @@ def cmd_mirror_batch_plan(args) -> int:
     return 0
 
 
+def cmd_api_infra_readiness(args) -> int:
+    report = ApiInfrastructureReadinessReporter().report()
+    payload = report.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_key_values(
+            {
+                "enabled_executable_endpoint_count": payload["enabled_executable_endpoint_count"],
+                "disabled_inventory_endpoint_count": payload["disabled_inventory_endpoint_count"],
+                "supported_endpoint_kinds": payload["supported_endpoint_kinds"],
+                "supported_planner_kinds": payload["supported_planner_kinds"],
+                "blocked_planner_kinds": payload["blocked_planner_kinds"],
+                "warnings": payload["warnings"],
+            }
+        )
+        rows = [
+            {"category": category, "api_names": api_names, "count": len(api_names)}
+            for category, api_names in payload["missing_infrastructure_by_category"].items()
+        ]
+        _print_table(rows, ["category", "count", "api_names"])
+    return 0
+
+
 def _print_mirror_plan(plan, as_json: bool) -> None:
     if as_json:
         _print_json(plan.to_dict())
@@ -1078,6 +1103,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--max-jobs-per-api', type=int, required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_batch_plan)
+
+    p = sub.add_parser('api-infra-readiness')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_api_infra_readiness)
 
     p = sub.add_parser('mirror-plan')
     p.add_argument('--scope', default='low-risk-a-share')

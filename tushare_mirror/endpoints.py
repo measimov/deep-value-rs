@@ -65,6 +65,17 @@ def load_endpoint_configs(root: Path) -> list[dict[str, Any]]:
     return configs
 
 
+def load_bundled_endpoint_configs() -> list[dict[str, Any]]:
+    configs: list[dict[str, Any]] = []
+    for path in sorted(bundled_endpoint_files()):
+        data = yaml.safe_load(path.read_text()) or {}
+        for cfg in data.get("endpoints", []):
+            item = dict(cfg)
+            item["_source_file"] = str(path)
+            configs.append(item)
+    return configs
+
+
 def validate_inventory_config(cfg: dict[str, Any], source: str = "<inventory>") -> dict[str, Any]:
     missing = sorted(field for field in INVENTORY_REQUIRED_FIELDS if field not in cfg)
     if missing:

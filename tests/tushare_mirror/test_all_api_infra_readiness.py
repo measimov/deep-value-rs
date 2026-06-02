@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 
+from tushare_mirror.api_infra import ApiInfrastructureReadinessReporter
 from tushare_mirror.capabilities import (
     ENDPOINT_KIND_VALUES,
     PLANNER_KIND_VALUES,
@@ -321,3 +326,54 @@ class ExecutionPolicyGuardrailTests(unittest.TestCase):
             FileLakeStore(self.root, self.catalog).fetch("disabled_stock_basic", {"list_status": "L"}, NoCallClient(), max_attempts=1)
         after = self.counts()
         self.assertEqual(before, after)
+
+
+class ApiInfraReadinessReportTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "unused-root"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *args, check=True):
+        env = dict(os.environ)
+        env["TUSHARE_TOKEN"] = "secret-token-should-not-appear"
+        return subprocess.run(
+            [sys.executable, "-m", "tushare_mirror", *args],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            check=check,
+        )
+
+    def test_readiness_report_is_stable_and_includes_inventory(self):
+        report = ApiInfrastructureReadinessReporter().report()
+        payload = report.to_dict()
+        self.assertEqual(payload["enabled_executable_endpoint_count"], 12)
+        self.assertGreaterEqual(payload["disabled_inventory_endpoint_count"], 10)
+        self.assertIn("calendar_backfill", payload["supported_planner_kinds"])
+        self.assertIn("code_date_matrix", payload["blocked_planner_kinds"])
+        self.assertIn("income", payload["missing_infrastructure_by_category"]["needs_pit"])
+        self.assertIn("anns", payload["missing_infrastructure_by_category"]["needs_object_store"])
+        self.assertIn("stk_mins", payload["missing_infrastructure_by_category"]["needs_intraday_bucket"])
+        self.assertIn("realtime_quote", payload["missing_infrastructure_by_category"]["needs_realtime_policy"])
+        self.assertIn("daily_basic", payload["missing_infrastructure_by_category"]["low_risk_ready"])
+
+    def test_cli_json_fields_and_no_side_effects(self):
+        result = self.run_cli("--root", str(self.root), "api-infra-readiness", "--json")
+        payload = json.loads(result.stdout)
+        self.assertIn("supported_endpoint_kinds", payload)
+        self.assertIn("missing_infrastructure_by_category", payload)
+        self.assertIn("next_recommended_infra_phases", payload)
+        self.assertNotIn("secret-token-should-not-appear", result.stdout)
+        self.assertNotIn("secret-token-should-not-appear", result.stderr)
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+    def test_cli_table_output_is_read_only(self):
+        result = self.run_cli("--root", str(self.root), "api-infra-readiness")
+        self.assertIn("enabled_executable_endpoint_count", result.stdout)
+        self.assertIn("needs_pit", result.stdout)
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
