@@ -21,6 +21,7 @@ from .backfill import (
 )
 from .catalog import CatalogStore
 from .client import TushareClient, classify_probe_response
+from .code_list_planner import CodeListPlanner
 from .code_universe import CodeUniverseProvider
 from .coverage import CoverageReporter
 from .endpoints import load_into_catalog
@@ -675,6 +676,33 @@ def cmd_code_universe(args) -> int:
     return 1 if result.blocked else 0
 
 
+def cmd_code_list_plan(args) -> int:
+    root = Path(args.root)
+    catalog = CatalogStore(root, read_only=True)
+    if not catalog.db_path.exists():
+        raise SystemExit(f"catalog not found: {catalog.db_path}; run init-catalog first")
+    plan = CodeListPlanner(root, catalog).plan(
+        api_name=args.api,
+        universe=args.universe,
+        limit_codes=args.limit_codes,
+        start_date=args.start_date,
+        end_date=args.end_date,
+    )
+    payload = plan.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        summary = dict(payload)
+        summary.pop("items", None)
+        _print_key_values(summary)
+        if plan.items:
+            _print_table(
+                [item.to_dict() for item in plan.items],
+                ["api_name", "ts_code", "existing_status", "planned_action", "job_key", "would_require_real_request", "blocked_reason"],
+            )
+    return 1 if plan.blocked else 0
+
+
 def _print_mirror_plan(plan, as_json: bool) -> None:
     if as_json:
         _print_json(plan.to_dict())
@@ -1128,6 +1156,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--limit', type=int, default=20)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_code_universe)
+
+    p = sub.add_parser('code-list-plan')
+    p.add_argument('--api', required=True)
+    p.add_argument('--universe', required=True)
+    p.add_argument('--limit-codes', type=int, required=True)
+    p.add_argument('--start-date')
+    p.add_argument('--end-date')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_code_list_plan)
 
     p = sub.add_parser('mirror-plan')
     p.add_argument('--scope', default='low-risk-a-share')

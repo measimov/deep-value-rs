@@ -11,6 +11,7 @@ from pathlib import Path
 
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
+from tushare_mirror.code_list_planner import CodeListPlanner, MAX_CODE_LIST_PLAN_CODES
 from tushare_mirror.code_universe import CodeUniverseProvider
 from tushare_mirror.endpoints import load_into_catalog
 from tushare_mirror.store import FileLakeStore
@@ -159,6 +160,146 @@ class CodeUniverseProviderTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(before, after)
         self.assertEqual(payload["blocked_reason"], "missing_stock_basic_latest_snapshot")
+
+
+class BoundedCodeListPlannerTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.catalog = CatalogStore(self.root)
+        self.catalog.init()
+        load_into_catalog(self.root, self.catalog)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def counts(self):
+        with sqlite3.connect(self.root / "_catalog" / "catalog.sqlite") as conn:
+            return {
+                "runs": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+                "jobs": conn.execute("select count(*) from jobs").fetchone()[0],
+                "files": conn.execute("select count(*) from files").fetchone()[0],
+                "snapshots": conn.execute("select count(*) from snapshots").fetchone()[0],
+                "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
+            }
+
+    def run_cli(self, *args, check=True):
+        env = dict(os.environ)
+        env["TUSHARE_TOKEN"] = "secret-token-should-not-appear"
+        return subprocess.run(
+            [sys.executable, "-m", "tushare_mirror", "--root", str(self.root), *args],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            check=check,
+        )
+
+    def seed_stock_basic(self):
+        fields = ["ts_code", "symbol", "name", "area", "industry", "market", "list_date"]
+        items = [
+            ["000001.SZ", "000001", "平安银行", "深圳", "银行", "主板", "19910403"],
+            ["002001.SZ", "002001", "新和成", "浙江", "医药", "中小板", "20040625"],
+            ["300001.SZ", "300001", "特锐德", "山东", "电气", "创业板", "20091030"],
+            ["688001.SH", "688001", "华兴源创", "江苏", "电子", "科创板", "20190722"],
+        ]
+        return FileLakeStore(self.root, self.catalog).fetch(
+            "stock_basic",
+            {"list_status": "L"},
+            CodeUniverseFakeClient(fields, items),
+        )
+
+    def test_namechange_plan_with_fake_stock_basic_is_plan_only(self):
+        source = self.seed_stock_basic()
+        before = self.counts()
+        plan = CodeListPlanner(self.root, self.catalog).plan("namechange", "a_share_listed", limit_codes=2)
+        after = self.counts()
+        self.assertEqual(before, after)
+        self.assertFalse(plan.blocked)
+        self.assertFalse(plan.execution_allowed)
+        self.assertEqual(plan.source_snapshot_id, source.snapshot_id)
+        self.assertEqual(plan.total_codes, 4)
+        self.assertEqual(plan.planned_codes, 2)
+        self.assertEqual(plan.candidate_jobs, 2)
+        self.assertEqual([item.ts_code for item in plan.items], ["000001.SZ", "002001.SZ"])
+        self.assertTrue(all(item.planned_action == "fetch" for item in plan.items))
+        self.assertTrue(all(item.would_require_real_request for item in plan.items))
+        self.assertTrue(all(item.job_key for item in plan.items))
+
+    def test_stk_managers_plan_with_date_range_and_json_cli(self):
+        self.seed_stock_basic()
+        before = self.counts()
+        result = self.run_cli(
+            "code-list-plan",
+            "--api", "stk_managers",
+            "--universe", "a_share_listed",
+            "--limit-codes", "3",
+            "--start-date", "20250101",
+            "--end-date", "20250131",
+            "--json",
+        )
+        after = self.counts()
+        payload = json.loads(result.stdout)
+        self.assertEqual(before, after)
+        self.assertFalse(payload["blocked"])
+        self.assertFalse(payload["execution_allowed"])
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["candidate_jobs"], 3)
+        self.assertEqual(payload["items"][0]["params"]["start_date"], "20250101")
+        self.assertEqual(payload["items"][0]["params"]["end_date"], "20250131")
+        self.assertNotIn("secret-token-should-not-appear", result.stdout)
+        self.assertNotIn("secret-token-should-not-appear", result.stderr)
+
+    def test_limit_codes_required_and_phase_limit_blocks(self):
+        self.seed_stock_basic()
+        missing = self.run_cli(
+            "code-list-plan",
+            "--api", "namechange",
+            "--universe", "a_share_listed",
+            check=False,
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("limit-codes", missing.stderr)
+        too_many = self.run_cli(
+            "code-list-plan",
+            "--api", "namechange",
+            "--universe", "a_share_listed",
+            "--limit-codes", str(MAX_CODE_LIST_PLAN_CODES + 1),
+            "--json",
+            check=False,
+        )
+        payload = json.loads(too_many.stdout)
+        self.assertNotEqual(too_many.returncode, 0)
+        self.assertTrue(payload["blocked"])
+        self.assertIn("limit_codes_exceeds_phase_limit", payload["blocked_reason"])
+
+    def test_missing_universe_source_blocks_without_side_effects(self):
+        before = self.counts()
+        plan = CodeListPlanner(self.root, self.catalog).plan("namechange", "a_share_listed", limit_codes=5)
+        after = self.counts()
+        self.assertEqual(before, after)
+        self.assertTrue(plan.blocked)
+        self.assertEqual(plan.blocked_reason, "missing_stock_basic_latest_snapshot")
+        self.assertEqual(plan.candidate_jobs, 0)
+
+    def test_disabled_inventory_endpoint_blocks_even_with_local_universe(self):
+        self.seed_stock_basic()
+        before = self.counts()
+        plan = CodeListPlanner(self.root, self.catalog).plan("dividend", "a_share_listed", limit_codes=5)
+        after = self.counts()
+        self.assertEqual(before, after)
+        self.assertTrue(plan.blocked)
+        self.assertEqual(plan.blocked_reason, "endpoint_disabled_inventory")
+
+    def test_endpoint_without_ts_code_or_incompatible_planner_blocks(self):
+        self.seed_stock_basic()
+        no_code = CodeListPlanner(self.root, self.catalog).plan("trade_cal", "a_share_listed", limit_codes=1)
+        self.assertTrue(no_code.blocked)
+        self.assertEqual(no_code.blocked_reason, "endpoint_does_not_support_ts_code")
+        incompatible = CodeListPlanner(self.root, self.catalog).plan("weekly", "a_share_listed", limit_codes=1)
+        self.assertTrue(incompatible.blocked)
+        self.assertIn("planner_kind_not_code_list_compatible", incompatible.blocked_reason or "")
 
 
 if __name__ == "__main__":
