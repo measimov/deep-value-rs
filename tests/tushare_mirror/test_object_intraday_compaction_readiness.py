@@ -12,8 +12,11 @@ from pathlib import Path
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.capabilities import ENDPOINT_KIND_VALUES
 from tushare_mirror.compaction import CompactionPlanner
+from tushare_mirror.endpoints import enrich_endpoint_config
 from tushare_mirror.intraday import intraday_metadata_from_config, validate_intraday_metadata
 from tushare_mirror.object_text import object_text_metadata_from_config, validate_object_text_metadata
+from tushare_mirror.policy import EndpointExecutionPolicy, ExecutionPolicyRequest
+from tushare_mirror.store import FileLakeStore
 
 
 class ObjectTextMetadataTests(unittest.TestCase):
@@ -645,6 +648,111 @@ class EndpointEnablementChecklistCliTests(unittest.TestCase):
         self.assertIn("existing low-risk fetch/backfill fake tests", payload["required_tests"])
         self.assertIn("use existing bounded low-risk command", payload["allowed_next_action"])
         self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
+
+class ObjectIntradayCompactionPolicyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.catalog = CatalogStore(self.root)
+        self.catalog.init()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def counts(self):
+        with sqlite3.connect(self.root / "_catalog" / "catalog.sqlite") as conn:
+            return {
+                "runs": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+                "jobs": conn.execute("select count(*) from jobs").fetchone()[0],
+                "files": conn.execute("select count(*) from files").fetchone()[0],
+                "snapshots": conn.execute("select count(*) from snapshots").fetchone()[0],
+                "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
+            }
+
+    def test_policy_blocks_object_news_intraday_realtime_and_compaction_execution(self):
+        policy = EndpointExecutionPolicy()
+        cases = [
+            {"api_name": "anns", "endpoint_kind": "object_document", "planner_kind": "object_index", "execution_status": "enabled"},
+            {"api_name": "news", "endpoint_kind": "text_news", "planner_kind": "object_index", "execution_status": "enabled"},
+            {"api_name": "stk_mins", "endpoint_kind": "minute_bar", "planner_kind": "bucketed_intraday", "execution_status": "enabled"},
+            {"api_name": "tick", "endpoint_kind": "tick", "planner_kind": "bucketed_intraday", "execution_status": "enabled"},
+            {"api_name": "realtime_quote", "endpoint_kind": "realtime", "planner_kind": "realtime_poll", "execution_status": "enabled"},
+        ]
+        for cfg in cases:
+            with self.subTest(api_name=cfg["api_name"]):
+                decision = policy.decide(ExecutionPolicyRequest(endpoint_config=cfg, user_command="fetch", max_jobs=1))
+                self.assertEqual(decision.decision, "blocked")
+                self.assertFalse(decision.execution_allowed)
+                self.assertTrue(decision.missing_infrastructure)
+
+        compaction_decision = policy.decide(
+            ExecutionPolicyRequest(
+                endpoint_config={"api_name": "daily_basic", "endpoint_kind": "daily_metric", "planner_kind": "calendar_backfill", "execution_status": "enabled"},
+                user_command="compaction-run",
+                requires_compaction_execution=True,
+            )
+        )
+        self.assertEqual(compaction_decision.decision, "blocked")
+        self.assertTrue(compaction_decision.requires_compaction_execution)
+        self.assertIn("compaction executor is required", compaction_decision.missing_infrastructure)
+
+    def test_plan_commands_are_dry_run_only_by_policy(self):
+        policy = EndpointExecutionPolicy()
+        for command in ["object-plan", "intraday-plan", "compaction-plan", "storage-estimate", "rate-policy", "endpoint-enable-checklist"]:
+            with self.subTest(command=command):
+                decision = policy.decide(
+                    ExecutionPolicyRequest(
+                        endpoint_config={"api_name": "anns", "endpoint_kind": "object_document", "planner_kind": "object_index", "execution_status": "disabled"},
+                        user_command=command,
+                        requires_real_requests=False,
+                    )
+                )
+                self.assertEqual(decision.decision, "dry_run_only")
+                self.assertFalse(decision.execution_allowed)
+
+    def test_direct_fetch_for_enabled_object_or_intraday_endpoint_is_blocked_without_client_call(self):
+        configs = [
+            {
+                "api_name": "enabled_anns",
+                "family": "object_text",
+                "market": "a",
+                "domain": "object",
+                "volume_class": "O1_OBJECT",
+                "endpoint_kind": "object_document",
+                "planner_kind": "object_index",
+                "pagination_mode": "paged",
+                "execution_status": "enabled",
+                "probe": {"params": {"start_date": "20250101"}, "fields": ["ann_id"]},
+            },
+            {
+                "api_name": "enabled_stk_mins",
+                "family": "intraday",
+                "market": "a",
+                "domain": "stock",
+                "volume_class": "I1_INTRADAY",
+                "endpoint_kind": "minute_bar",
+                "planner_kind": "bucketed_intraday",
+                "pagination_mode": "paged",
+                "execution_status": "enabled",
+                "probe": {"params": {"trade_date": "20250102"}, "fields": ["ts_code", "trade_time"]},
+            },
+        ]
+        for cfg in configs:
+            enriched, table_id, partition_spec_id = enrich_endpoint_config(cfg)
+            self.catalog.upsert_endpoint(enriched, table_id, partition_spec_id)
+        before = self.counts()
+
+        class NoCallClient:
+            def query_paginated(self, *args, **kwargs):
+                raise AssertionError("blocked endpoint should not call Tushare client")
+
+        for api_name in ["enabled_anns", "enabled_stk_mins"]:
+            with self.subTest(api_name=api_name):
+                with self.assertRaisesRegex(Exception, "endpoint execution blocked"):
+                    FileLakeStore(self.root, self.catalog).fetch(api_name, {"start_date": "20250101"}, NoCallClient(), max_attempts=1)
+        after = self.counts()
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":

@@ -17,8 +17,13 @@ BLOCKED_ENDPOINT_KINDS = {
     "financial_indicator": "financial PIT infrastructure is required before financial indicator execution",
     "minute_bar": "bucketed intraday storage and compaction policy are required before minute execution",
     "tick": "bucketed intraday storage and compaction policy are required before tick execution",
+    "order": "bucketed intraday storage and compaction policy are required before order execution",
     "object_document": "object index/store infrastructure is required before object document execution",
     "text_news": "text/object retention policy is required before news or research text execution",
+    "research_report": "text/object retention policy is required before research report execution",
+    "announcement": "object index/store infrastructure is required before announcement execution",
+    "html_text": "text/object retention policy is required before HTML text execution",
+    "unknown_object_text": "object/text infrastructure is required before execution",
     "realtime": "realtime polling policy is required before realtime execution",
 }
 
@@ -48,6 +53,7 @@ class ExecutionPolicyRequest:
     requires_real_requests: bool = True
     requires_object_download: bool | None = None
     requires_pit_handling: bool | None = None
+    requires_compaction_execution: bool | None = None
     max_codes_required: int | None = None
 
 
@@ -64,6 +70,7 @@ class ExecutionPolicyDecision:
     requires_code_loop: bool
     requires_date_loop: bool
     requires_period_loop: bool
+    requires_compaction_execution: bool
     max_codes_required: int | None
     execution_allowed: bool
     blocked_reason: str | None
@@ -95,6 +102,12 @@ class EndpointExecutionPolicy:
         "period-plan",
         "code-period-plan",
         "pit-readiness",
+        "object-plan",
+        "intraday-plan",
+        "storage-estimate",
+        "compaction-plan",
+        "rate-policy",
+        "endpoint-enable-checklist",
     }
 
     def decide(self, request: ExecutionPolicyRequest) -> ExecutionPolicyDecision:
@@ -112,6 +125,9 @@ class EndpointExecutionPolicy:
         requires_period_loop = request.requires_period_loop
         if requires_period_loop is None:
             requires_period_loop = planner_kind in {"period", "code_period_matrix"}
+        requires_compaction_execution = request.requires_compaction_execution
+        if requires_compaction_execution is None:
+            requires_compaction_execution = False
         missing: list[str] = []
         warnings: list[str] = []
 
@@ -128,6 +144,7 @@ class EndpointExecutionPolicy:
                 requires_code_loop=bool(requires_code_loop),
                 requires_date_loop=bool(requires_date_loop),
                 requires_period_loop=bool(requires_period_loop),
+                requires_compaction_execution=bool(requires_compaction_execution),
                 max_codes_required=request.max_codes_required,
                 execution_allowed=False,
                 blocked_reason=None,
@@ -149,6 +166,7 @@ class EndpointExecutionPolicy:
                 requires_code_loop=bool(requires_code_loop),
                 requires_date_loop=bool(requires_date_loop),
                 requires_period_loop=bool(requires_period_loop),
+                requires_compaction_execution=bool(requires_compaction_execution),
                 max_codes_required=request.max_codes_required,
             )
         if execution_status == "unsupported":
@@ -164,6 +182,7 @@ class EndpointExecutionPolicy:
                 requires_code_loop=bool(requires_code_loop),
                 requires_date_loop=bool(requires_date_loop),
                 requires_period_loop=bool(requires_period_loop),
+                requires_compaction_execution=bool(requires_compaction_execution),
                 max_codes_required=request.max_codes_required,
             )
         if execution_status != "enabled":
@@ -179,6 +198,7 @@ class EndpointExecutionPolicy:
                 requires_code_loop=bool(requires_code_loop),
                 requires_date_loop=bool(requires_date_loop),
                 requires_period_loop=bool(requires_period_loop),
+                requires_compaction_execution=bool(requires_compaction_execution),
                 max_codes_required=request.max_codes_required,
             )
 
@@ -207,6 +227,8 @@ class EndpointExecutionPolicy:
             requires_pit_handling = endpoint_kind in {"financial_statement", "financial_indicator"} or planner_kind == "code_period_matrix"
         if requires_pit_handling:
             missing.append("PIT safety infrastructure is required")
+        if requires_compaction_execution:
+            missing.append("compaction executor is required")
 
         if missing:
             deduped = sorted(set(missing))
@@ -222,6 +244,7 @@ class EndpointExecutionPolicy:
                 requires_code_loop=bool(requires_code_loop),
                 requires_date_loop=bool(requires_date_loop),
                 requires_period_loop=bool(requires_period_loop),
+                requires_compaction_execution=bool(requires_compaction_execution),
                 max_codes_required=request.max_codes_required,
             )
 
@@ -237,6 +260,7 @@ class EndpointExecutionPolicy:
             requires_code_loop=bool(requires_code_loop),
             requires_date_loop=bool(requires_date_loop),
             requires_period_loop=bool(requires_period_loop),
+            requires_compaction_execution=bool(requires_compaction_execution),
             max_codes_required=request.max_codes_required,
             execution_allowed=True,
             blocked_reason=None,
@@ -257,6 +281,7 @@ class EndpointExecutionPolicy:
         requires_code_loop: bool = False,
         requires_date_loop: bool = False,
         requires_period_loop: bool = False,
+        requires_compaction_execution: bool = False,
         max_codes_required: int | None = None,
     ) -> ExecutionPolicyDecision:
         return ExecutionPolicyDecision(
@@ -271,6 +296,7 @@ class EndpointExecutionPolicy:
             requires_code_loop=requires_code_loop,
             requires_date_loop=requires_date_loop,
             requires_period_loop=requires_period_loop,
+            requires_compaction_execution=requires_compaction_execution,
             max_codes_required=max_codes_required,
             execution_allowed=False,
             blocked_reason=reason,
