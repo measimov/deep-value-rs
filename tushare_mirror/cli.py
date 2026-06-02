@@ -21,6 +21,7 @@ from .backfill import (
 )
 from .catalog import CatalogStore
 from .client import TushareClient, classify_probe_response
+from .code_universe import CodeUniverseProvider
 from .coverage import CoverageReporter
 from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
@@ -660,6 +661,20 @@ def cmd_api_infra_readiness(args) -> int:
     return 0
 
 
+def cmd_code_universe(args) -> int:
+    root = Path(args.root)
+    catalog = CatalogStore(root, read_only=True)
+    if not catalog.db_path.exists():
+        raise SystemExit(f"catalog not found: {catalog.db_path}; run init-catalog first")
+    result = CodeUniverseProvider(root, catalog).get(args.universe, limit=args.limit)
+    payload = result.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_key_values(payload)
+    return 1 if result.blocked else 0
+
+
 def _print_mirror_plan(plan, as_json: bool) -> None:
     if as_json:
         _print_json(plan.to_dict())
@@ -1107,6 +1122,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser('api-infra-readiness')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_api_infra_readiness)
+
+    p = sub.add_parser('code-universe')
+    p.add_argument('--universe', required=True)
+    p.add_argument('--limit', type=int, default=20)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_code_universe)
 
     p = sub.add_parser('mirror-plan')
     p.add_argument('--scope', default='low-risk-a-share')
