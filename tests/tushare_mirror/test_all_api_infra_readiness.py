@@ -203,10 +203,15 @@ class PlannerRegistryTests(unittest.TestCase):
 
     def test_planner_registry_summary_is_stable(self):
         summary = planner_registry_summary()
-        self.assertEqual(summary["supported_planner_kinds"], ["calendar_backfill", "code_date_matrix", "date_backfill", "explicit_dates", "single_snapshot"])
-        for planner_kind in ["code_list", "period", "object_download", "bucketed_intraday", "realtime_poll"]:
+        self.assertEqual(
+            summary["supported_planner_kinds"],
+            ["calendar_backfill", "code_date_matrix", "code_period_matrix", "date_backfill", "explicit_dates", "period", "single_snapshot"],
+        )
+        for planner_kind in ["code_list", "object_download", "bucketed_intraday", "realtime_poll"]:
             self.assertIn(planner_kind, summary["blocked_planner_kinds"])
             self.assertIn(planner_kind, summary["blocked_missing_infrastructure"])
+        self.assertNotIn("period", summary["blocked_planner_kinds"])
+        self.assertNotIn("code_period_matrix", summary["blocked_planner_kinds"])
 
 
 class DisabledEndpointInventoryTests(unittest.TestCase):
@@ -393,6 +398,42 @@ class ExecutionPolicyGuardrailTests(unittest.TestCase):
         self.assertFalse(decision.execution_allowed)
         self.assertIsNone(decision.blocked_reason)
 
+    def test_period_and_code_period_plan_are_policy_dry_run_only(self):
+        policy = EndpointExecutionPolicy()
+        period_cfg = {
+            "api_name": "income",
+            "endpoint_kind": "financial_statement",
+            "planner_kind": "period",
+            "execution_status": "disabled",
+        }
+        period_decision = policy.decide(
+            ExecutionPolicyRequest(
+                endpoint_config=period_cfg,
+                user_command="period-plan",
+                requires_real_requests=False,
+                requires_period_loop=True,
+            )
+        )
+        code_period_cfg = dict(period_cfg, planner_kind="code_period_matrix")
+        code_period_decision = policy.decide(
+            ExecutionPolicyRequest(
+                endpoint_config=code_period_cfg,
+                user_command="code-period-plan",
+                requires_real_requests=False,
+                requires_code_loop=True,
+                requires_period_loop=True,
+                max_codes_required=3,
+            )
+        )
+        self.assertEqual(period_decision.decision, "dry_run_only")
+        self.assertFalse(period_decision.execution_allowed)
+        self.assertTrue(period_decision.requires_period_loop)
+        self.assertEqual(code_period_decision.decision, "dry_run_only")
+        self.assertFalse(code_period_decision.execution_allowed)
+        self.assertTrue(code_period_decision.requires_code_loop)
+        self.assertTrue(code_period_decision.requires_period_loop)
+        self.assertEqual(code_period_decision.max_codes_required, 3)
+
     def test_direct_fetch_for_code_list_endpoint_is_blocked_without_client_call(self):
         cfg = dict(self.catalog.get_endpoint_config("namechange"))
         cfg["api_name"] = "namechange_code_loop"
@@ -444,6 +485,34 @@ class ExecutionPolicyGuardrailTests(unittest.TestCase):
 
         with self.assertRaisesRegex(MirrorError, "endpoint execution blocked"):
             FileLakeStore(self.root, self.catalog).fetch("stk_managers_code_date_matrix", {"ts_code": "000001.SZ", "ann_date": "20250102"}, NoCallClient(), max_attempts=1)
+        after = self.counts()
+        self.assertEqual(before, after)
+
+    def test_direct_fetch_for_period_and_code_period_endpoints_is_blocked_without_client_call(self):
+        period_cfg = dict(self.catalog.get_endpoint_config("stock_basic"))
+        period_cfg["api_name"] = "stock_basic_period_plan"
+        period_cfg["planner_kind"] = "period"
+        period_cfg["execution_status"] = "enabled"
+        enriched, table_id, partition_spec_id = enrich_endpoint_config(period_cfg)
+        self.catalog.upsert_endpoint(enriched, table_id, partition_spec_id)
+
+        code_period_cfg = dict(self.catalog.get_endpoint_config("namechange"))
+        code_period_cfg["api_name"] = "namechange_code_period_plan"
+        code_period_cfg["endpoint_kind"] = "financial_statement"
+        code_period_cfg["planner_kind"] = "code_period_matrix"
+        code_period_cfg["execution_status"] = "enabled"
+        enriched, table_id, partition_spec_id = enrich_endpoint_config(code_period_cfg)
+        self.catalog.upsert_endpoint(enriched, table_id, partition_spec_id)
+        before = self.counts()
+
+        class NoCallClient:
+            def query_paginated(self, *args, **kwargs):
+                raise AssertionError("period/code-period endpoint should not call Tushare client")
+
+        with self.assertRaisesRegex(MirrorError, "endpoint execution blocked"):
+            FileLakeStore(self.root, self.catalog).fetch("stock_basic_period_plan", {"period": "20240331"}, NoCallClient(), max_attempts=1)
+        with self.assertRaisesRegex(MirrorError, "endpoint execution blocked"):
+            FileLakeStore(self.root, self.catalog).fetch("namechange_code_period_plan", {"ts_code": "000001.SZ", "period": "20240331"}, NoCallClient(), max_attempts=1)
         after = self.counts()
         self.assertEqual(before, after)
 

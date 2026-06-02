@@ -8,6 +8,8 @@ from .backfill import BackfillPlanner
 from .capabilities import PLANNER_KIND_VALUES
 from .catalog import CatalogStore
 from .code_date_matrix_planner import CodeDateMatrixPlanner
+from .code_period_planner import CodePeriodPlanner
+from .period_planner import PeriodPlanner
 from .planner import JobPlanner
 
 
@@ -17,6 +19,8 @@ SUPPORTED_PLANNER_KINDS = {
     "calendar_backfill",
     "explicit_dates",
     "code_date_matrix",
+    "period",
+    "code_period_matrix",
 }
 
 BLOCKED_PLANNER_INFRA = {
@@ -50,6 +54,12 @@ class PlannerRegistryRequest:
     end_date: str | None = None
     trading_days_only: bool = False
     calendar_exchange: str = "SSE"
+    periods: str | list[str] | None = None
+    start_period: str | None = None
+    end_period: str | None = None
+    period_frequency: str = "quarterly"
+    max_periods: int | None = None
+    max_candidate_jobs: int | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +132,53 @@ class PlannerRegistry:
                 max_dates=request.max_dates,
                 trading_days_only=request.trading_days_only,
                 calendar_exchange=request.calendar_exchange,
+            )
+            return PlannerRegistryResult(
+                api_name=request.api_name,
+                planner_kind=kind,
+                status="plan_only" if not plan.blocked else "blocked",
+                plan_type=kind if not plan.blocked else "blocked",
+                planned_jobs=plan.summary.planned_jobs if not plan.blocked else 0,
+                blocked_reason=";".join(plan.summary.blocking_errors) if plan.blocked else None,
+                missing_infrastructure=None if not plan.blocked else ";".join(plan.summary.blocking_errors),
+                requires_real_requests=not plan.blocked and plan.summary.planned_jobs > 0,
+                requires_user_confirmation=not plan.blocked and plan.summary.planned_jobs > 0,
+                plan=plan.to_dict(),
+                warnings=list(plan.summary.warnings),
+            )
+        if kind == "period":
+            plan = PeriodPlanner(self.root, self.catalog).plan(
+                api_name=request.api_name,
+                periods=request.periods or dates,
+                start_period=request.start_period,
+                end_period=request.end_period,
+                period_frequency=request.period_frequency,
+                max_periods=request.max_periods or 20,
+            )
+            return PlannerRegistryResult(
+                api_name=request.api_name,
+                planner_kind=kind,
+                status="plan_only" if not plan.blocked else "blocked",
+                plan_type=kind if not plan.blocked else "blocked",
+                planned_jobs=plan.candidate_jobs if not plan.blocked else 0,
+                blocked_reason=plan.blocked_reason,
+                missing_infrastructure=plan.blocked_reason,
+                requires_real_requests=not plan.blocked and plan.candidate_jobs > 0,
+                requires_user_confirmation=not plan.blocked and plan.candidate_jobs > 0,
+                plan=plan.to_dict(),
+                warnings=list(plan.warnings),
+            )
+        if kind == "code_period_matrix":
+            plan = CodePeriodPlanner(self.root, self.catalog).plan(
+                api_name=request.api_name,
+                universe=request.universe or "",
+                limit_codes=request.limit_codes,
+                periods=request.periods,
+                start_period=request.start_period,
+                end_period=request.end_period,
+                period_frequency=request.period_frequency,
+                max_periods=request.max_periods or 20,
+                max_candidate_jobs=request.max_candidate_jobs or 100,
             )
             return PlannerRegistryResult(
                 api_name=request.api_name,

@@ -44,6 +44,7 @@ class ExecutionPolicyRequest:
     max_jobs: int | None = None
     requires_code_loop: bool | None = None
     requires_date_loop: bool | None = None
+    requires_period_loop: bool | None = None
     requires_real_requests: bool = True
     requires_object_download: bool | None = None
     requires_pit_handling: bool | None = None
@@ -62,6 +63,7 @@ class ExecutionPolicyDecision:
     user_confirmation_required: bool
     requires_code_loop: bool
     requires_date_loop: bool
+    requires_period_loop: bool
     max_codes_required: int | None
     execution_allowed: bool
     blocked_reason: str | None
@@ -90,6 +92,9 @@ class EndpointExecutionPolicy:
         "code-universe",
         "code-list-plan",
         "code-date-matrix-plan",
+        "period-plan",
+        "code-period-plan",
+        "pit-readiness",
     }
 
     def decide(self, request: ExecutionPolicyRequest) -> ExecutionPolicyDecision:
@@ -104,6 +109,9 @@ class EndpointExecutionPolicy:
         requires_date_loop = request.requires_date_loop
         if requires_date_loop is None:
             requires_date_loop = planner_kind in {"code_date_matrix", "code_period_matrix"}
+        requires_period_loop = request.requires_period_loop
+        if requires_period_loop is None:
+            requires_period_loop = planner_kind in {"period", "code_period_matrix"}
         missing: list[str] = []
         warnings: list[str] = []
 
@@ -119,6 +127,7 @@ class EndpointExecutionPolicy:
                 user_confirmation_required=False,
                 requires_code_loop=bool(requires_code_loop),
                 requires_date_loop=bool(requires_date_loop),
+                requires_period_loop=bool(requires_period_loop),
                 max_codes_required=request.max_codes_required,
                 execution_allowed=False,
                 blocked_reason=None,
@@ -139,6 +148,7 @@ class EndpointExecutionPolicy:
                 warnings,
                 requires_code_loop=bool(requires_code_loop),
                 requires_date_loop=bool(requires_date_loop),
+                requires_period_loop=bool(requires_period_loop),
                 max_codes_required=request.max_codes_required,
             )
         if execution_status == "unsupported":
@@ -153,6 +163,7 @@ class EndpointExecutionPolicy:
                 warnings,
                 requires_code_loop=bool(requires_code_loop),
                 requires_date_loop=bool(requires_date_loop),
+                requires_period_loop=bool(requires_period_loop),
                 max_codes_required=request.max_codes_required,
             )
         if execution_status != "enabled":
@@ -167,6 +178,7 @@ class EndpointExecutionPolicy:
                 warnings,
                 requires_code_loop=bool(requires_code_loop),
                 requires_date_loop=bool(requires_date_loop),
+                requires_period_loop=bool(requires_period_loop),
                 max_codes_required=request.max_codes_required,
             )
 
@@ -181,6 +193,8 @@ class EndpointExecutionPolicy:
             missing.append("explicit code-list guardrails are required")
         if requires_date_loop:
             missing.append("explicit date-loop guardrails are required")
+        if requires_period_loop:
+            missing.append("explicit period-loop guardrails are required")
 
         requires_object_download = request.requires_object_download
         if requires_object_download is None:
@@ -207,6 +221,7 @@ class EndpointExecutionPolicy:
                 warnings,
                 requires_code_loop=bool(requires_code_loop),
                 requires_date_loop=bool(requires_date_loop),
+                requires_period_loop=bool(requires_period_loop),
                 max_codes_required=request.max_codes_required,
             )
 
@@ -221,6 +236,7 @@ class EndpointExecutionPolicy:
             user_confirmation_required=request.requires_real_requests,
             requires_code_loop=bool(requires_code_loop),
             requires_date_loop=bool(requires_date_loop),
+            requires_period_loop=bool(requires_period_loop),
             max_codes_required=request.max_codes_required,
             execution_allowed=True,
             blocked_reason=None,
@@ -240,6 +256,7 @@ class EndpointExecutionPolicy:
         warnings: list[str],
         requires_code_loop: bool = False,
         requires_date_loop: bool = False,
+        requires_period_loop: bool = False,
         max_codes_required: int | None = None,
     ) -> ExecutionPolicyDecision:
         return ExecutionPolicyDecision(
@@ -253,6 +270,7 @@ class EndpointExecutionPolicy:
             user_confirmation_required=True,
             requires_code_loop=requires_code_loop,
             requires_date_loop=requires_date_loop,
+            requires_period_loop=requires_period_loop,
             max_codes_required=max_codes_required,
             execution_allowed=False,
             blocked_reason=reason,
