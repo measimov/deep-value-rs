@@ -10,6 +10,9 @@ import unittest
 from pathlib import Path
 
 from tushare_mirror.catalog import CatalogStore
+from tushare_mirror.client import QueryResult
+from tushare_mirror.code_period_planner import CodePeriodPlanner
+from tushare_mirror.endpoints import enrich_endpoint_config
 from tushare_mirror.endpoints import load_into_catalog
 from tushare_mirror.period_planner import PeriodPlanner
 from tushare_mirror.periods import (
@@ -22,6 +25,7 @@ from tushare_mirror.periods import (
     period_year,
 )
 from tushare_mirror.pit import pit_metadata_from_config, validate_pit_safety
+from tushare_mirror.store import FileLakeStore
 
 
 class PeriodPlanningUtilityTests(unittest.TestCase):
@@ -210,6 +214,59 @@ class PeriodPlannerCliTests(unittest.TestCase):
                 "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
             }
 
+    def seed_stock_basic(self, count: int = 4):
+        class FakeClient:
+            def query_paginated(self, api_name, params, fields, page_size=None):
+                source_fields = ["ts_code", "symbol", "name", "area", "industry", "market", "list_date"]
+                base_codes = ["000001.SZ", "000002.SZ", "000004.SZ", "000006.SZ"]
+                codes = base_codes + [f"{300000 + idx:06d}.SZ" for idx in range(max(0, count - len(base_codes)))]
+                items = [
+                    [code, code.split(".")[0], f"name{idx}", "area", "industry", "主板", "20200101"]
+                    for idx, code in enumerate(codes[:count])
+                ]
+                event = {
+                    "code": 0,
+                    "msg": None,
+                    "data": {"fields": source_fields, "items": items, "has_more": False},
+                    "_http_status": 200,
+                    "_page_index": 0,
+                    "_request_params": dict(params),
+                }
+                return QueryResult(events=[event], fields=source_fields, items=items)
+
+        return FileLakeStore(self.root, self.catalog).fetch("stock_basic", {"list_status": "L"}, FakeClient())
+
+    def upsert_financial_endpoint(self, api_name: str, endpoint_kind: str = "financial_statement"):
+        cfg = {
+            "api_name": api_name,
+            "family": "stock_financial",
+            "market": "a",
+            "domain": "financial",
+            "namespace": "tushare.financial",
+            "volume_class": "F1_FINANCIAL",
+            "endpoint_kind": endpoint_kind,
+            "planner_kind": "code_period_matrix",
+            "execution_status": "enabled",
+            "partition_template": "period_year",
+            "primary_date_field": "period",
+            "period_field": "period",
+            "supported_params": ["ts_code", "period"],
+            "default_fields": ["ts_code", "period", "ann_date"],
+            "probe": {"params": {"ts_code": "000001.SZ", "period": "20240331"}, "fields": ["ts_code", "period"]},
+            "pit_safety": {
+                "pit_required": True,
+                "period_field": "period",
+                "announcement_date_fields": ["ann_date", "f_ann_date"],
+                "usable_after_field": "ann_date",
+                "fallback_usable_after_policy": "block_without_disclosure_date",
+                "allow_without_disclosure_date": False,
+                "lookahead_risk": True,
+                "strategy_safe_default": False,
+            },
+        }
+        enriched, table_id, partition_spec_id = enrich_endpoint_config(cfg)
+        self.catalog.upsert_endpoint(enriched, table_id, partition_spec_id)
+
     def run_cli(self, *args, check=False):
         env = dict(os.environ)
         env["TUSHARE_TOKEN"] = "secret-token-should-not-appear"
@@ -287,6 +344,119 @@ class PeriodPlannerCliTests(unittest.TestCase):
         self.assertTrue(plan.blocked)
         self.assertIn("planner_kind_not_period_compatible:calendar_backfill", plan.blocking_errors)
         self.assertFalse(plan.pit_required)
+
+    def test_income_code_period_plan_with_fake_stock_basic_is_plan_only(self):
+        self.seed_stock_basic()
+        self.upsert_financial_endpoint("income", "financial_statement")
+        before = self.counts()
+        result = self.run_cli(
+            "code-period-plan",
+            "--api", "income",
+            "--universe", "a_share_listed",
+            "--limit-codes", "3",
+            "--periods", "20240331,20240630",
+            "--json",
+        )
+        after = self.counts()
+        payload = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(before, after)
+        self.assertFalse(payload["blocked"])
+        self.assertFalse(payload["execution_allowed"])
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["planned_codes"], 3)
+        self.assertEqual(payload["planned_periods"], 2)
+        self.assertEqual(payload["planned_jobs"], 6)
+        self.assertEqual(payload["items"][0]["params"]["period"], "20240331")
+        self.assertTrue(payload["items"][0]["pit_required"])
+        self.assertEqual(payload["items"][0]["pit_safety_status"], "complete")
+        self.assertFalse(payload["items"][0]["execution_allowed"])
+
+    def test_fina_indicator_code_period_range_with_fake_stock_basic(self):
+        self.seed_stock_basic()
+        self.upsert_financial_endpoint("fina_indicator", "financial_indicator")
+        plan = CodePeriodPlanner(self.root, self.catalog).plan(
+            api_name="fina_indicator",
+            universe="a_share_listed",
+            limit_codes=3,
+            start_period="2024Q1",
+            end_period="2024Q4",
+            period_frequency="quarterly",
+            max_periods=4,
+        )
+        self.assertFalse(plan.blocked)
+        self.assertEqual(plan.summary.planned_codes, 3)
+        self.assertEqual(plan.summary.planned_periods, 4)
+        self.assertEqual(plan.summary.candidate_jobs, 16)
+        self.assertEqual(plan.summary.planned_jobs, 12)
+        self.assertEqual(sorted({item.period for item in plan.items}), ["20240331", "20240630", "20240930", "20241231"])
+
+    def test_code_period_missing_stock_basic_and_limit_errors_block(self):
+        self.upsert_financial_endpoint("income", "financial_statement")
+        missing_source = self.run_cli(
+            "code-period-plan",
+            "--api", "income",
+            "--universe", "a_share_listed",
+            "--limit-codes", "3",
+            "--periods", "20240331",
+            "--json",
+        )
+        too_many_codes = self.run_cli(
+            "code-period-plan",
+            "--api", "income",
+            "--universe", "a_share_listed",
+            "--limit-codes", "21",
+            "--periods", "20240331",
+            "--json",
+        )
+        too_many_periods = self.run_cli(
+            "code-period-plan",
+            "--api", "income",
+            "--universe", "a_share_listed",
+            "--limit-codes", "3",
+            "--periods", "20240331",
+            "--max-periods", "21",
+            "--json",
+        )
+        self.assertEqual(missing_source.returncode, 1)
+        self.assertIn("missing_stock_basic_latest_snapshot", missing_source.stdout)
+        self.assertEqual(too_many_codes.returncode, 1)
+        self.assertIn("limit_codes_exceeds_phase_limit:20", too_many_codes.stdout)
+        self.assertEqual(too_many_periods.returncode, 1)
+        self.assertIn("max_periods_exceeds_phase_limit:20", too_many_periods.stdout)
+
+    def test_code_period_candidate_jobs_above_phase_limit_are_truncated(self):
+        self.seed_stock_basic(count=30)
+        self.upsert_financial_endpoint("income", "financial_statement")
+        plan = CodePeriodPlanner(self.root, self.catalog).plan(
+            api_name="income",
+            universe="a_share_listed",
+            limit_codes=20,
+            start_period="2020Q1",
+            end_period="2026Q4",
+            period_frequency="quarterly",
+            max_periods=20,
+        )
+        self.assertFalse(plan.blocked)
+        self.assertEqual(plan.summary.candidate_jobs, 840)
+        self.assertEqual(plan.summary.planned_codes, 20)
+        self.assertEqual(plan.summary.planned_periods, 5)
+        self.assertEqual(plan.summary.planned_jobs, 100)
+        self.assertTrue(plan.summary.truncated_by_code_limit)
+        self.assertTrue(plan.summary.truncated_by_period_limit)
+        self.assertTrue(plan.summary.truncated_by_candidate_limit)
+
+    def test_inventory_income_code_period_blocks_on_incomplete_pit_metadata(self):
+        self.seed_stock_basic()
+        plan = CodePeriodPlanner(self.root, self.catalog).plan(
+            api_name="income",
+            universe="a_share_listed",
+            limit_codes=2,
+            periods="20240331",
+        )
+        self.assertTrue(plan.blocked)
+        self.assertIn("pit:unknown_pit_safety", plan.summary.blocking_errors)
+        self.assertEqual(plan.items, [])
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ from .backfill import (
 )
 from .catalog import CatalogStore
 from .client import TushareClient, classify_probe_response
+from .code_period_planner import CodePeriodPlanner
 from .code_date_matrix_planner import CodeDateMatrixPlanner
 from .code_list_planner import CodeListPlanner
 from .code_universe import CodeUniverseProvider
@@ -766,6 +767,37 @@ def cmd_period_plan(args) -> int:
     return 1 if plan.blocked else 0
 
 
+def cmd_code_period_plan(args) -> int:
+    root = Path(args.root)
+    catalog = CatalogStore(root, read_only=True)
+    if not catalog.db_path.exists():
+        raise SystemExit(f"catalog not found: {catalog.db_path}; run init-catalog first")
+    plan = CodePeriodPlanner(root, catalog).plan(
+        api_name=args.api,
+        universe=args.universe,
+        limit_codes=args.limit_codes,
+        periods=args.periods,
+        start_period=args.start_period,
+        end_period=args.end_period,
+        period_frequency=args.period_frequency,
+        max_periods=args.max_periods,
+        max_candidate_jobs=args.max_candidate_jobs,
+    )
+    payload = plan.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        summary = dict(payload)
+        summary.pop("items", None)
+        _print_key_values(summary)
+        if plan.items:
+            _print_table(
+                [item.to_dict() for item in plan.items],
+                ["api_name", "ts_code", "period", "existing_status", "planned_action", "job_key", "pit_required", "pit_safety_status", "would_require_real_request", "execution_allowed", "blocked_reason"],
+            )
+    return 1 if plan.blocked else 0
+
+
 def _print_mirror_plan(plan, as_json: bool) -> None:
     if as_json:
         _print_json(plan.to_dict())
@@ -1251,6 +1283,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--max-periods', type=int, default=20)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_period_plan)
+
+    p = sub.add_parser('code-period-plan')
+    p.add_argument('--api', required=True)
+    p.add_argument('--universe', required=True)
+    p.add_argument('--limit-codes', type=int, required=True)
+    p.add_argument('--periods')
+    p.add_argument('--start-period')
+    p.add_argument('--end-period')
+    p.add_argument('--period-frequency', choices=['quarterly', 'annual'], default='quarterly')
+    p.add_argument('--max-periods', type=int, default=20)
+    p.add_argument('--max-candidate-jobs', type=int, default=100)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_code_period_plan)
 
     p = sub.add_parser('mirror-plan')
     p.add_argument('--scope', default='low-risk-a-share')
