@@ -1548,3 +1548,79 @@ Stop before executing a next batch when any of these are present:
 
 The next batch must remain user-confirmed. Do not run `mirror-run --execute`
 from review, readiness, or batch-plan output alone.
+
+## All Tushare API Infrastructure Roadmap
+
+The current executable scope is deliberately narrow: `low-risk-a-share` covers
+the already-tested reference, calendar, daily-like, weekly/monthly, and a small
+set of event/company-governance endpoints. It is not a full Tushare mirror.
+
+Broader Tushare API families are represented as disabled inventory stubs under
+`tushare_mirror/endpoint_configs/inventory/`. Inventory entries classify future
+endpoints by `endpoint_kind`, `planner_kind`, `execution_status`,
+`required_infra`, and risk notes. They are not copied into the executable
+catalog by `init-catalog`, do not appear in mirror scopes, and cannot be fetched
+unless a later phase explicitly promotes an endpoint into enabled config with
+tests and policy approval.
+
+Use this read-only command to inspect infrastructure readiness:
+
+```bash
+python3 -m tushare_mirror api-infra-readiness
+python3 -m tushare_mirror api-infra-readiness --json
+```
+
+The report summarizes:
+
+- currently supported endpoint kinds and planner kinds
+- blocked future planner kinds
+- disabled inventory endpoint count
+- enabled executable endpoint count
+- missing infrastructure by category
+- recommended next infrastructure phases
+
+Endpoint enablement has four separate layers:
+
+- Inventory: a disabled classification stub only.
+- Enabled config: an endpoint in `_catalog/endpoints/*.yaml` with bounded fields,
+  params, partitioning, probe config, and `execution_status=enabled`.
+- Planner support: a `planner_kind` registered in the planner registry and able
+  to produce a bounded plan.
+- Execution policy: final guardrails that decide whether a command may execute
+  the endpoint.
+
+An endpoint should not be enabled until all four layers are satisfied and
+covered by tests.
+
+Infrastructure still required before broader families can execute:
+
+- Financial PIT: disclosure-date handling, PIT-safe snapshots, code/period
+  matrix guardrails, and validation for financial statements and indicators.
+- Code loops: explicit code-list sources, max-code limits, retry/checkpoint
+  behavior, and observable partial progress.
+- Period planners: bounded period generation and reporting for macro, fund, and
+  financial-period endpoints.
+- Object documents: object index planning, local object store layout, size
+  limits, retention policy, and restore-check coverage for PDF/news/research
+  artifacts.
+- Intraday/minute/tick: bucketed storage, request-volume controls, compaction
+  policy, and retention rules.
+- Compaction: a reviewed compaction executor and backup/restore-check semantics
+  for compacted files.
+- Realtime: polling cadence, rate-limit policy, retention policy, and explicit
+  user confirmation.
+
+Before enabling any new endpoint:
+
+- classify it with `endpoint_kind` and `planner_kind`
+- keep it disabled until tests prove loader, planner, policy, writer,
+  validation, reader, backup, and restore-check behavior
+- add fake-client contract tests before any real request
+- run a small opt-in real smoke only after explicit user confirmation
+- keep max-job and scope guardrails in place
+- never turn inventory stubs into executable endpoints by bulk loading the
+  inventory directory
+
+No real fetch should occur from inventory, readiness, review, or batch-planning
+commands. Real execution remains limited to explicit user-confirmed commands
+such as bounded `mirror-run --execute` or scoped backfill commands.
