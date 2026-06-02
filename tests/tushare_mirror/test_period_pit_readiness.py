@@ -12,6 +12,7 @@ from tushare_mirror.periods import (
     period_sort_key,
     period_year,
 )
+from tushare_mirror.pit import pit_metadata_from_config, validate_pit_safety
 
 
 class PeriodPlanningUtilityTests(unittest.TestCase):
@@ -93,6 +94,90 @@ class PeriodPlanningUtilityTests(unittest.TestCase):
         rendered = json.dumps(payload, sort_keys=True)
         self.assertEqual(payload["periods"], ["20240331", "20240630"])
         self.assertIn('"frequency": "explicit"', rendered)
+
+
+class PITSafetyMetadataTests(unittest.TestCase):
+    def test_valid_pit_metadata_is_complete_and_json_stable(self):
+        cfg = {
+            "api_name": "income",
+            "endpoint_kind": "financial_statement",
+            "pit_safety": {
+                "pit_required": True,
+                "period_field": "period",
+                "announcement_date_fields": ["ann_date", "f_ann_date"],
+                "usable_after_field": "ann_date",
+                "fallback_usable_after_policy": "block_without_disclosure_date",
+                "allow_without_disclosure_date": False,
+                "lookahead_risk": True,
+                "strategy_safe_default": False,
+            },
+        }
+        result = validate_pit_safety(cfg)
+        self.assertEqual(result.status, "complete")
+        self.assertTrue(result.pit_required)
+        self.assertFalse(result.metadata.allow_without_disclosure_date)
+        rendered = json.dumps(result.to_dict(), sort_keys=True)
+        self.assertIn('"period_field": "period"', rendered)
+        self.assertIn('"usable_after_field": "ann_date"', rendered)
+
+    def test_missing_period_field_blocks(self):
+        result = validate_pit_safety(
+            {
+                "api_name": "income",
+                "endpoint_kind": "financial_statement",
+                "pit_safety": {
+                    "pit_required": True,
+                    "announcement_date_fields": ["ann_date"],
+                    "usable_after_field": "ann_date",
+                },
+            }
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("missing_period_field", result.errors)
+
+    def test_missing_announcement_date_blocks(self):
+        result = validate_pit_safety(
+            {
+                "api_name": "fina_indicator",
+                "endpoint_kind": "financial_indicator",
+                "pit_safety": {
+                    "pit_required": True,
+                    "period_field": "period",
+                    "usable_after_field": "ann_date",
+                },
+            }
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("missing_announcement_date_fields", result.errors)
+
+    def test_default_allow_without_disclosure_date_is_false(self):
+        metadata = pit_metadata_from_config(
+            {
+                "api_name": "income",
+                "endpoint_kind": "financial_statement",
+                "pit_safety": {
+                    "pit_required": True,
+                    "period_field": "period",
+                    "announcement_date_fields": ["ann_date"],
+                    "usable_after_field": "ann_date",
+                },
+            }
+        )
+        self.assertFalse(metadata.allow_without_disclosure_date)
+        self.assertFalse(metadata.strategy_safe_default)
+
+    def test_unknown_pit_safety_blocks_financial_endpoint(self):
+        result = validate_pit_safety(
+            {
+                "api_name": "income",
+                "endpoint_kind": "financial_statement",
+            }
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("unknown_pit_safety", result.errors)
+        self.assertIn("missing_period_field", result.errors)
+        self.assertIn("missing_announcement_date_fields", result.errors)
+        self.assertIn("missing_usable_after_strategy", result.errors)
 
 
 if __name__ == "__main__":
