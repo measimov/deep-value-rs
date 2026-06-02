@@ -25,6 +25,7 @@ from tushare_mirror.periods import (
     period_year,
 )
 from tushare_mirror.pit import pit_metadata_from_config, validate_pit_safety
+from tushare_mirror.pit import PITReadinessReporter
 from tushare_mirror.planner import JobPlanner
 from tushare_mirror.store import FileLakeStore
 
@@ -606,6 +607,70 @@ class PeriodPlannerCliTests(unittest.TestCase):
         self.assertEqual(by_code["000004.SZ"].existing_status, "quarantined_exists")
         self.assertEqual(by_code["000004.SZ"].planned_action, "blocked_quarantined")
         self.assertFalse(by_code["000004.SZ"].would_require_real_request)
+
+
+class PITReadinessReportTests(unittest.TestCase):
+    def test_pit_readiness_counts_financial_inventory(self):
+        report = PITReadinessReporter().report()
+        payload = report.to_dict()
+        self.assertGreaterEqual(payload["financial_endpoint_count"], 9)
+        self.assertEqual(payload["pit_metadata_incomplete_count"], 0)
+        self.assertEqual(payload["execution_enabled_count"], 0)
+        self.assertEqual(payload["execution_blocked_count"], payload["financial_endpoint_count"])
+        self.assertEqual(payload["missing_period_field"], [])
+        self.assertEqual(payload["missing_announcement_date_fields"], [])
+        self.assertEqual(payload["missing_usable_after_strategy"], [])
+        self.assertEqual(payload["strategy_safe_count"], 0)
+        self.assertGreater(payload["strategy_unsafe_count"], 0)
+        self.assertIn("PIT-safe usable_after generation", payload["next_required_infra"])
+
+    def test_pit_readiness_cli_json_fields_and_no_side_effects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = CatalogStore(root)
+            catalog.init()
+            load_into_catalog(root, catalog)
+            before = {
+                "runs": 0,
+                "jobs": 0,
+                "files": 0,
+                "snapshots": 0,
+                "validations": 0,
+            }
+            with sqlite3.connect(root / "_catalog" / "catalog.sqlite") as conn:
+                actual_before = {
+                    "runs": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+                    "jobs": conn.execute("select count(*) from jobs").fetchone()[0],
+                    "files": conn.execute("select count(*) from files").fetchone()[0],
+                    "snapshots": conn.execute("select count(*) from snapshots").fetchone()[0],
+                    "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
+                }
+            self.assertEqual(actual_before, before)
+            env = dict(os.environ)
+            env["TUSHARE_TOKEN"] = "secret-token-should-not-appear"
+            result = subprocess.run(
+                [sys.executable, "-m", "tushare_mirror", "--root", str(root), "pit-readiness", "--json"],
+                cwd=Path(__file__).resolve().parents[2],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                check=True,
+            )
+            payload = json.loads(result.stdout)
+            self.assertIn("financial_endpoint_count", payload)
+            self.assertIn("items", payload)
+            self.assertNotIn("secret-token-should-not-appear", result.stdout)
+            self.assertNotIn("secret-token-should-not-appear", result.stderr)
+            with sqlite3.connect(root / "_catalog" / "catalog.sqlite") as conn:
+                actual_after = {
+                    "runs": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+                    "jobs": conn.execute("select count(*) from jobs").fetchone()[0],
+                    "files": conn.execute("select count(*) from files").fetchone()[0],
+                    "snapshots": conn.execute("select count(*) from snapshots").fetchone()[0],
+                    "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
+                }
+            self.assertEqual(actual_after, before)
 
 
 if __name__ == "__main__":

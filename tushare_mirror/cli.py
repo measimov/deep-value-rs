@@ -32,6 +32,7 @@ from .hashing import token_hash
 from .missing_backfill import MissingBackfillPlanner
 from .mirror import MirrorBatchPlanner, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, init_catalog_if_requested
 from .period_planner import PeriodPlanner
+from .pit import PITReadinessReporter
 from .planner import JobPlanner
 from .reader import LakeReader
 from .store import FileLakeStore
@@ -676,6 +677,23 @@ def cmd_api_infra_readiness(args) -> int:
     return 0
 
 
+def cmd_pit_readiness(args) -> int:
+    report = PITReadinessReporter().report()
+    payload = report.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        summary = dict(payload)
+        items = summary.pop("items", [])
+        _print_key_values(summary)
+        if items:
+            _print_table(
+                items,
+                ["api_name", "endpoint_kind", "planner_kind", "execution_status", "pit_required", "pit_safety_status", "period_field", "usable_after_field", "strategy_safe_default"],
+            )
+    return 0
+
+
 def cmd_code_universe(args) -> int:
     root = Path(args.root)
     catalog = CatalogStore(root, read_only=True)
@@ -1245,6 +1263,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser('api-infra-readiness')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_api_infra_readiness)
+
+    p = sub.add_parser('pit-readiness')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_pit_readiness)
 
     p = sub.add_parser('code-universe')
     p.add_argument('--universe', required=True)

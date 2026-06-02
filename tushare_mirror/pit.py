@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
+from .endpoints import load_inventory_configs
+
 
 PIT_ENDPOINT_KINDS = {"financial_statement", "financial_indicator"}
 
@@ -37,6 +39,94 @@ class PITSafetyValidationResult:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class PITReadinessReport:
+    financial_endpoint_count: int
+    pit_metadata_complete_count: int
+    pit_metadata_incomplete_count: int
+    execution_enabled_count: int
+    execution_blocked_count: int
+    missing_period_field: list[str]
+    missing_announcement_date_fields: list[str]
+    missing_usable_after_strategy: list[str]
+    strategy_safe_count: int
+    strategy_unsafe_count: int
+    next_required_infra: list[str]
+    items: list[dict[str, Any]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class PITReadinessReporter:
+    def report(self) -> PITReadinessReport:
+        financial = [
+            item
+            for item in load_inventory_configs()
+            if str(item.get("endpoint_kind") or "") in PIT_ENDPOINT_KINDS or pit_required_for_endpoint(item)
+        ]
+        items: list[dict[str, Any]] = []
+        missing_period: list[str] = []
+        missing_announcement: list[str] = []
+        missing_strategy: list[str] = []
+        complete = 0
+        execution_enabled = 0
+        strategy_safe = 0
+        for item in financial:
+            result = validate_pit_safety(item)
+            api_name = str(item.get("api_name"))
+            if result.status == "complete":
+                complete += 1
+            if item.get("execution_status") == "enabled":
+                execution_enabled += 1
+            if result.metadata.strategy_safe_default:
+                strategy_safe += 1
+            if "missing_period_field" in result.errors:
+                missing_period.append(api_name)
+            if "missing_announcement_date_fields" in result.errors:
+                missing_announcement.append(api_name)
+            if "missing_usable_after_strategy" in result.errors:
+                missing_strategy.append(api_name)
+            items.append(
+                {
+                    "api_name": api_name,
+                    "endpoint_kind": item.get("endpoint_kind"),
+                    "planner_kind": item.get("planner_kind"),
+                    "execution_status": item.get("execution_status"),
+                    "pit_required": result.pit_required,
+                    "pit_safety_status": result.status,
+                    "period_field": result.metadata.period_field,
+                    "announcement_date_fields": result.metadata.announcement_date_fields,
+                    "usable_after_field": result.metadata.usable_after_field,
+                    "strategy_safe_default": result.metadata.strategy_safe_default,
+                    "errors": result.errors,
+                    "warnings": result.warnings,
+                }
+            )
+        total = len(financial)
+        return PITReadinessReport(
+            financial_endpoint_count=total,
+            pit_metadata_complete_count=complete,
+            pit_metadata_incomplete_count=total - complete,
+            execution_enabled_count=execution_enabled,
+            execution_blocked_count=total - execution_enabled,
+            missing_period_field=sorted(missing_period),
+            missing_announcement_date_fields=sorted(missing_announcement),
+            missing_usable_after_strategy=sorted(missing_strategy),
+            strategy_safe_count=strategy_safe,
+            strategy_unsafe_count=total - strategy_safe,
+            next_required_infra=[
+                "PIT-safe usable_after generation",
+                "per-endpoint fake tests",
+                "small user-confirmed real smoke",
+                "rate-limit policy",
+                "resume and failure aggregation",
+                "strategy-safe derived layer",
+            ],
+            items=sorted(items, key=lambda row: str(row["api_name"])),
+        )
 
 
 def pit_required_for_endpoint(endpoint_config: Mapping[str, Any]) -> bool:
