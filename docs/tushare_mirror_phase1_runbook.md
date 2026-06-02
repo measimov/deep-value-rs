@@ -1689,6 +1689,95 @@ Future code/date endpoint enablement must stay incremental:
 6. Add coverage/reporting for the endpoint's code/date shape.
 7. Expand only after the small smoke and backup/restore-check path pass.
 
+## Period, Code-period, and PIT Readiness Infrastructure
+
+Period and code/period planning are infrastructure-only. They let the system
+describe bounded financial or period-based request sets without enabling
+financial execution, PIT loaders, or code/period loops.
+
+Generate a bounded period-only plan:
+
+```bash
+python3 -m tushare_mirror period-plan \
+  --api income \
+  --periods 20240331,20240630 \
+  --json
+
+python3 -m tushare_mirror period-plan \
+  --api fina_indicator \
+  --start-period 2024Q1 \
+  --end-period 2024Q4 \
+  --period-frequency quarterly \
+  --max-periods 4 \
+  --json
+```
+
+Generate a bounded code/period matrix plan from a local code universe:
+
+```bash
+python3 -m tushare_mirror --root "$MIRROR_ROOT" code-period-plan \
+  --api income \
+  --universe a_share_listed \
+  --limit-codes 3 \
+  --periods 20240331,20240630 \
+  --json
+```
+
+Inspect PIT metadata readiness:
+
+```bash
+python3 -m tushare_mirror pit-readiness
+python3 -m tushare_mirror pit-readiness --json
+```
+
+Important guardrails:
+
+- `period-plan` is dry-run only.
+- `code-period-plan` is dry-run only.
+- Financial statement and financial indicator execution remains blocked.
+- Periods are reporting periods, not trading dates. Do not route period
+  endpoints through trading-day backfill.
+- Supported period forms include `2024Q1`, `2024Q2`, `2024Q3`, `2024Q4`,
+  `20240331`, `20240630`, `20240930`, and `20241231`.
+- Phase period planning has hard limits: 20 periods, 20 codes, and 100
+  candidate code/period jobs.
+- Code universes come only from local `stock_basic` or `hs_const` latest
+  snapshots. The planner never fetches them implicitly.
+- The planners report local `existing_status` where available, but
+  `execution_allowed` remains false.
+- The commands do not fetch, backfill, write catalog rows, create
+  `validation_runs`, create raw/lake files, or execute a full stock loop.
+
+PIT safety is the reason financial execution remains disabled. For any future
+financial endpoint, the project must know the `period` field, one or more
+announcement or disclosure date fields such as `ann_date`, `f_ann_date`, or
+`disclosure_date`, and a safe `usable_after` policy. Without that metadata, a
+strategy can accidentally use future disclosures and create lookahead bias.
+
+Future financial endpoint enablement must stay incremental:
+
+1. Choose one financial endpoint.
+2. Complete PIT metadata, including period field, announcement/disclosure date
+   fields, and usable-after strategy.
+3. Add fake-client tests for params, fields, writer, validation, reader,
+   backup, restore-check, PIT metadata, and policy behavior.
+4. Run `period-plan` only.
+5. Run `code-period-plan` for 1-3 codes and 1-3 periods.
+6. Run a user-confirmed tiny real smoke only after the plan and tests pass.
+7. Validate PIT behavior before any strategy-safe derived layer is considered.
+8. Expand only after backup and restore-check pass.
+
+Stop immediately if any of these occur:
+
+- missing PIT metadata
+- missing disclosure or announcement date field
+- schema incompatibility
+- future-data or lookahead risk
+- unknown rate-limit behavior
+- no current backup
+- validation failure
+- quarantine or staged data requiring manual review
+
 ## All Tushare API Infrastructure Roadmap
 
 The current executable scope is deliberately narrow: `low-risk-a-share` covers
