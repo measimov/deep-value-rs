@@ -1611,6 +1611,84 @@ Future endpoint enablement should stay narrow and explicit:
 6. Add coverage/reporting for the new endpoint shape.
 7. Expand only after the small smoke and backup/restore-check path pass.
 
+## Bounded Code-date Matrix Planning Infrastructure
+
+Code/date matrix planning is also infrastructure-only. It lets the system show
+what a bounded code-by-date request set would look like before any code-loop
+execution path exists.
+
+Generate a small dry-run matrix plan:
+
+```bash
+python3 -m tushare_mirror --root "$MIRROR_ROOT" code-date-matrix-plan \
+  --api stk_managers \
+  --universe a_share_listed \
+  --limit-codes 3 \
+  --dates 20250102,20250103 \
+  --json
+```
+
+Generate a bounded date-range plan:
+
+```bash
+python3 -m tushare_mirror --root "$MIRROR_ROOT" code-date-matrix-plan \
+  --api stk_managers \
+  --universe a_share_listed \
+  --limit-codes 3 \
+  --start-date 20250101 \
+  --end-date 20250110 \
+  --max-dates 5 \
+  --json
+```
+
+Use local trading days only when local `trade_cal` already exists:
+
+```bash
+python3 -m tushare_mirror --root "$MIRROR_ROOT" code-date-matrix-plan \
+  --api stk_managers \
+  --universe a_share_listed \
+  --limit-codes 3 \
+  --start-date 20250101 \
+  --end-date 20250110 \
+  --trading-days-only \
+  --calendar-exchange SSE \
+  --max-dates 5 \
+  --json
+```
+
+Important guardrails:
+
+- `code-date-matrix-plan` is dry-run only.
+- The code universe comes only from local `stock_basic` or `hs_const` latest
+  snapshots.
+- `--trading-days-only` reads only local `trade_cal`; it never fetches
+  `trade_cal` implicitly.
+- `--limit-codes` is mandatory.
+- Phase code/date planning has hard limits: 20 codes, 20 dates, and 100
+  candidate jobs.
+- `--max-dates` should be provided for date ranges; if omitted, the planner
+  still applies the phase max of 20 dates.
+- The planner reports truncation flags when code, date, or candidate limits cut
+  the matrix down.
+- The planner reports local `existing_status` where available:
+  `missing`, `active_exists`, `failed_exists`, `staged_exists`,
+  `quarantined_exists`, or `unknown`.
+- `active_exists` becomes `skip_existing`; failed/staged jobs are shown as
+  `retry_failed`; quarantined jobs are `blocked_quarantined`.
+- Execution remains blocked. The command does not fetch, write catalog rows,
+  create `validation_runs`, create raw/lake files, or run a full stock loop.
+
+Future code/date endpoint enablement must stay incremental:
+
+1. Choose one endpoint.
+2. Enable that endpoint config explicitly.
+3. Add fake-client tests for params, response fields, writer, validation,
+   reader, backup, restore-check, and failure behavior.
+4. Plan 1-3 codes and 1-3 dates with `code-date-matrix-plan`.
+5. Run a user-confirmed real smoke only for that endpoint and tiny matrix.
+6. Add coverage/reporting for the endpoint's code/date shape.
+7. Expand only after the small smoke and backup/restore-check path pass.
+
 ## All Tushare API Infrastructure Roadmap
 
 The current executable scope is deliberately narrow: `low-risk-a-share` covers
