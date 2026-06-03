@@ -1530,7 +1530,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_status)
 
-    p = sub.add_parser('mirror-audit', description='Read-only mirror audit report; queries local catalog and optional backup only.')
+    p = sub.add_parser('mirror-audit', description='Read-only mirror audit report; queries local catalog and optional backup only, does not make real requests or write catalog state.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
     p.add_argument('--backup')
     p.add_argument('--scope', default='low-risk-a-share')
@@ -1539,13 +1539,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_audit)
 
-    p = sub.add_parser('mirror-next-batch', description='Read-only next batch recommender; inspects local trade_cal and coverage only.')
+    p = sub.add_parser('mirror-next-batch', description='Read-only next batch recommender; inspects local trade_cal and coverage only, does not fetch or write catalog state.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
     p.add_argument('--scope', default='low-risk-a-share')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_next_batch)
 
-    p = sub.add_parser('mirror-batch-bundle', description='Read-only/file-output dry-run bundle generator; writes only --output outside mirror and backup roots.')
+    p = sub.add_parser('mirror-batch-bundle', description='Read-only/file-output dry-run bundle generator; writes only --output outside mirror and backup roots, does not fetch or execute generated commands.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
     p.add_argument('--backup', required=True)
     p.add_argument('--scope', default='low-risk-a-share')
@@ -1557,7 +1557,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_batch_bundle)
 
-    p = sub.add_parser('mirror-operator-checklist', description='Read-only operator checklist before any user-confirmed controlled batch execution.')
+    p = sub.add_parser('mirror-operator-checklist', description='Read-only operator checklist before any user-confirmed controlled batch execution; does not make real requests or write catalog state.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
     p.add_argument('--backup', required=True)
     p.add_argument('--scope', default='low-risk-a-share')
@@ -1572,17 +1572,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_stop_policy)
 
-    p = sub.add_parser('schema-status', description='Read-only schema drift and quarantine status report.')
+    p = sub.add_parser('schema-status', description='Read-only schema drift and quarantine status report; does not make real requests or write catalog state.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_schema_status)
 
-    p = sub.add_parser('backup-status', description='Read-only backup history and mutation diagnostics.')
+    p = sub.add_parser('backup-status', description='Read-only backup history and mutation diagnostics; does not make real requests or write catalog state.')
     p.add_argument('--backup', required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_backup_status)
 
-    p = sub.add_parser('mirror-coverage-matrix', description='Read-only coverage matrix for low-risk daily, weekly, and monthly endpoints.')
+    p = sub.add_parser('mirror-coverage-matrix', description='Read-only coverage matrix for low-risk daily, weekly, and monthly endpoints; does not make real requests or write catalog state.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
     p.add_argument('--scope', default='low-risk-a-share')
     p.add_argument('--start-date', required=True)
@@ -1590,7 +1590,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_coverage_matrix)
 
-    p = sub.add_parser('request-estimate', description='Read-only request estimate; does not call Tushare or inspect quota.')
+    p = sub.add_parser('request-estimate', description='Read-only request estimate; does not call Tushare, inspect quota, or write catalog state.')
     p.add_argument('--scope', default='low-risk-a-share')
     p.add_argument('--start-date', required=True)
     p.add_argument('--end-date', required=True)

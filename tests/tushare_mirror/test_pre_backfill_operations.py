@@ -1209,5 +1209,187 @@ class ReadOnlyOperationalGuardrailTests(PreBackfillOperationsTestCase):
                 self.assertNotIn("secret-token-should-not-appear", result.stderr)
 
 
+class CliHelpAndJsonContractPolishTests(PreBackfillOperationsTestCase):
+    COMMANDS_WITH_HELP = [
+        "mirror-status",
+        "mirror-audit",
+        "mirror-next-batch",
+        "mirror-batch-bundle",
+        "mirror-operator-checklist",
+        "stop-policy",
+        "schema-status",
+        "backup-status",
+        "mirror-coverage-matrix",
+        "request-estimate",
+    ]
+
+    def test_help_says_read_only_and_no_real_requests_where_relevant(self):
+        for command_name in self.COMMANDS_WITH_HELP:
+            with self.subTest(command_name=command_name):
+                result = self.run_cli(command_name, "--help", check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                help_text = " ".join(result.stdout.split())
+                self.assertIn("Read-only", help_text)
+                self.assertTrue(
+                    any(
+                        phrase in help_text
+                        for phrase in [
+                            "does not call Tushare",
+                            "does not make real requests",
+                            "does not fetch",
+                            "queries local catalog",
+                            "inspects local",
+                            "does not inspect local data",
+                            "writes only --output",
+                        ]
+                    ),
+                    help_text,
+                )
+
+    def test_json_report_version_present_for_operations_contract(self):
+        self.build_pilot()
+        bundle_output = self.base / "phase12-bundle"
+        commands = [
+            (
+                "mirror-status",
+                "mirror-status/v1",
+                [
+                    "mirror-status",
+                    "--root", str(self.root),
+                    "--backup", str(self.backup),
+                    "--scope", "low-risk-a-share",
+                    "--json",
+                ],
+            ),
+            (
+                "mirror-audit",
+                "mirror-audit/v1",
+                [
+                    "mirror-audit",
+                    "--root", str(self.root),
+                    "--backup", str(self.backup),
+                    "--scope", "low-risk-a-share",
+                    "--json",
+                ],
+            ),
+            (
+                "mirror-next-batch",
+                "mirror-next-batch/v1",
+                [
+                    "mirror-next-batch",
+                    "--root", str(self.root),
+                    "--scope", "low-risk-a-share",
+                    "--json",
+                ],
+            ),
+            (
+                "mirror-batch-bundle",
+                "mirror-batch-bundle/v1",
+                [
+                    "mirror-batch-bundle",
+                    "--root", str(self.root),
+                    "--backup", str(self.backup),
+                    "--scope", "low-risk-a-share",
+                    "--start-date", "20250201",
+                    "--end-date", "20250228",
+                    "--max-jobs-per-api", "20",
+                    "--output", str(bundle_output),
+                    "--json",
+                ],
+            ),
+            (
+                "mirror-operator-checklist",
+                "mirror-operator-checklist/v1",
+                [
+                    "mirror-operator-checklist",
+                    "--root", str(self.root),
+                    "--backup", str(self.backup),
+                    "--scope", "low-risk-a-share",
+                    "--start-date", "20250201",
+                    "--end-date", "20250228",
+                    "--json",
+                ],
+            ),
+            ("stop-policy", "stop-policy/v1", ["stop-policy", "--scope", "low-risk-a-share", "--json"]),
+            ("schema-status", "schema-status/v1", ["schema-status", "--root", str(self.root), "--json"]),
+            ("backup-status", "backup-status/v1", ["backup-status", "--backup", str(self.backup), "--json"]),
+            (
+                "mirror-coverage-matrix",
+                "mirror-coverage-matrix/v1",
+                [
+                    "mirror-coverage-matrix",
+                    "--root", str(self.root),
+                    "--scope", "low-risk-a-share",
+                    "--start-date", "20250101",
+                    "--end-date", "20250110",
+                    "--json",
+                ],
+            ),
+            (
+                "request-estimate",
+                "request-estimate/v1",
+                [
+                    "request-estimate",
+                    "--scope", "low-risk-a-share",
+                    "--start-date", "20250201",
+                    "--end-date", "20250228",
+                    "--root", str(self.root),
+                    "--json",
+                ],
+            ),
+        ]
+        for command_name, expected_version, args in commands:
+            with self.subTest(command_name=command_name):
+                result = self.run_cli(*args, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload["report_version"], expected_version)
+
+    def test_missing_root_and_backup_errors_are_clear_json(self):
+        self.build_pilot()
+        missing_root = self.base / "missing-root"
+        missing_backup = self.base / "missing-backup"
+        cases = [
+            (
+                "mirror-status missing root",
+                [
+                    "mirror-status",
+                    "--root", str(missing_root),
+                    "--backup", str(self.backup),
+                    "--scope", "low-risk-a-share",
+                    "--json",
+                ],
+                "catalog not found",
+            ),
+            (
+                "schema-status missing root",
+                ["schema-status", "--root", str(missing_root), "--json"],
+                "catalog not found",
+            ),
+            (
+                "mirror-status missing backup",
+                [
+                    "mirror-status",
+                    "--root", str(self.root),
+                    "--backup", str(missing_backup),
+                    "--scope", "low-risk-a-share",
+                    "--json",
+                ],
+                "backup not found",
+            ),
+            (
+                "backup-status missing backup",
+                ["backup-status", "--backup", str(missing_backup), "--json"],
+                "backup not found",
+            ),
+        ]
+        for case_name, args, expected_error in cases:
+            with self.subTest(case_name=case_name):
+                result = self.run_cli(*args, check=False)
+                self.assertNotEqual(result.returncode, 0)
+                payload = json.loads(result.stdout)
+                self.assertIn(expected_error, " ".join(payload["blocking_errors"]))
+
+
 if __name__ == "__main__":
     unittest.main()
