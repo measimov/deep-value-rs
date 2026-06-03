@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import sqlite3
 import time
@@ -350,6 +351,30 @@ class MirrorNextBatchResult:
             "warnings": self.warnings,
             "blocking_errors": self.blocking_errors,
         }
+
+
+@dataclass(frozen=True)
+class MirrorBatchBundleResult:
+    report_version: str
+    root: str
+    backup: str
+    output: str
+    scope: str
+    start_date: str
+    end_date: str
+    max_jobs_per_api: int
+    status: str
+    overwritten: bool
+    files: list[str]
+    commands_execute_guard: str
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
 
 
 @dataclass(frozen=True)
@@ -1317,6 +1342,202 @@ class MirrorNextBatchReporter:
         if month_num == 12:
             return f"{year + 1}01"
         return f"{year}{month_num + 1:02d}"
+
+
+class MirrorBatchBundleReporter:
+    REPORT_VERSION = "mirror-batch-bundle/v1"
+    BUNDLE_FILES = [
+        "README.md",
+        "batch_plan.json",
+        "readiness.json",
+        "review.json",
+        "status.json",
+        "audit.json",
+        "stop_policy.json",
+        "commands.sh",
+    ]
+
+    def create(
+        self,
+        *,
+        root: Path | str,
+        backup: Path | str,
+        scope: str,
+        start_date: str,
+        end_date: str,
+        max_jobs_per_api: int,
+        output: Path | str,
+        overwrite: bool = False,
+    ) -> MirrorBatchBundleResult:
+        ensure_mirror_scope(scope)
+        mirror_root = _resolve_path(Path(root))
+        backup_root = _resolve_path(Path(backup))
+        output_root = _resolve_path(Path(output))
+        warnings = ["mirror-batch-bundle writes only the requested output bundle and does not execute generated commands"]
+        blocking_errors = self._preflight(mirror_root, backup_root, output_root, overwrite)
+        if blocking_errors:
+            return self._result(mirror_root, backup_root, output_root, scope, start_date, end_date, max_jobs_per_api, "blocked", overwrite, [], warnings, blocking_errors)
+
+        catalog = CatalogStore(mirror_root, read_only=True)
+        try:
+            batch_plan = MirrorBatchPlanner(mirror_root, catalog).plan(
+                scope=scope,
+                start_date=start_date,
+                end_date=end_date,
+                calendar_exchange="SSE",
+                max_jobs_per_api=max_jobs_per_api,
+            )
+            readiness = MirrorReadinessReporter().report(root=mirror_root, backup=backup_root, scope=scope)
+            review = MirrorReviewer().review(root=mirror_root, backup=backup_root, scope=scope, mode="pilot", start_date="20250101", end_date="20250131")
+            status = MirrorStatusReporter().report(root=mirror_root, backup=backup_root, scope=scope)
+            audit = MirrorAuditReporter().report(root=mirror_root, backup=backup_root, scope=scope)
+        except Exception as exc:
+            return self._result(mirror_root, backup_root, output_root, scope, start_date, end_date, max_jobs_per_api, "blocked", overwrite, [], warnings, [f"bundle source report failed: {exc}"])
+
+        if output_root.exists() and overwrite:
+            if output_root.is_dir():
+                shutil.rmtree(output_root)
+            else:
+                output_root.unlink()
+        output_root.mkdir(parents=True, exist_ok=False)
+        payloads = {
+            "batch_plan.json": batch_plan.to_dict(),
+            "readiness.json": readiness.to_dict(),
+            "review.json": review.to_dict(),
+            "status.json": status.to_dict(),
+            "audit.json": audit.to_dict(),
+            "stop_policy.json": self._stop_policy(scope),
+        }
+        for filename, payload in payloads.items():
+            (output_root / filename).write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+        (output_root / "README.md").write_text(self._readme(scope, start_date, end_date), encoding="utf-8")
+        commands = output_root / "commands.sh"
+        commands.write_text(
+            self._commands(mirror_root, backup_root, scope, start_date, end_date, max_jobs_per_api),
+            encoding="utf-8",
+        )
+        commands.chmod(0o755)
+        return self._result(mirror_root, backup_root, output_root, scope, start_date, end_date, max_jobs_per_api, "created", overwrite, self.BUNDLE_FILES, warnings, [])
+
+    def _preflight(self, mirror_root: Path, backup_root: Path, output_root: Path, overwrite: bool) -> list[str]:
+        blocking_errors: list[str] = []
+        catalog_path = mirror_root / "_catalog" / "catalog.sqlite"
+        if not catalog_path.exists():
+            blocking_errors.append(f"catalog not found: {catalog_path}; run init-catalog first")
+        if not backup_root.exists():
+            blocking_errors.append(f"backup not found: {backup_root}")
+        if output_root == mirror_root or _is_relative_to(output_root, mirror_root):
+            blocking_errors.append("output path must not be inside mirror root")
+        if output_root == backup_root or _is_relative_to(output_root, backup_root):
+            blocking_errors.append("output path must not be inside backup root")
+        if output_root.exists() and not overwrite:
+            blocking_errors.append("output path already exists; pass --overwrite to replace it")
+        return blocking_errors
+
+    def _result(
+        self,
+        root: Path,
+        backup: Path,
+        output: Path,
+        scope: str,
+        start_date: str,
+        end_date: str,
+        max_jobs_per_api: int,
+        status: str,
+        overwritten: bool,
+        files: list[str],
+        warnings: list[str],
+        blocking_errors: list[str],
+    ) -> MirrorBatchBundleResult:
+        return MirrorBatchBundleResult(
+            report_version=self.REPORT_VERSION,
+            root=str(root),
+            backup=str(backup),
+            output=str(output),
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            max_jobs_per_api=max_jobs_per_api,
+            status=status,
+            overwritten=overwritten,
+            files=files,
+            commands_execute_guard="USER_CONFIRMATION_REQUIRED",
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _readme(self, scope: str, start_date: str, end_date: str) -> str:
+        return "\n".join(
+            [
+                "# Tushare Mirror Batch Dry-run Bundle",
+                "",
+                f"Scope: {scope}",
+                f"Window: {start_date}-{end_date}",
+                "",
+                "This bundle is generated from local read-only reports. It does not execute mirror-run, fetch data, backfill dates, or write catalog state.",
+                "Review every JSON report before using any command preview.",
+                "commands.sh contains an execute command only as a commented preview marked USER_CONFIRMATION_REQUIRED.",
+                "",
+            ]
+        )
+
+    def _commands(self, root: Path, backup: Path, scope: str, start_date: str, end_date: str, max_jobs_per_api: int) -> str:
+        plan = (
+            f"python3 -m tushare_mirror mirror-batch-plan --root {root} --scope {scope} "
+            f"--start-date {start_date} --end-date {end_date} --max-jobs-per-api {max_jobs_per_api} --json"
+        )
+        execute = (
+            f"python3 -m tushare_mirror mirror-run --root {root} --scope {scope} --mode pilot "
+            f"--start-date {start_date} --end-date {end_date} --max-jobs-per-api {max_jobs_per_api} "
+            f"--backup-target {backup} --execute --json"
+        )
+        return "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                'echo "This bundle is a dry-run artifact. Review JSON files before taking action."',
+                plan,
+                "",
+                "# USER_CONFIRMATION_REQUIRED: uncomment only after explicit operator approval.",
+                f"# {execute}",
+                "",
+            ]
+        )
+
+    def _stop_policy(self, scope: str) -> dict[str, Any]:
+        return {
+            "report_version": "stop-policy/v1",
+            "scope": scope,
+            "stop_immediately": [
+                "restore-check fails",
+                "backup possible_mutation is true",
+                "schema quarantine appears",
+                "validation status is failed",
+                "token plaintext is detected",
+            ],
+            "continue_with_warning": [
+                "readiness is warning but not blocked",
+                "request estimate is conservative",
+            ],
+            "retryable_failures": [
+                "network_error",
+                "rate_limited",
+                "server_error",
+            ],
+            "non_retryable_failures": [
+                "permission_denied",
+                "schema_incompatible",
+                "unsafe_output_path",
+            ],
+            "backup_required": [
+                "before any user-confirmed mirror-run --execute",
+                "after every completed controlled batch",
+            ],
+            "user_confirmation_required": [
+                "mirror-run --execute",
+                "any command that fetches real Tushare data",
+            ],
+        }
 
 
 class MirrorBatchPlanner:

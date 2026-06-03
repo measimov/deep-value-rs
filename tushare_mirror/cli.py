@@ -33,7 +33,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import MirrorAuditReporter, MirrorBatchPlanner, MirrorNextBatchReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, init_catalog_if_requested
+from .mirror import MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchPlanner, MirrorNextBatchReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, init_catalog_if_requested
 from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
@@ -679,6 +679,27 @@ def cmd_mirror_next_batch(args) -> int:
         result = MirrorNextBatchReporter().report(
             root=args.mirror_root_arg,
             scope=args.scope,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+    return 1 if result.blocking_errors else 0
+
+
+def cmd_mirror_batch_bundle(args) -> int:
+    try:
+        result = MirrorBatchBundleReporter().create(
+            root=args.mirror_root_arg,
+            backup=args.backup,
+            scope=args.scope,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            max_jobs_per_api=args.max_jobs_per_api,
+            output=args.output,
+            overwrite=args.overwrite,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -1439,6 +1460,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--scope', default='low-risk-a-share')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_next_batch)
+
+    p = sub.add_parser('mirror-batch-bundle', description='Read-only/file-output dry-run bundle generator; writes only --output outside mirror and backup roots.')
+    p.add_argument('--root', dest='mirror_root_arg', required=True)
+    p.add_argument('--backup', required=True)
+    p.add_argument('--scope', default='low-risk-a-share')
+    p.add_argument('--start-date', required=True)
+    p.add_argument('--end-date', required=True)
+    p.add_argument('--max-jobs-per-api', type=int, required=True)
+    p.add_argument('--output', required=True)
+    p.add_argument('--overwrite', action='store_true')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_batch_bundle)
 
     p = sub.add_parser('mirror-batch-plan')
     p.add_argument('--root', dest='mirror_root_arg', required=True)

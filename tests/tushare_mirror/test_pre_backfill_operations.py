@@ -14,7 +14,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorNextBatchReporter, MirrorOrchestrator, MirrorStatusReporter
+from tushare_mirror.mirror import DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorNextBatchReporter, MirrorOrchestrator, MirrorStatusReporter
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -441,6 +441,110 @@ class MirrorNextBatchRecommenderTests(PreBackfillOperationsTestCase):
         self.assertEqual(payload["report_version"], "mirror-next-batch/v1")
         self.assertEqual(payload["recommended_next_start_date"], "20250201")
         self.assertIn("USER_CONFIRMATION_REQUIRED", json.dumps(payload["execute_command_preview"]))
+
+
+class MirrorBatchBundleTests(PreBackfillOperationsTestCase):
+    def create_bundle(self, output: Path, *, overwrite: bool = False):
+        return MirrorBatchBundleReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="low-risk-a-share",
+            start_date="20250201",
+            end_date="20250228",
+            max_jobs_per_api=20,
+            output=output,
+            overwrite=overwrite,
+        )
+
+    def test_bundle_created_outside_roots_and_catalog_unchanged(self):
+        self.build_pilot()
+        output = self.base / "bundle-202502"
+        before = self.counts()
+        result = self.create_bundle(output)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(result.status, "created")
+        self.assertFalse(result.blocking_errors)
+        expected = {
+            "README.md",
+            "batch_plan.json",
+            "readiness.json",
+            "review.json",
+            "status.json",
+            "audit.json",
+            "stop_policy.json",
+            "commands.sh",
+        }
+        self.assertEqual(set(result.files), expected)
+        self.assertEqual({path.name for path in output.iterdir()}, expected)
+        batch_plan = json.loads((output / "batch_plan.json").read_text())
+        self.assertEqual(batch_plan["start_date"], "20250201")
+        commands = (output / "commands.sh").read_text()
+        self.assertIn("USER_CONFIRMATION_REQUIRED", commands)
+        self.assertIn("# python3 -m tushare_mirror mirror-run", commands)
+
+    def test_existing_output_refused_without_overwrite(self):
+        self.build_pilot()
+        output = self.base / "existing-bundle"
+        output.mkdir()
+        before = self.counts()
+        result = self.create_bundle(output)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(result.status, "blocked")
+        self.assertTrue(any("already exists" in error for error in result.blocking_errors))
+        self.assertEqual(list(output.iterdir()), [])
+
+    def test_output_inside_mirror_root_blocked(self):
+        output = self.root / "bundle"
+        result = self.create_bundle(output)
+        self.assertEqual(result.status, "blocked")
+        self.assertTrue(any("inside mirror root" in error for error in result.blocking_errors))
+        self.assertFalse(output.exists())
+
+    def test_output_inside_backup_root_blocked(self):
+        output = self.backup / "bundle"
+        result = self.create_bundle(output)
+        self.assertEqual(result.status, "blocked")
+        self.assertTrue(any("inside backup root" in error for error in result.blocking_errors))
+        self.assertFalse(output.exists())
+
+    def test_cli_json_contract_and_no_side_effects_for_bundle(self):
+        self.build_pilot()
+        output = self.base / "cli-bundle"
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-batch-bundle",
+            "--root", str(self.root),
+            "--backup", str(self.backup),
+            "--scope", "low-risk-a-share",
+            "--start-date", "20250201",
+            "--end-date", "20250228",
+            "--max-jobs-per-api", "20",
+            "--output", str(output),
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "root",
+            "backup",
+            "output",
+            "scope",
+            "start_date",
+            "end_date",
+            "max_jobs_per_api",
+            "status",
+            "overwritten",
+            "files",
+            "commands_execute_guard",
+            "warnings",
+            "blocking_errors",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "mirror-batch-bundle/v1")
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(payload["commands_execute_guard"], "USER_CONFIRMATION_REQUIRED")
+        self.assertTrue((output / "commands.sh").exists())
 
 
 if __name__ == "__main__":
