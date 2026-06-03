@@ -478,6 +478,33 @@ class BackupStatusResult:
 
 
 @dataclass(frozen=True)
+class MirrorCoverageMatrixResult:
+    report_version: str
+    root: str
+    scope: str
+    start_date: str
+    end_date: str
+    items: list[dict[str, Any]]
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "report_version": self.report_version,
+            "root": self.root,
+            "scope": self.scope,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "api_count": len(self.items),
+            "warnings": self.warnings,
+            "blocking_errors": self.blocking_errors,
+        }
+
+
+@dataclass(frozen=True)
 class MirrorBatchEndpointPlan:
     endpoint: str
     category: str
@@ -2070,6 +2097,107 @@ class BackupStatusReporter:
         if restore_status != "succeeded":
             return "investigate restore-check failures and rebuild backup"
         return "backup is ready for operator review"
+
+
+class MirrorCoverageMatrixReporter:
+    REPORT_VERSION = "mirror-coverage-matrix/v1"
+    APIS = ["daily", "adj_factor", "daily_basic", "suspend_d", "weekly", "monthly"]
+
+    def report(
+        self,
+        *,
+        root: Path | str,
+        scope: str,
+        start_date: str,
+        end_date: str,
+    ) -> MirrorCoverageMatrixResult:
+        ensure_mirror_scope(scope)
+        mirror_root = Path(root)
+        warnings = ["mirror-coverage-matrix is read-only and does not fetch, backfill, or validate"]
+        blocking_errors: list[str] = []
+        catalog = CatalogStore(mirror_root, read_only=True)
+        if not catalog.db_path.exists():
+            blocking_errors.append(f"catalog not found: {catalog.db_path}; run init-catalog first")
+            return self._result(mirror_root, scope, start_date, end_date, [], warnings, blocking_errors)
+        items = []
+        for api_name in self.APIS:
+            items.append(self._api_row(mirror_root, catalog, api_name, start_date, end_date, warnings))
+        return self._result(mirror_root, scope, start_date, end_date, items, warnings, blocking_errors)
+
+    def _result(
+        self,
+        root: Path,
+        scope: str,
+        start_date: str,
+        end_date: str,
+        items: list[dict[str, Any]],
+        warnings: list[str],
+        blocking_errors: list[str],
+    ) -> MirrorCoverageMatrixResult:
+        return MirrorCoverageMatrixResult(
+            report_version=self.REPORT_VERSION,
+            root=str(root),
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            items=items,
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _api_row(self, root: Path, catalog: CatalogStore, api_name: str, start_date: str, end_date: str, warnings: list[str]) -> dict[str, Any]:
+        try:
+            if api_name in DAILY_LIKE_MIRROR_APIS:
+                report = CoverageReporter(root, catalog).report(
+                    api_name,
+                    start_date=start_date,
+                    end_date=end_date,
+                    trading_days_only=True,
+                    calendar_exchange="SSE",
+                )
+            else:
+                dates = self._weekly_dates(start_date, end_date) if api_name == "weekly" else self._monthly_dates(start_date, end_date)
+                report = CoverageReporter(root, catalog).report(api_name, dates=dates)
+        except Exception as exc:
+            if api_name in DAILY_LIKE_MIRROR_APIS:
+                warnings.append(f"{api_name} coverage unavailable: {exc}")
+                return self._empty_row(api_name, "blocked_missing_trade_cal", str(exc))
+            warnings.append(f"{api_name} coverage unavailable: {exc}")
+            return self._empty_row(api_name, "blocked", str(exc))
+        missing_dates = [item.date for item in report.items if item.existing_status == "missing"]
+        failed_dates = [item.date for item in report.items if item.existing_status in {"failed_exists", "quarantined_exists"}]
+        status = "complete" if report.total_dates > 0 and report.missing_dates == 0 and report.failed_dates == 0 and report.quarantined_dates == 0 else "partial"
+        if report.total_dates == 0:
+            status = "empty"
+        return {
+            "api": api_name,
+            "total_dates": report.total_dates,
+            "covered_dates": report.covered_dates,
+            "missing_dates": report.missing_dates,
+            "coverage_ratio": report.coverage_ratio,
+            "missing_date_sample": missing_dates[:10],
+            "status": status,
+            "failed_date_sample": failed_dates[:10],
+        }
+
+    def _empty_row(self, api_name: str, status: str, reason: str) -> dict[str, Any]:
+        return {
+            "api": api_name,
+            "total_dates": 0,
+            "covered_dates": 0,
+            "missing_dates": 0,
+            "coverage_ratio": 0.0,
+            "missing_date_sample": [],
+            "status": status,
+            "reason": reason,
+            "failed_date_sample": [],
+        }
+
+    def _weekly_dates(self, start_date: str, end_date: str) -> list[str]:
+        return MirrorBatchPlanner(Path("."), CatalogStore(Path("."), read_only=True))._weekly_dates(start_date, end_date)
+
+    def _monthly_dates(self, start_date: str, end_date: str) -> list[str]:
+        return MirrorBatchPlanner(Path("."), CatalogStore(Path("."), read_only=True))._monthly_dates(start_date, end_date)
 
 
 class MirrorBatchPlanner:

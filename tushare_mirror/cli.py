@@ -33,7 +33,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import BackupStatusReporter, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchPlanner, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, SchemaStatusReporter, StopPolicyReporter, init_catalog_if_requested
+from .mirror import BackupStatusReporter, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchPlanner, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, SchemaStatusReporter, StopPolicyReporter, init_catalog_if_requested
 from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
@@ -755,6 +755,25 @@ def cmd_backup_status(args) -> int:
         _print_json(result.to_dict())
     else:
         _print_key_values(result.summary())
+    return 1 if result.blocking_errors else 0
+
+
+def cmd_mirror_coverage_matrix(args) -> int:
+    try:
+        result = MirrorCoverageMatrixReporter().report(
+            root=args.mirror_root_arg,
+            scope=args.scope,
+            start_date=args.start_date,
+            end_date=args.end_date,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+        if result.items:
+            _print_table(result.items, ['api', 'total_dates', 'covered_dates', 'missing_dates', 'coverage_ratio', 'status', 'missing_date_sample'])
     return 1 if result.blocking_errors else 0
 
 
@@ -1545,6 +1564,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--backup', required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_backup_status)
+
+    p = sub.add_parser('mirror-coverage-matrix', description='Read-only coverage matrix for low-risk daily, weekly, and monthly endpoints.')
+    p.add_argument('--root', dest='mirror_root_arg', required=True)
+    p.add_argument('--scope', default='low-risk-a-share')
+    p.add_argument('--start-date', required=True)
+    p.add_argument('--end-date', required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_coverage_matrix)
 
     p = sub.add_parser('mirror-batch-plan')
     p.add_argument('--root', dest='mirror_root_arg', required=True)

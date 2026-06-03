@@ -14,7 +14,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import BackupStatusReporter, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, SchemaStatusReporter, StopPolicyReporter
+from tushare_mirror.mirror import BackupStatusReporter, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, SchemaStatusReporter, StopPolicyReporter
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -221,6 +221,16 @@ class PreBackfillOperationsTestCase(unittest.TestCase):
             )
             result = BackfillExecutor(self.root, self.catalog).execute(plan, PreBackfillFakeClient())
             self.assertEqual(result.status, "succeeded")
+
+    def cover_date_api(self, api_name: str, dates: list[str]):
+        plan = BackfillPlanner(self.root, self.catalog).plan_date_backfill(api_name, dates, max_jobs=len(dates))
+        result = BackfillExecutor(self.root, self.catalog).execute(plan, PreBackfillFakeClient())
+        self.assertEqual(result.status, "succeeded")
+
+    def cover_january_matrix(self):
+        self.cover_daily_like_range("20250101", "20250131")
+        self.cover_date_api("weekly", ["20250103", "20250110", "20250117", "20250124", "20250131"])
+        self.cover_date_api("monthly", ["20250131"])
 
 
 class MirrorStatusDashboardTests(PreBackfillOperationsTestCase):
@@ -461,6 +471,64 @@ class MirrorNextBatchRecommenderTests(PreBackfillOperationsTestCase):
         self.assertEqual(payload["report_version"], "mirror-next-batch/v1")
         self.assertEqual(payload["recommended_next_start_date"], "20250201")
         self.assertIn("USER_CONFIRMATION_REQUIRED", json.dumps(payload["execute_command_preview"]))
+
+
+class MirrorCoverageMatrixTests(PreBackfillOperationsTestCase):
+    def test_complete_coverage_matrix_is_read_only(self):
+        self.cover_january_matrix()
+        before = self.counts()
+        report = MirrorCoverageMatrixReporter().report(root=self.root, scope="low-risk-a-share", start_date="20250101", end_date="20250131")
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(report.report_version, "mirror-coverage-matrix/v1")
+        self.assertEqual({item["api"] for item in report.items}, {"daily", "adj_factor", "daily_basic", "suspend_d", "weekly", "monthly"})
+        self.assertTrue(all(item["status"] == "complete" for item in report.items))
+        self.assertTrue(all(item["missing_dates"] == 0 for item in report.items))
+
+    def test_partial_coverage_matrix_reports_missing_dates(self):
+        self.cover_daily_like_range("20250101", "20250131", apis=["daily"])
+        report = MirrorCoverageMatrixReporter().report(root=self.root, scope="low-risk-a-share", start_date="20250101", end_date="20250131")
+        by_api = {item["api"]: item for item in report.items}
+        self.assertEqual(by_api["daily"]["status"], "complete")
+        self.assertEqual(by_api["adj_factor"]["status"], "partial")
+        self.assertGreater(by_api["adj_factor"]["missing_dates"], 0)
+        self.assertTrue(by_api["adj_factor"]["missing_date_sample"])
+        self.assertEqual(by_api["weekly"]["status"], "partial")
+
+    def test_missing_trade_cal_blocks_daily_like_rows(self):
+        before = self.counts()
+        report = MirrorCoverageMatrixReporter().report(root=self.root, scope="low-risk-a-share", start_date="20250101", end_date="20250131")
+        self.assertEqual(self.counts(), before)
+        by_api = {item["api"]: item for item in report.items}
+        for api_name in DAILY_LIKE_MIRROR_APIS:
+            self.assertEqual(by_api[api_name]["status"], "blocked_missing_trade_cal")
+        self.assertEqual(by_api["weekly"]["status"], "partial")
+
+    def test_cli_json_contract_and_no_side_effects_for_coverage_matrix(self):
+        self.cover_january_matrix()
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-coverage-matrix",
+            "--root", str(self.root),
+            "--scope", "low-risk-a-share",
+            "--start-date", "20250101",
+            "--end-date", "20250131",
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "root",
+            "scope",
+            "start_date",
+            "end_date",
+            "items",
+            "warnings",
+            "blocking_errors",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "mirror-coverage-matrix/v1")
+        self.assertEqual(len(payload["items"]), 6)
 
 
 class MirrorBatchBundleTests(PreBackfillOperationsTestCase):
