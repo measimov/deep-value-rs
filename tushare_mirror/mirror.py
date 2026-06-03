@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from .api_infra import ApiInfrastructureReadinessReporter
 from .backup import BackupExecutor, BackupInspector, BackupPlanner, RestoreChecker
 from .backfill import BackfillExecutor, BackfillPlanner, DatePlanner
 from .catalog import CatalogStore
@@ -218,6 +219,48 @@ class MirrorReadinessResult:
         return {
             "readiness_status": self.readiness_status,
             "ready_for_controlled_full_backfill": self.ready_for_controlled_full_backfill,
+            "warnings": self.warnings,
+            "blocking_errors": self.blocking_errors,
+        }
+
+
+@dataclass(frozen=True)
+class MirrorStatusResult:
+    report_version: str
+    root: str
+    backup: str
+    scope: str
+    catalog_status: dict[str, Any]
+    backup_status: str
+    restore_check_status: str
+    readiness_status: str
+    ready_for_controlled_full_backfill: bool
+    latest_snapshot_count: int
+    enabled_executable_endpoint_count: int
+    disabled_inventory_endpoint_count: int
+    daily_like_coverage_summary: list[dict[str, Any]]
+    backup_possible_mutation: bool
+    token_plaintext_found: bool
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "report_version": self.report_version,
+            "root": self.root,
+            "backup": self.backup,
+            "backup_status": self.backup_status,
+            "restore_check_status": self.restore_check_status,
+            "readiness_status": self.readiness_status,
+            "ready_for_controlled_full_backfill": self.ready_for_controlled_full_backfill,
+            "latest_snapshot_count": self.latest_snapshot_count,
+            "enabled_executable_endpoint_count": self.enabled_executable_endpoint_count,
+            "disabled_inventory_endpoint_count": self.disabled_inventory_endpoint_count,
+            "backup_possible_mutation": self.backup_possible_mutation,
+            "token_plaintext_found": self.token_plaintext_found,
             "warnings": self.warnings,
             "blocking_errors": self.blocking_errors,
         }
@@ -751,6 +794,64 @@ class MirrorReadinessReporter:
             },
         }
         return checks
+
+
+def _dedupe_messages(messages: list[str]) -> list[str]:
+    return list(dict.fromkeys(message for message in messages if message))
+
+
+class MirrorStatusReporter:
+    REPORT_VERSION = "mirror-status/v1"
+
+    def report(
+        self,
+        *,
+        root: Path | str,
+        backup: Path | str,
+        scope: str = "low-risk-a-share",
+    ) -> MirrorStatusResult:
+        ensure_mirror_scope(scope)
+        review = MirrorReviewer().review(
+            root=root,
+            backup=backup,
+            scope=scope,
+            mode="pilot",
+            start_date="20250101",
+            end_date="20250131",
+            calendar_exchange="SSE",
+        )
+        readiness = MirrorReadinessReporter().report(root=root, backup=backup, scope=scope)
+        api_infra = ApiInfrastructureReadinessReporter().report()
+        catalog_status = dict(review.catalog_status)
+        catalog_status.setdefault("present", review.root_status == "existing_catalog")
+        backup_status = self._backup_status(review)
+        restore_check_status = (review.backup_restore_check or {}).get("status") or "not_checked"
+        warnings = _dedupe_messages([*review.warnings, *readiness.warnings])
+        blocking_errors = _dedupe_messages([*review.blocking_errors, *readiness.blocking_errors])
+        return MirrorStatusResult(
+            report_version=self.REPORT_VERSION,
+            root=str(root),
+            backup=str(backup),
+            scope=scope,
+            catalog_status=catalog_status,
+            backup_status=backup_status,
+            restore_check_status=str(restore_check_status),
+            readiness_status=readiness.readiness_status,
+            ready_for_controlled_full_backfill=readiness.ready_for_controlled_full_backfill,
+            latest_snapshot_count=len(review.latest_snapshots),
+            enabled_executable_endpoint_count=api_infra.enabled_executable_endpoint_count,
+            disabled_inventory_endpoint_count=api_infra.disabled_inventory_endpoint_count,
+            daily_like_coverage_summary=review.coverage_summary,
+            backup_possible_mutation=review.backup_possible_mutation,
+            token_plaintext_found=review.token_plaintext_found,
+            warnings=warnings,
+            blocking_errors=blocking_errors,
+        )
+
+    def _backup_status(self, review: MirrorReviewResult) -> str:
+        if review.backup_status != "present":
+            return review.backup_status
+        return str((review.backup_inspect or {}).get("status") or "present")
 
 
 class MirrorBatchPlanner:

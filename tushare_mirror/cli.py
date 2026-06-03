@@ -33,7 +33,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import MirrorBatchPlanner, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, init_catalog_if_requested
+from .mirror import MirrorBatchPlanner, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, init_catalog_if_requested
 from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
@@ -620,6 +620,27 @@ def cmd_mirror_readiness(args) -> int:
             ['check', 'required', 'passed', 'message'],
         )
     return 1 if result.readiness_status == 'blocked' else 0
+
+
+def cmd_mirror_status(args) -> int:
+    try:
+        result = MirrorStatusReporter().report(
+            root=args.mirror_root_arg,
+            backup=args.backup,
+            scope=args.scope,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+        if result.daily_like_coverage_summary:
+            _print_table(
+                result.daily_like_coverage_summary,
+                ['api_name', 'total_dates', 'covered_dates', 'missing_dates', 'failed_dates', 'quarantined_dates', 'coverage_ratio'],
+            )
+    return 1 if result.blocking_errors else 0
 
 
 def cmd_mirror_batch_plan(args) -> int:
@@ -1350,6 +1371,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--scope', default='low-risk-a-share')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_readiness)
+
+    p = sub.add_parser('mirror-status', description='Read-only mirror status dashboard; does not fetch, backfill, or write catalog state.')
+    p.add_argument('--root', dest='mirror_root_arg', required=True)
+    p.add_argument('--backup', required=True)
+    p.add_argument('--scope', default='low-risk-a-share')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_status)
 
     p = sub.add_parser('mirror-batch-plan')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
