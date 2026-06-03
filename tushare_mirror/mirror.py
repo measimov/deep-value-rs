@@ -453,6 +453,31 @@ class SchemaStatusResult:
 
 
 @dataclass(frozen=True)
+class BackupStatusResult:
+    report_version: str
+    backup: str
+    manifest_valid: bool
+    backup_id: str | None
+    created_at: str | None
+    snapshot_scope: str | None
+    file_count: int
+    raw_file_count: int
+    lake_file_count: int
+    catalog_checksum_status: str | None
+    possible_mutation: bool
+    restore_check_status: str
+    recommended_action: str
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class MirrorBatchEndpointPlan:
     endpoint: str
     category: str
@@ -1960,6 +1985,91 @@ class SchemaStatusReporter:
                 },
             )
         return latest
+
+
+class BackupStatusReporter:
+    REPORT_VERSION = "backup-status/v1"
+
+    def report(self, *, backup: Path | str) -> BackupStatusResult:
+        backup_root = Path(backup)
+        warnings = ["backup-status is read-only and does not restore files or write catalog state"]
+        blocking_errors: list[str] = []
+        if not backup_root.exists():
+            blocking_errors.append(f"backup not found: {backup_root}")
+            return self._result(backup_root, False, None, None, None, 0, 0, 0, None, False, "not_checked", "create a fresh backup before controlled execution", warnings, blocking_errors)
+        inspect = BackupInspector().inspect(backup_root)
+        restore = RestoreChecker().check(backup_root)
+        manifest_valid = inspect.manifest_validation_status == "succeeded"
+        possible_mutation = bool(inspect.possible_mutation or restore.possible_mutation)
+        catalog_checksum_status = restore.catalog_checksum_status or inspect.catalog_checksum_status
+        if not manifest_valid:
+            blocking_errors.append("backup manifest is invalid")
+        if restore.status != "succeeded":
+            blocking_errors.append("restore-check failed")
+        if possible_mutation:
+            blocking_errors.append("backup catalog may have been modified after backup creation")
+        if inspect.manifest_warning_count:
+            warnings.append("backup manifest has warnings")
+        return self._result(
+            backup_root,
+            manifest_valid,
+            inspect.backup_id or restore.backup_id,
+            inspect.created_at,
+            inspect.snapshot_scope,
+            inspect.file_count,
+            inspect.raw_file_count,
+            inspect.lake_file_count,
+            catalog_checksum_status,
+            possible_mutation,
+            restore.status,
+            self._recommended_action(manifest_valid, restore.status, possible_mutation),
+            warnings,
+            blocking_errors,
+        )
+
+    def _result(
+        self,
+        backup: Path,
+        manifest_valid: bool,
+        backup_id: str | None,
+        created_at: str | None,
+        snapshot_scope: str | None,
+        file_count: int,
+        raw_file_count: int,
+        lake_file_count: int,
+        catalog_checksum_status: str | None,
+        possible_mutation: bool,
+        restore_check_status: str,
+        recommended_action: str,
+        warnings: list[str],
+        blocking_errors: list[str],
+    ) -> BackupStatusResult:
+        return BackupStatusResult(
+            report_version=self.REPORT_VERSION,
+            backup=str(backup),
+            manifest_valid=manifest_valid,
+            backup_id=backup_id,
+            created_at=created_at,
+            snapshot_scope=snapshot_scope,
+            file_count=file_count,
+            raw_file_count=raw_file_count,
+            lake_file_count=lake_file_count,
+            catalog_checksum_status=catalog_checksum_status,
+            possible_mutation=possible_mutation,
+            restore_check_status=restore_check_status,
+            recommended_action=recommended_action,
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _recommended_action(self, manifest_valid: bool, restore_status: str, possible_mutation: bool) -> str:
+        if possible_mutation:
+            return "replace backup before any controlled execution"
+        if not manifest_valid:
+            return "create a fresh backup with a valid manifest"
+        if restore_status != "succeeded":
+            return "investigate restore-check failures and rebuild backup"
+        return "backup is ready for operator review"
 
 
 class MirrorBatchPlanner:

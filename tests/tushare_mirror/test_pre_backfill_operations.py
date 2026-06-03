@@ -14,7 +14,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, SchemaStatusReporter, StopPolicyReporter
+from tushare_mirror.mirror import BackupStatusReporter, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, SchemaStatusReporter, StopPolicyReporter
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -771,6 +771,82 @@ class SchemaStatusReportTests(PreBackfillOperationsTestCase):
             self.assertIn(key, payload)
         self.assertEqual(payload["report_version"], "schema-status/v1")
         self.assertEqual(payload["schema_count_by_api"]["daily"], 2)
+
+
+class BackupStatusDiagnosticsTests(PreBackfillOperationsTestCase):
+    def test_clean_backup_status_is_read_only(self):
+        self.build_pilot()
+        before = self.counts()
+        report = BackupStatusReporter().report(backup=self.backup)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(report.report_version, "backup-status/v1")
+        self.assertTrue(report.manifest_valid)
+        self.assertIsNotNone(report.backup_id)
+        self.assertEqual(report.restore_check_status, "succeeded")
+        self.assertFalse(report.possible_mutation)
+        self.assertGreater(report.file_count, 0)
+        self.assertEqual(report.recommended_action, "backup is ready for operator review")
+        self.assertFalse(report.blocking_errors)
+
+    def test_mutated_backup_status_blocks(self):
+        self.build_pilot()
+        Validator(self.backup, CatalogStore(self.backup)).validate_latest_snapshots(record=True)
+        report = BackupStatusReporter().report(backup=self.backup)
+        self.assertTrue(report.manifest_valid)
+        self.assertTrue(report.possible_mutation)
+        self.assertEqual(report.restore_check_status, "failed")
+        self.assertIn("replace backup", report.recommended_action)
+        self.assertTrue(report.blocking_errors)
+
+    def test_missing_manifest_status_blocks(self):
+        backup = self.base / "empty-backup"
+        backup.mkdir()
+        report = BackupStatusReporter().report(backup=backup)
+        self.assertFalse(report.manifest_valid)
+        self.assertEqual(report.restore_check_status, "failed")
+        self.assertEqual(report.file_count, 0)
+        self.assertTrue(any("manifest" in error for error in report.blocking_errors))
+
+    def test_bad_manifest_status_blocks(self):
+        backup = self.base / "bad-backup"
+        backup.mkdir()
+        (backup / "manifest.json").write_text("{bad json", encoding="utf-8")
+        report = BackupStatusReporter().report(backup=backup)
+        self.assertFalse(report.manifest_valid)
+        self.assertEqual(report.restore_check_status, "failed")
+        self.assertIn("fresh backup", report.recommended_action)
+        self.assertTrue(report.blocking_errors)
+
+    def test_cli_json_contract_and_no_side_effects_for_backup_status(self):
+        self.build_pilot()
+        before = self.counts()
+        result = self.run_cli(
+            "backup-status",
+            "--backup", str(self.backup),
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "backup",
+            "manifest_valid",
+            "backup_id",
+            "created_at",
+            "snapshot_scope",
+            "file_count",
+            "raw_file_count",
+            "lake_file_count",
+            "catalog_checksum_status",
+            "possible_mutation",
+            "restore_check_status",
+            "recommended_action",
+            "warnings",
+            "blocking_errors",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "backup-status/v1")
+        self.assertTrue(payload["manifest_valid"])
 
 
 if __name__ == "__main__":
