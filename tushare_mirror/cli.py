@@ -33,7 +33,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchPlanner, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, init_catalog_if_requested
+from .mirror import MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchPlanner, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, StopPolicyReporter, init_catalog_if_requested
 from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
@@ -726,6 +726,18 @@ def cmd_mirror_operator_checklist(args) -> int:
     else:
         _print_key_values(result.summary())
     return 1 if result.blocking_errors else 0
+
+
+def cmd_stop_policy(args) -> int:
+    try:
+        result = StopPolicyReporter().report(scope=args.scope, category=args.category)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+    return 0
 
 
 def cmd_mirror_batch_plan(args) -> int:
@@ -1499,6 +1511,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--end-date', required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_operator_checklist)
+
+    p = sub.add_parser('stop-policy', description='Read-only stop-condition policy report; does not inspect local data or make real requests.')
+    p.add_argument('--scope')
+    p.add_argument('--category')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_stop_policy)
 
     p = sub.add_parser('mirror-batch-plan')
     p.add_argument('--root', dest='mirror_root_arg', required=True)

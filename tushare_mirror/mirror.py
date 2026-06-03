@@ -411,6 +411,27 @@ class MirrorOperatorChecklistResult:
 
 
 @dataclass(frozen=True)
+class StopPolicyResult:
+    report_version: str
+    category: str
+    execution_blocked: bool
+    stop_immediately: list[str]
+    continue_with_warning: list[str]
+    retryable_failures: list[str]
+    non_retryable_failures: list[str]
+    backup_required_conditions: list[str]
+    user_confirmation_required_conditions: list[str]
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class MirrorBatchEndpointPlan:
     endpoint: str
     category: str
@@ -1439,7 +1460,7 @@ class MirrorBatchBundleReporter:
             "review.json": review.to_dict(),
             "status.json": status.to_dict(),
             "audit.json": audit.to_dict(),
-            "stop_policy.json": self._stop_policy(scope),
+            "stop_policy.json": StopPolicyReporter().report(scope=scope).to_dict(),
         }
         for filename, payload in payloads.items():
             (output_root / filename).write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
@@ -1537,42 +1558,6 @@ class MirrorBatchBundleReporter:
             ]
         )
 
-    def _stop_policy(self, scope: str) -> dict[str, Any]:
-        return {
-            "report_version": "stop-policy/v1",
-            "scope": scope,
-            "stop_immediately": [
-                "restore-check fails",
-                "backup possible_mutation is true",
-                "schema quarantine appears",
-                "validation status is failed",
-                "token plaintext is detected",
-            ],
-            "continue_with_warning": [
-                "readiness is warning but not blocked",
-                "request estimate is conservative",
-            ],
-            "retryable_failures": [
-                "network_error",
-                "rate_limited",
-                "server_error",
-            ],
-            "non_retryable_failures": [
-                "permission_denied",
-                "schema_incompatible",
-                "unsafe_output_path",
-            ],
-            "backup_required": [
-                "before any user-confirmed mirror-run --execute",
-                "after every completed controlled batch",
-            ],
-            "user_confirmation_required": [
-                "mirror-run --execute",
-                "any command that fetches real Tushare data",
-            ],
-        }
-
-
 class MirrorOperatorChecklistReporter:
     REPORT_VERSION = "mirror-operator-checklist/v1"
     MAX_JOBS_PER_API = 20
@@ -1652,7 +1637,7 @@ class MirrorOperatorChecklistReporter:
         batch_plan_available = self._batch_plan_available(mirror_root, catalog, scope, start_date, end_date, blocking_errors)
         disk_warning = self._disk_warning(mirror_root, backup_root, warnings)
         plan_command, execute_command = self._commands(mirror_root, backup_root, scope, start_date, end_date)
-        stop_conditions = MirrorBatchBundleReporter()._stop_policy(scope)
+        stop_conditions = StopPolicyReporter().report(scope=scope).to_dict()
         ready = not blocking_errors
         return MirrorOperatorChecklistResult(
             report_version=self.REPORT_VERSION,
@@ -1731,6 +1716,124 @@ class MirrorOperatorChecklistReporter:
             f"--backup-target {backup} --execute"
         )
         return plan, {"confirmation": "USER_CONFIRMATION_REQUIRED", "command": execute}
+
+
+class StopPolicyReporter:
+    REPORT_VERSION = "stop-policy/v1"
+    CATEGORIES = {
+        "low-risk-a-share",
+        "code-loop",
+        "financial",
+        "object-text",
+        "intraday",
+        "backup",
+        "mirror-orchestrator",
+    }
+
+    def report(self, *, scope: str | None = None, category: str | None = None) -> StopPolicyResult:
+        if scope and category:
+            raise ValueError("use either --scope or --category, not both")
+        key = category or scope or "low-risk-a-share"
+        if key not in self.CATEGORIES:
+            supported = ", ".join(sorted(self.CATEGORIES))
+            raise ValueError(f"unknown stop-policy category: {key}; supported: {supported}")
+        policy = self._policy(key)
+        return StopPolicyResult(report_version=self.REPORT_VERSION, category=key, **policy)
+
+    def _policy(self, key: str) -> dict[str, Any]:
+        base = {
+            "execution_blocked": key in {"financial", "object-text", "intraday", "code-loop"},
+            "stop_immediately": [
+                "restore-check fails",
+                "backup possible_mutation is true",
+                "schema quarantine appears",
+                "current readiness validation fails",
+                "token plaintext is detected",
+            ],
+            "continue_with_warning": [
+                "readiness is warning but not blocked",
+                "request estimate is conservative",
+                "batch plan has missing jobs but no blocking errors",
+            ],
+            "retryable_failures": [
+                "network_error",
+                "rate_limited",
+                "server_error",
+            ],
+            "non_retryable_failures": [
+                "permission_denied",
+                "schema_incompatible",
+                "unsafe_output_path",
+            ],
+            "backup_required_conditions": [
+                "before any user-confirmed mirror-run --execute",
+                "after every completed controlled batch",
+            ],
+            "user_confirmation_required_conditions": [
+                "mirror-run --execute",
+                "any command that fetches real Tushare data",
+                "any command that writes outside a user-provided output path",
+            ],
+            "warnings": [
+                "stop-policy is descriptive and read-only",
+            ],
+            "blocking_errors": [],
+        }
+        if key == "financial":
+            base["stop_immediately"] = [
+                "financial execution remains blocked",
+                "PIT usable_after derivation is not executable",
+                *base["stop_immediately"],
+            ]
+            base["blocking_errors"] = ["financial execution is blocked by current hard boundaries"]
+        elif key == "intraday":
+            base["stop_immediately"] = [
+                "intraday execution remains blocked",
+                "bucketed intraday storage is plan-only",
+                "compaction execution remains blocked",
+                *base["stop_immediately"],
+            ]
+            base["blocking_errors"] = ["intraday execution is blocked by current hard boundaries"]
+        elif key == "object-text":
+            base["stop_immediately"] = [
+                "object/text execution remains blocked",
+                "object downloads are not enabled",
+                *base["stop_immediately"],
+            ]
+            base["blocking_errors"] = ["object/text execution is blocked by current hard boundaries"]
+        elif key == "code-loop":
+            base["stop_immediately"] = [
+                "stock loops must not execute",
+                "code/date and code/period planners are plan-only",
+                *base["stop_immediately"],
+            ]
+            base["blocking_errors"] = ["code-loop execution is blocked by current hard boundaries"]
+        elif key == "backup":
+            base["execution_blocked"] = False
+            base["stop_immediately"] = [
+                "backup manifest validation fails",
+                "restore-check fails",
+                "backup catalog checksum mismatches manifest",
+                "backup path is nested inside mirror root",
+            ]
+            base["continue_with_warning"] = [
+                "backup manifest has warnings but restore-check succeeds",
+                "disk-space estimate is unavailable",
+            ]
+            base["backup_required_conditions"] = [
+                "before any user-confirmed controlled batch",
+                "after every completed controlled batch",
+                "before replacing any existing backup artifact",
+            ]
+        elif key == "mirror-orchestrator":
+            base["execution_blocked"] = False
+            base["stop_immediately"] = [
+                "operator checklist is not ready",
+                "mirror-readiness is blocked",
+                "mirror-batch-plan is unavailable",
+                *base["stop_immediately"],
+            ]
+        return base
 
 
 class MirrorBatchPlanner:

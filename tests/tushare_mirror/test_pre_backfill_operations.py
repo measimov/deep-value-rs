@@ -14,7 +14,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter
+from tushare_mirror.mirror import DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, StopPolicyReporter
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -641,6 +641,59 @@ class MirrorOperatorChecklistTests(PreBackfillOperationsTestCase):
         self.assertTrue(payload["token_available"])
         self.assertIn("USER_CONFIRMATION_REQUIRED", json.dumps(payload["exact_execute_command"]))
         self.assertNotIn("fake-checklist-token", result.stdout)
+
+
+class StopPolicyReportTests(PreBackfillOperationsTestCase):
+    def test_low_risk_policy_present(self):
+        before = self.counts()
+        report = StopPolicyReporter().report(scope="low-risk-a-share")
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(report.report_version, "stop-policy/v1")
+        self.assertEqual(report.category, "low-risk-a-share")
+        self.assertFalse(report.execution_blocked)
+        self.assertIn("restore-check fails", report.stop_immediately)
+        self.assertIn("mirror-run --execute", report.user_confirmation_required_conditions)
+
+    def test_financial_policy_blocks_execution(self):
+        report = StopPolicyReporter().report(category="financial")
+        self.assertTrue(report.execution_blocked)
+        self.assertTrue(report.blocking_errors)
+        self.assertTrue(any("financial execution remains blocked" in item for item in report.stop_immediately))
+
+    def test_intraday_policy_blocks_execution(self):
+        report = StopPolicyReporter().report(category="intraday")
+        self.assertTrue(report.execution_blocked)
+        self.assertTrue(report.blocking_errors)
+        self.assertTrue(any("intraday execution remains blocked" in item for item in report.stop_immediately))
+
+    def test_backup_policy_present(self):
+        report = StopPolicyReporter().report(category="backup")
+        self.assertFalse(report.execution_blocked)
+        self.assertIn("backup manifest validation fails", report.stop_immediately)
+        self.assertIn("after every completed controlled batch", report.backup_required_conditions)
+
+    def test_cli_json_contract_and_no_side_effects_for_stop_policy(self):
+        before = self.counts()
+        result = self.run_cli("stop-policy", "--category", "financial", "--json")
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "category",
+            "execution_blocked",
+            "stop_immediately",
+            "continue_with_warning",
+            "retryable_failures",
+            "non_retryable_failures",
+            "backup_required_conditions",
+            "user_confirmation_required_conditions",
+            "warnings",
+            "blocking_errors",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "stop-policy/v1")
+        self.assertEqual(payload["category"], "financial")
+        self.assertTrue(payload["execution_blocked"])
 
 
 if __name__ == "__main__":
