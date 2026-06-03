@@ -1965,3 +1965,159 @@ Before enabling any new endpoint:
 No real fetch should occur from inventory, readiness, review, or batch-planning
 commands. Real execution remains limited to explicit user-confirmed commands
 such as bounded `mirror-run --execute` or scoped backfill commands.
+
+## Pre-full-backfill Operational Hardening
+
+This section is for the longer infrastructure-only review before any controlled
+full-backfill batch. The commands here are read-only unless explicitly writing a
+dry-run bundle to a user-provided output directory outside the mirror and backup
+roots. They do not fetch real Tushare data, do not run `mirror-run`, do not
+backfill new dates, and do not enable disabled inventory endpoints.
+
+Use the durable paths:
+
+```bash
+MIRROR_ROOT=/mnt/gw/TuShare
+MIRROR_BACKUP=/mnt/gw/TuShare-backup
+```
+
+Run the status dashboard first:
+
+```bash
+python3 -m tushare_mirror mirror-status \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope low-risk-a-share
+
+python3 -m tushare_mirror mirror-status \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope low-risk-a-share \
+  --json
+```
+
+Use audit to summarize local catalog history, failed jobs, validation failures,
+quarantine rows, latest run, and optional backup state:
+
+```bash
+python3 -m tushare_mirror mirror-audit \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope low-risk-a-share \
+  --json
+```
+
+Use next-batch recommendation to inspect local `trade_cal` and coverage before
+choosing a bounded month. It only recommends and does not execute:
+
+```bash
+python3 -m tushare_mirror mirror-next-batch \
+  --root "$MIRROR_ROOT" \
+  --scope low-risk-a-share \
+  --json
+```
+
+Generate a dry-run batch bundle only outside the mirror and backup roots:
+
+```bash
+python3 -m tushare_mirror mirror-batch-bundle \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope low-risk-a-share \
+  --start-date 20250201 \
+  --end-date 20250228 \
+  --max-jobs-per-api 20 \
+  --output /tmp/tushare-mirror-batch-bundle-202502 \
+  --json
+```
+
+The bundle contains `README.md`, `batch_plan.json`, `readiness.json`,
+`review.json`, `status.json`, `audit.json`, `stop_policy.json`, and
+`commands.sh`. `commands.sh` may include an execution command preview, but it is
+commented or guarded with `USER_CONFIRMATION_REQUIRED`. Do not auto-execute it
+from scripts, schedulers, shells, or CI. The file exists to make the exact
+operator-reviewed command visible before a human decides whether to run it.
+
+Before any user-confirmed batch, run the operator checklist:
+
+```bash
+python3 -m tushare_mirror mirror-operator-checklist \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope low-risk-a-share \
+  --start-date 20250201 \
+  --end-date 20250228 \
+  --json
+```
+
+Review stop policy by scope or category:
+
+```bash
+python3 -m tushare_mirror stop-policy --scope low-risk-a-share --json
+python3 -m tushare_mirror stop-policy --category financial --json
+python3 -m tushare_mirror stop-policy --category intraday --json
+python3 -m tushare_mirror stop-policy --category backup --json
+```
+
+Inspect schema, quarantine, backup, coverage, and request-volume risk:
+
+```bash
+python3 -m tushare_mirror schema-status \
+  --root "$MIRROR_ROOT" \
+  --json
+
+python3 -m tushare_mirror backup-status \
+  --backup "$MIRROR_BACKUP" \
+  --json
+
+python3 -m tushare_mirror mirror-coverage-matrix \
+  --root "$MIRROR_ROOT" \
+  --scope low-risk-a-share \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --json
+
+python3 -m tushare_mirror request-estimate \
+  --scope low-risk-a-share \
+  --start-date 20250201 \
+  --end-date 20250228 \
+  --root "$MIRROR_ROOT" \
+  --json
+```
+
+Recommended operator workflow:
+
+1. Confirm `mirror-status` has no blocking errors, no token plaintext, and a
+   clean restore-check.
+2. Review `mirror-audit` for failed jobs, failed validations, and quarantine.
+3. Confirm `mirror-next-batch` recommends the intended bounded month.
+4. Review `request-estimate` assumptions and risk level.
+5. Generate a bundle in `/tmp` or another safe output directory outside the
+   mirror and backup roots.
+6. Open the bundle JSON files and `commands.sh`; do not execute `commands.sh`.
+7. Run `mirror-operator-checklist` and stop if any blocking error remains.
+8. If a later human-approved execution happens outside this read-only phase,
+   report the run ID, endpoints, date range, planned and executed job counts,
+   skipped jobs, failed jobs, validation status, backup ID, restore-check
+   status, and next recommended bounded month.
+
+Stop immediately if any of these conditions appear:
+
+- backup is missing, nested under the mirror root, mutated, or fails restore-check
+- catalog is missing or cannot be opened
+- schema status reports incompatible or pending schema drift
+- quarantine rows exist
+- validation failures exist
+- operator checklist is not ready
+- request estimate risk is unacceptable for the intended quota window
+- token plaintext appears in any artifact
+- an output path is inside the mirror or backup root
+- any command would fetch real Tushare data, run `mirror-run`, backfill dates,
+  execute a stock loop, enable financial/PIT/object/intraday/compaction
+  execution, or implement a loader/scheduler/parallel executor
+
+This hardening flow is still not full mirror automation. It is a local,
+read-only review and bundle-generation process around a bounded low-risk batch.
+It has no scheduler, no remote backup, no restore-into workflow, no PostgreSQL
+loader, no parallel execution, and no automatic transition from recommendation
+to execution.
