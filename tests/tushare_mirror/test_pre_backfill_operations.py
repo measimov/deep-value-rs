@@ -139,6 +139,22 @@ class PreBackfillOperationsTestCase(unittest.TestCase):
                 "quarantine": conn.execute("select count(*) from quarantine_files").fetchone()[0],
             }
 
+    def file_count_under(self, path: Path) -> int:
+        if not path.exists():
+            return 0
+        return sum(1 for item in path.rglob("*") if item.is_file())
+
+    def guardrail_counts(self):
+        backup_catalog = self.backup / "_catalog" / "catalog.sqlite"
+        return {
+            "mirror_catalog": self.counts(self.root),
+            "backup_catalog": self.counts(self.backup) if backup_catalog.exists() else None,
+            "mirror_raw_files": self.file_count_under(self.root / "raw"),
+            "mirror_lake_files": self.file_count_under(self.root / "lake"),
+            "backup_raw_files": self.file_count_under(self.backup / "raw"),
+            "backup_lake_files": self.file_count_under(self.backup / "lake"),
+        }
+
     def run_cli(self, *args, check=True, token="fake-status-token"):
         env = dict(os.environ)
         env["TUSHARE_TOKEN"] = token
@@ -968,6 +984,229 @@ class BackupStatusDiagnosticsTests(PreBackfillOperationsTestCase):
             self.assertIn(key, payload)
         self.assertEqual(payload["report_version"], "backup-status/v1")
         self.assertTrue(payload["manifest_valid"])
+
+
+class ReadOnlyOperationalGuardrailTests(PreBackfillOperationsTestCase):
+    def test_read_only_operational_commands_do_not_mutate_catalog_or_data_files(self):
+        self.build_pilot()
+        bundle_output = self.base / "guardrail-bundle"
+        commands = [
+            (
+                "mirror-review",
+                [
+                    "mirror-review",
+                    "--root", str(self.root),
+                    "--backup", str(self.backup),
+                    "--scope", "low-risk-a-share",
+                    "--start-date", "20250101",
+                    "--end-date", "20250110",
+                    "--json",
+                ],
+            ),
+            (
+                "mirror-readiness",
+                [
+                    "mirror-readiness",
+                    "--root", str(self.root),
+                    "--backup", str(self.backup),
+                    "--scope", "low-risk-a-share",
+                    "--json",
+                ],
+            ),
+            (
+                "mirror-batch-plan",
+                [
+                    "mirror-batch-plan",
+                    "--root", str(self.root),
+                    "--scope", "low-risk-a-share",
+                    "--start-date", "20250201",
+                    "--end-date", "20250228",
+                    "--max-jobs-per-api", "20",
+                    "--json",
+                ],
+            ),
+            (
+                "mirror-status",
+                [
+                    "mirror-status",
+                    "--root", str(self.root),
+                    "--backup", str(self.backup),
+                    "--scope", "low-risk-a-share",
+                    "--json",
+                ],
+            ),
+            (
+                "mirror-audit",
+                [
+                    "mirror-audit",
+                    "--root", str(self.root),
+                    "--backup", str(self.backup),
+                    "--scope", "low-risk-a-share",
+                    "--json",
+                ],
+            ),
+            (
+                "mirror-next-batch",
+                [
+                    "mirror-next-batch",
+                    "--root", str(self.root),
+                    "--scope", "low-risk-a-share",
+                    "--json",
+                ],
+            ),
+            (
+                "mirror-batch-bundle",
+                [
+                    "mirror-batch-bundle",
+                    "--root", str(self.root),
+                    "--backup", str(self.backup),
+                    "--scope", "low-risk-a-share",
+                    "--start-date", "20250201",
+                    "--end-date", "20250228",
+                    "--max-jobs-per-api", "20",
+                    "--output", str(bundle_output),
+                    "--json",
+                ],
+            ),
+            (
+                "mirror-operator-checklist",
+                [
+                    "mirror-operator-checklist",
+                    "--root", str(self.root),
+                    "--backup", str(self.backup),
+                    "--scope", "low-risk-a-share",
+                    "--start-date", "20250201",
+                    "--end-date", "20250228",
+                    "--json",
+                ],
+            ),
+            ("stop-policy", ["stop-policy", "--scope", "low-risk-a-share", "--json"]),
+            ("schema-status", ["schema-status", "--root", str(self.root), "--json"]),
+            ("backup-status", ["backup-status", "--backup", str(self.backup), "--json"]),
+            (
+                "mirror-coverage-matrix",
+                [
+                    "mirror-coverage-matrix",
+                    "--root", str(self.root),
+                    "--scope", "low-risk-a-share",
+                    "--start-date", "20250101",
+                    "--end-date", "20250110",
+                    "--json",
+                ],
+            ),
+            (
+                "request-estimate",
+                [
+                    "request-estimate",
+                    "--scope", "low-risk-a-share",
+                    "--start-date", "20250201",
+                    "--end-date", "20250228",
+                    "--root", str(self.root),
+                    "--json",
+                ],
+            ),
+            ("api-infra-readiness", ["--root", str(self.root), "api-infra-readiness", "--json"]),
+            ("pit-readiness", ["--root", str(self.root), "pit-readiness", "--json"]),
+            (
+                "object-plan",
+                [
+                    "--root", str(self.root),
+                    "object-plan",
+                    "--api", "news",
+                    "--start-date", "20250101",
+                    "--end-date", "20250131",
+                    "--json",
+                ],
+            ),
+            (
+                "intraday-plan",
+                [
+                    "--root", str(self.root),
+                    "intraday-plan",
+                    "--api", "stk_mins",
+                    "--freq", "1min",
+                    "--start-date", "20250102",
+                    "--end-date", "20250103",
+                    "--bucket-count", "64",
+                    "--json",
+                ],
+            ),
+            (
+                "storage-estimate",
+                [
+                    "--root", str(self.root),
+                    "storage-estimate",
+                    "--scope", "low-risk-a-share",
+                    "--start-date", "20250101",
+                    "--end-date", "20251231",
+                    "--json",
+                ],
+            ),
+            ("compaction-plan", ["compaction-plan", "--root", str(self.root), "--api", "daily_basic", "--json"]),
+            ("rate-policy", ["--root", str(self.root), "rate-policy", "--scope", "low-risk-a-share", "--json"]),
+            ("endpoint-enable-checklist", ["--root", str(self.root), "endpoint-enable-checklist", "--api", "daily_basic", "--json"]),
+            ("code-universe", ["--root", str(self.root), "code-universe", "--universe", "a_share_listed", "--limit", "3", "--json"]),
+            (
+                "code-list-plan",
+                [
+                    "--root", str(self.root),
+                    "code-list-plan",
+                    "--api", "stk_managers",
+                    "--universe", "a_share_listed",
+                    "--limit-codes", "3",
+                    "--start-date", "20250101",
+                    "--end-date", "20250131",
+                    "--json",
+                ],
+            ),
+            (
+                "code-date-matrix-plan",
+                [
+                    "--root", str(self.root),
+                    "code-date-matrix-plan",
+                    "--api", "stk_managers",
+                    "--universe", "a_share_listed",
+                    "--limit-codes", "2",
+                    "--dates", "20250102,20250103",
+                    "--json",
+                ],
+            ),
+            (
+                "period-plan",
+                [
+                    "--root", str(self.root),
+                    "period-plan",
+                    "--api", "income",
+                    "--periods", "20240331,20240630",
+                    "--json",
+                ],
+            ),
+            (
+                "code-period-plan",
+                [
+                    "--root", str(self.root),
+                    "code-period-plan",
+                    "--api", "income",
+                    "--universe", "a_share_listed",
+                    "--limit-codes", "2",
+                    "--periods", "20240331",
+                    "--json",
+                ],
+            ),
+        ]
+
+        for command_name, args in commands:
+            with self.subTest(command_name=command_name):
+                before = self.guardrail_counts()
+                result = self.run_cli(*args, check=False, token="secret-token-should-not-appear")
+                after = self.guardrail_counts()
+                self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+                self.assertEqual(after, before)
+                self.assertEqual(after["mirror_catalog"]["validations"], before["mirror_catalog"]["validations"])
+                self.assertEqual(after["mirror_raw_files"], before["mirror_raw_files"])
+                self.assertEqual(after["mirror_lake_files"], before["mirror_lake_files"])
+                self.assertNotIn("secret-token-should-not-appear", result.stdout)
+                self.assertNotIn("secret-token-should-not-appear", result.stderr)
 
 
 if __name__ == "__main__":
