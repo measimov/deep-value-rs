@@ -33,7 +33,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import MirrorBatchPlanner, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, init_catalog_if_requested
+from .mirror import MirrorAuditReporter, MirrorBatchPlanner, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, init_catalog_if_requested
 from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
@@ -639,6 +639,37 @@ def cmd_mirror_status(args) -> int:
             _print_table(
                 result.daily_like_coverage_summary,
                 ['api_name', 'total_dates', 'covered_dates', 'missing_dates', 'failed_dates', 'quarantined_dates', 'coverage_ratio'],
+            )
+    return 1 if result.blocking_errors else 0
+
+
+def cmd_mirror_audit(args) -> int:
+    try:
+        result = MirrorAuditReporter().report(
+            root=args.mirror_root_arg,
+            backup=args.backup,
+            scope=args.scope,
+            since=args.since,
+            limit=args.limit,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+        if result.snapshot_count_by_api:
+            _print_table(
+                [
+                    {"api_name": api_name, "snapshot_count": count}
+                    for api_name, count in result.snapshot_count_by_api.items()
+                ],
+                ['api_name', 'snapshot_count'],
+            )
+        if result.failed_jobs:
+            _print_table(
+                result.failed_jobs,
+                ['job_key', 'run_id', 'api_name', 'status', 'last_error_type', 'last_error'],
             )
     return 1 if result.blocking_errors else 0
 
@@ -1378,6 +1409,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--scope', default='low-risk-a-share')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_status)
+
+    p = sub.add_parser('mirror-audit', description='Read-only mirror audit report; queries local catalog and optional backup only.')
+    p.add_argument('--root', dest='mirror_root_arg', required=True)
+    p.add_argument('--backup')
+    p.add_argument('--scope', default='low-risk-a-share')
+    p.add_argument('--since')
+    p.add_argument('--limit', type=int, default=20)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_audit)
 
     p = sub.add_parser('mirror-batch-plan')
     p.add_argument('--root', dest='mirror_root_arg', required=True)

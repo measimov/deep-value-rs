@@ -13,7 +13,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import MirrorOrchestrator, MirrorStatusReporter
+from tushare_mirror.mirror import MirrorAuditReporter, MirrorOrchestrator, MirrorStatusReporter
 from tushare_mirror.validation import Validator
 
 
@@ -74,7 +74,7 @@ class PreBackfillFakeClient:
         return values
 
 
-class MirrorStatusDashboardTests(unittest.TestCase):
+class PreBackfillOperationsTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.base = Path(self.tmp.name)
@@ -126,6 +126,24 @@ class MirrorStatusDashboardTests(unittest.TestCase):
         plan = BackupPlanner(self.root, self.catalog).plan(self.backup)
         BackupExecutor(self.root, self.catalog).backup(plan)
 
+    def make_failed_catalog_rows(self, suffix: str = "daily"):
+        run_id = self.catalog.create_run("fetch")
+        job_key = f"job_failed_{suffix}"
+        self.catalog.upsert_job(job_key, run_id, "daily", {"trade_date": "20250102"}, ["ts_code", "trade_date"], "running")
+        self.catalog.update_job_failed(job_key, "schema drift", "schema_incompatible")
+        self.catalog.record_quarantine(run_id, job_key, "daily", "schema_incompatible", f"raw/daily/{suffix}.jsonl.zst", 12, "abc123")
+        self.catalog.record_validation(
+            None,
+            "daily",
+            "failed",
+            {"files": 1, "failures": 1, "record_count": 0, "raw_event_count": 0},
+            [(None, "schema_incompatible", "schema drift")],
+        )
+        self.catalog.finish_run(run_id, "failed", error_message="schema drift", error_type="schema_incompatible", summary={"api_name": "daily", "failed_jobs": 1})
+        return run_id, job_key
+
+
+class MirrorStatusDashboardTests(PreBackfillOperationsTestCase):
     def test_healthy_fake_mirror_status_is_read_only(self):
         self.build_pilot()
         before = self.counts()
@@ -202,6 +220,86 @@ class MirrorStatusDashboardTests(unittest.TestCase):
             self.assertIn(key, payload)
         self.assertEqual(payload["report_version"], "mirror-status/v1")
         self.assertNotIn("fake-status-token", result.stdout)
+
+
+class MirrorAuditReportTests(PreBackfillOperationsTestCase):
+    def test_fake_catalog_audit_with_backup_summary_is_read_only(self):
+        self.build_pilot()
+        before = self.counts()
+        report = MirrorAuditReporter().report(root=self.root, backup=self.backup, scope="low-risk-a-share")
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(report.report_version, "mirror-audit/v1")
+        self.assertEqual(report.run_count_by_type["mirror"], 1)
+        self.assertGreater(report.succeeded_run_count, 0)
+        self.assertEqual(report.failed_run_count, 0)
+        self.assertGreater(report.job_count_by_status["done"], 0)
+        self.assertGreater(report.snapshot_count_by_api["daily"], 0)
+        self.assertEqual(report.backup_summary["restore_check_status"], "succeeded")
+        self.assertFalse(report.blocking_errors)
+
+    def test_failed_job_quarantine_and_validation_failures_appear(self):
+        _, job_key = self.make_failed_catalog_rows()
+        before = self.counts()
+        report = MirrorAuditReporter().report(root=self.root, scope="low-risk-a-share")
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(report.run_count_by_type["fetch"], 1)
+        self.assertEqual(report.failed_run_count, 1)
+        self.assertEqual(report.job_count_by_status["failed"], 1)
+        self.assertEqual(report.validation_status_counts["failed"], 1)
+        self.assertEqual(report.quarantined_count, 1)
+        self.assertEqual(report.failed_jobs[0]["job_key"], job_key)
+        self.assertEqual(report.failed_jobs[0]["last_error_type"], "schema_incompatible")
+
+    def test_since_and_limit_are_stable(self):
+        self.make_failed_catalog_rows("one")
+        self.make_failed_catalog_rows("two")
+        report = MirrorAuditReporter().report(root=self.root, scope="low-risk-a-share", limit=1)
+        self.assertEqual(len(report.failed_jobs), 1)
+        future = MirrorAuditReporter().report(root=self.root, scope="low-risk-a-share", since="29990101")
+        self.assertEqual(future.run_count_by_type, {})
+        self.assertEqual(future.failed_jobs, [])
+
+    def test_cli_json_contract_and_no_side_effects_for_audit(self):
+        self.make_failed_catalog_rows()
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-audit",
+            "--root", str(self.root),
+            "--scope", "low-risk-a-share",
+            "--limit", "1",
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "root",
+            "backup",
+            "scope",
+            "since",
+            "limit",
+            "run_count_by_type",
+            "succeeded_run_count",
+            "failed_run_count",
+            "job_count_by_status",
+            "validation_status_counts",
+            "snapshot_count_by_api",
+            "failed_jobs",
+            "quarantined_count",
+            "latest_run_id",
+            "backup_summary",
+            "warnings",
+            "blocking_errors",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "mirror-audit/v1")
+        self.assertEqual(len(payload["failed_jobs"]), 1)
+
+    def test_missing_catalog_blocks_audit_without_creating_catalog(self):
+        missing_root = self.base / "missing-root"
+        report = MirrorAuditReporter().report(root=missing_root, scope="low-risk-a-share")
+        self.assertFalse((missing_root / "_catalog" / "catalog.sqlite").exists())
+        self.assertTrue(any("catalog not found" in error for error in report.blocking_errors))
 
 
 if __name__ == "__main__":

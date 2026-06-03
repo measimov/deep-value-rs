@@ -12,7 +12,7 @@ from typing import Any, Mapping
 from .api_infra import ApiInfrastructureReadinessReporter
 from .backup import BackupExecutor, BackupInspector, BackupPlanner, RestoreChecker
 from .backfill import BackfillExecutor, BackfillPlanner, DatePlanner
-from .catalog import CatalogStore
+from .catalog import CatalogStore, loads
 from .coverage import CoverageReporter
 from .client import classify_probe_response
 from .endpoints import load_into_catalog
@@ -261,6 +261,51 @@ class MirrorStatusResult:
             "disabled_inventory_endpoint_count": self.disabled_inventory_endpoint_count,
             "backup_possible_mutation": self.backup_possible_mutation,
             "token_plaintext_found": self.token_plaintext_found,
+            "warnings": self.warnings,
+            "blocking_errors": self.blocking_errors,
+        }
+
+
+@dataclass(frozen=True)
+class MirrorAuditResult:
+    report_version: str
+    root: str
+    backup: str | None
+    scope: str
+    since: str | None
+    limit: int
+    run_count_by_type: dict[str, int]
+    succeeded_run_count: int
+    failed_run_count: int
+    job_count_by_status: dict[str, int]
+    validation_status_counts: dict[str, int]
+    snapshot_count_by_api: dict[str, int]
+    failed_jobs: list[dict[str, Any]]
+    quarantined_count: int
+    latest_run_id: str | None
+    backup_summary: dict[str, Any] | None
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "report_version": self.report_version,
+            "root": self.root,
+            "backup": self.backup,
+            "scope": self.scope,
+            "since": self.since,
+            "limit": self.limit,
+            "run_count_by_type": self.run_count_by_type,
+            "succeeded_run_count": self.succeeded_run_count,
+            "failed_run_count": self.failed_run_count,
+            "job_count_by_status": self.job_count_by_status,
+            "validation_status_counts": self.validation_status_counts,
+            "quarantined_count": self.quarantined_count,
+            "latest_run_id": self.latest_run_id,
+            "backup_summary": self.backup_summary,
             "warnings": self.warnings,
             "blocking_errors": self.blocking_errors,
         }
@@ -852,6 +897,204 @@ class MirrorStatusReporter:
         if review.backup_status != "present":
             return review.backup_status
         return str((review.backup_inspect or {}).get("status") or "present")
+
+
+class MirrorAuditReporter:
+    REPORT_VERSION = "mirror-audit/v1"
+
+    def report(
+        self,
+        *,
+        root: Path | str,
+        backup: Path | str | None = None,
+        scope: str = "low-risk-a-share",
+        since: str | None = None,
+        limit: int = 20,
+    ) -> MirrorAuditResult:
+        ensure_mirror_scope(scope)
+        if limit <= 0:
+            raise ValueError("--limit must be positive")
+        since_bound = self._since_bound(since)
+        mirror_root = Path(root)
+        warnings: list[str] = []
+        blocking_errors: list[str] = []
+        catalog = CatalogStore(mirror_root, read_only=True)
+        empty = {
+            "run_count_by_type": {},
+            "succeeded_run_count": 0,
+            "failed_run_count": 0,
+            "job_count_by_status": {},
+            "validation_status_counts": {},
+            "snapshot_count_by_api": {},
+            "failed_jobs": [],
+            "quarantined_count": 0,
+            "latest_run_id": None,
+        }
+        if not catalog.db_path.exists():
+            blocking_errors.append(f"catalog not found: {catalog.db_path}; run init-catalog first")
+            backup_summary = self._backup_summary(backup, warnings, blocking_errors) if backup else None
+            return self._result(root, backup, scope, since, limit, backup_summary, warnings, blocking_errors, **empty)
+        try:
+            with catalog.connect() as conn:
+                values = self._catalog_audit(conn, since_bound, limit)
+        except Exception as exc:
+            blocking_errors.append(f"catalog audit failed: {exc}")
+            values = empty
+        backup_summary = self._backup_summary(backup, warnings, blocking_errors) if backup else None
+        return self._result(root, backup, scope, since, limit, backup_summary, warnings, blocking_errors, **values)
+
+    def _result(
+        self,
+        root: Path | str,
+        backup: Path | str | None,
+        scope: str,
+        since: str | None,
+        limit: int,
+        backup_summary: dict[str, Any] | None,
+        warnings: list[str],
+        blocking_errors: list[str],
+        *,
+        run_count_by_type: dict[str, int],
+        succeeded_run_count: int,
+        failed_run_count: int,
+        job_count_by_status: dict[str, int],
+        validation_status_counts: dict[str, int],
+        snapshot_count_by_api: dict[str, int],
+        failed_jobs: list[dict[str, Any]],
+        quarantined_count: int,
+        latest_run_id: str | None,
+    ) -> MirrorAuditResult:
+        return MirrorAuditResult(
+            report_version=self.REPORT_VERSION,
+            root=str(root),
+            backup=str(backup) if backup is not None else None,
+            scope=scope,
+            since=since,
+            limit=limit,
+            run_count_by_type=run_count_by_type,
+            succeeded_run_count=succeeded_run_count,
+            failed_run_count=failed_run_count,
+            job_count_by_status=job_count_by_status,
+            validation_status_counts=validation_status_counts,
+            snapshot_count_by_api=snapshot_count_by_api,
+            failed_jobs=failed_jobs,
+            quarantined_count=quarantined_count,
+            latest_run_id=latest_run_id,
+            backup_summary=backup_summary,
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _catalog_audit(self, conn: sqlite3.Connection, since_bound: str | None, limit: int) -> dict[str, Any]:
+        return {
+            "run_count_by_type": self._count_by(conn, "ingestion_runs", "run_type", "started_at", since_bound),
+            "succeeded_run_count": self._count(conn, "ingestion_runs", "status='succeeded'", "started_at", since_bound),
+            "failed_run_count": self._count(conn, "ingestion_runs", "status='failed'", "started_at", since_bound),
+            "job_count_by_status": self._job_count_by_status(conn, since_bound),
+            "validation_status_counts": self._count_by(conn, "validation_runs", "status", "started_at", since_bound),
+            "snapshot_count_by_api": self._count_by(conn, "snapshots", "api_name", "created_at", since_bound),
+            "failed_jobs": self._failed_jobs(conn, since_bound, limit),
+            "quarantined_count": self._count(conn, "quarantine_files", "1=1", "created_at", since_bound),
+            "latest_run_id": self._latest_run_id(conn, since_bound),
+        }
+
+    def _since_bound(self, since: str | None) -> str | None:
+        if since is None:
+            return None
+        try:
+            return datetime.strptime(since, "%Y%m%d").strftime("%Y-%m-%dT00:00:00")
+        except ValueError as exc:
+            raise ValueError("--since must be in YYYYMMDD format") from exc
+
+    def _count_by(self, conn: sqlite3.Connection, table: str, field: str, time_field: str, since_bound: str | None) -> dict[str, int]:
+        sql = f"select {field} as key, count(*) as count from {table}"
+        args: list[Any] = []
+        if since_bound:
+            sql += f" where {time_field}>=?"
+            args.append(since_bound)
+        sql += f" group by {field} order by {field}"
+        rows = conn.execute(sql, args).fetchall()
+        return {str(row["key"]): int(row["count"]) for row in rows if row["key"] is not None}
+
+    def _count(self, conn: sqlite3.Connection, table: str, condition: str, time_field: str, since_bound: str | None) -> int:
+        sql = f"select count(*) from {table} where {condition}"
+        args: list[Any] = []
+        if since_bound:
+            sql += f" and {time_field}>=?"
+            args.append(since_bound)
+        return int(conn.execute(sql, args).fetchone()[0])
+
+    def _job_count_by_status(self, conn: sqlite3.Connection, since_bound: str | None) -> dict[str, int]:
+        sql = "select j.status as key, count(*) as count from jobs j left join ingestion_runs r on r.run_id=j.run_id"
+        args: list[Any] = []
+        if since_bound:
+            sql += " where coalesce(r.started_at,j.created_at)>=?"
+            args.append(since_bound)
+        sql += " group by j.status order by j.status"
+        rows = conn.execute(sql, args).fetchall()
+        return {str(row["key"]): int(row["count"]) for row in rows if row["key"] is not None}
+
+    def _failed_jobs(self, conn: sqlite3.Connection, since_bound: str | None, limit: int) -> list[dict[str, Any]]:
+        sql = """
+            select j.job_key,j.run_id,j.api_name,j.status,j.params_json,j.last_error_type,j.last_error,
+                   coalesce(r.started_at,j.created_at) as started_at
+            from jobs j left join ingestion_runs r on r.run_id=j.run_id
+            where j.status='failed'
+        """
+        args: list[Any] = []
+        if since_bound:
+            sql += " and coalesce(r.started_at,j.created_at)>=?"
+            args.append(since_bound)
+        sql += " order by started_at desc, j.job_key limit ?"
+        args.append(limit)
+        rows = conn.execute(sql, args).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["params"] = loads(item.pop("params_json")) or {}
+            out.append(item)
+        return out
+
+    def _latest_run_id(self, conn: sqlite3.Connection, since_bound: str | None) -> str | None:
+        sql = "select run_id from ingestion_runs"
+        args: list[Any] = []
+        if since_bound:
+            sql += " where started_at>=?"
+            args.append(since_bound)
+        sql += " order by started_at desc limit 1"
+        row = conn.execute(sql, args).fetchone()
+        return str(row[0]) if row else None
+
+    def _backup_summary(self, backup: Path | str | None, warnings: list[str], blocking_errors: list[str]) -> dict[str, Any] | None:
+        if backup is None:
+            return None
+        backup_root = Path(backup)
+        if not backup_root.exists():
+            blocking_errors.append(f"backup not found: {backup_root}")
+            return {"path": str(backup_root), "status": "missing"}
+        inspect = BackupInspector().inspect(backup_root)
+        restore = RestoreChecker().check(backup_root)
+        if inspect.status != "succeeded":
+            blocking_errors.append("backup-inspect failed")
+        if restore.status != "succeeded":
+            blocking_errors.append("restore-check failed")
+        if inspect.possible_mutation or restore.possible_mutation:
+            blocking_errors.append("backup catalog may have been modified after backup creation")
+        if inspect.manifest_warning_count:
+            warnings.append("backup manifest has warnings")
+        return {
+            "path": str(backup_root),
+            "backup_id": inspect.backup_id or restore.backup_id,
+            "backup_status": inspect.status,
+            "restore_check_status": restore.status,
+            "catalog_checksum_status": restore.catalog_checksum_status or inspect.catalog_checksum_status,
+            "possible_mutation": bool(inspect.possible_mutation or restore.possible_mutation),
+            "file_count": inspect.file_count,
+            "raw_file_count": inspect.raw_file_count,
+            "lake_file_count": inspect.lake_file_count,
+            "manifest_warning_count": inspect.manifest_warning_count,
+            "manifest_error_count": inspect.manifest_error_count,
+        }
 
 
 class MirrorBatchPlanner:
