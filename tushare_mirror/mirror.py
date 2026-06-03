@@ -432,6 +432,27 @@ class StopPolicyResult:
 
 
 @dataclass(frozen=True)
+class SchemaStatusResult:
+    report_version: str
+    root: str
+    schema_count_by_api: dict[str, int]
+    latest_schema_by_api: dict[str, dict[str, Any]]
+    schema_change_count: int
+    incompatible_schema_count: int
+    pending_schema_change_count: int
+    quarantine_count: int
+    quarantined_apis: list[str]
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class MirrorBatchEndpointPlan:
     endpoint: str
     category: str
@@ -1834,6 +1855,111 @@ class StopPolicyReporter:
                 *base["stop_immediately"],
             ]
         return base
+
+
+class SchemaStatusReporter:
+    REPORT_VERSION = "schema-status/v1"
+
+    def report(self, *, root: Path | str) -> SchemaStatusResult:
+        mirror_root = Path(root)
+        catalog = CatalogStore(mirror_root, read_only=True)
+        warnings = ["schema-status is read-only and does not validate, fetch, or write catalog state"]
+        blocking_errors: list[str] = []
+        if not catalog.db_path.exists():
+            blocking_errors.append(f"catalog not found: {catalog.db_path}; run init-catalog first")
+            return self._result(mirror_root, {}, {}, 0, 0, 0, 0, [], warnings, blocking_errors)
+        try:
+            with catalog.connect() as conn:
+                schema_count = self._schema_count_by_api(conn)
+                latest = self._latest_schema_by_api(conn)
+                schema_change_count = int(conn.execute("select count(*) from schema_changes").fetchone()[0])
+                incompatible_count = int(conn.execute("select count(*) from schema_changes where change_type like '%incompatible%'").fetchone()[0])
+                pending_count = int(conn.execute("select count(*) from schema_changes where approved=0").fetchone()[0])
+                quarantine_count = int(conn.execute("select count(*) from quarantine_files").fetchone()[0])
+                quarantined_apis = [
+                    str(row[0])
+                    for row in conn.execute("select distinct api_name from quarantine_files where api_name is not null order by api_name").fetchall()
+                ]
+        except Exception as exc:
+            blocking_errors.append(f"schema-status failed: {exc}")
+            return self._result(mirror_root, {}, {}, 0, 0, 0, 0, [], warnings, blocking_errors)
+        if incompatible_count:
+            blocking_errors.append("incompatible schema changes are present")
+        if quarantine_count:
+            blocking_errors.append("schema quarantine is present")
+        if pending_count:
+            warnings.append("pending schema changes are present")
+        return self._result(
+            mirror_root,
+            schema_count,
+            latest,
+            schema_change_count,
+            incompatible_count,
+            pending_count,
+            quarantine_count,
+            quarantined_apis,
+            warnings,
+            blocking_errors,
+        )
+
+    def _result(
+        self,
+        root: Path,
+        schema_count_by_api: dict[str, int],
+        latest_schema_by_api: dict[str, dict[str, Any]],
+        schema_change_count: int,
+        incompatible_schema_count: int,
+        pending_schema_change_count: int,
+        quarantine_count: int,
+        quarantined_apis: list[str],
+        warnings: list[str],
+        blocking_errors: list[str],
+    ) -> SchemaStatusResult:
+        return SchemaStatusResult(
+            report_version=self.REPORT_VERSION,
+            root=str(root),
+            schema_count_by_api=schema_count_by_api,
+            latest_schema_by_api=latest_schema_by_api,
+            schema_change_count=schema_change_count,
+            incompatible_schema_count=incompatible_schema_count,
+            pending_schema_change_count=pending_schema_change_count,
+            quarantine_count=quarantine_count,
+            quarantined_apis=quarantined_apis,
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _schema_count_by_api(self, conn: sqlite3.Connection) -> dict[str, int]:
+        rows = conn.execute("select api_name, count(*) as count from schemas group by api_name order by api_name").fetchall()
+        return {str(row["api_name"]): int(row["count"]) for row in rows}
+
+    def _latest_schema_by_api(self, conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+        rows = conn.execute(
+            """
+            select s.api_name,s.schema_id,s.fields_json,s.logical_types_json,s.created_at
+            from schemas s
+            join (
+                select api_name, max(created_at) as max_created_at
+                from schemas group by api_name
+            ) latest on latest.api_name=s.api_name and latest.max_created_at=s.created_at
+            order by s.api_name,s.schema_id
+            """
+        ).fetchall()
+        latest: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            fields = loads(row["fields_json"]) or []
+            logical_types = loads(row["logical_types_json"]) or {}
+            latest.setdefault(
+                str(row["api_name"]),
+                {
+                    "schema_id": row["schema_id"],
+                    "created_at": row["created_at"],
+                    "field_count": len(fields),
+                    "fields": fields,
+                    "logical_types": logical_types,
+                },
+            )
+        return latest
 
 
 class MirrorBatchPlanner:

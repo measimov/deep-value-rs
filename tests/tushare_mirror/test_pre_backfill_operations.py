@@ -14,7 +14,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, StopPolicyReporter
+from tushare_mirror.mirror import DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, SchemaStatusReporter, StopPolicyReporter
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -131,6 +131,14 @@ class PreBackfillOperationsTestCase(unittest.TestCase):
                 "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
             }
 
+    def metadata_counts(self):
+        with sqlite3.connect(self.catalog.db_path) as conn:
+            return {
+                "schemas": conn.execute("select count(*) from schemas").fetchone()[0],
+                "schema_changes": conn.execute("select count(*) from schema_changes").fetchone()[0],
+                "quarantine": conn.execute("select count(*) from quarantine_files").fetchone()[0],
+            }
+
     def run_cli(self, *args, check=True, token="fake-status-token"):
         env = dict(os.environ)
         env["TUSHARE_TOKEN"] = token
@@ -174,6 +182,18 @@ class PreBackfillOperationsTestCase(unittest.TestCase):
         )
         self.catalog.finish_run(run_id, "failed", error_message="schema drift", error_type="schema_incompatible", summary={"api_name": "daily", "failed_jobs": 1})
         return run_id, job_key
+
+    def add_schema_pair(self, *, incompatible: bool = False):
+        self.catalog.insert_schema("schema_daily_1", "daily", ["ts_code", "trade_date"], {"ts_code": "string", "trade_date": "string"}, {"ts_code": False, "trade_date": False})
+        self.catalog.insert_schema("schema_daily_2", "daily", ["ts_code", "trade_date", "close"], {"ts_code": "string", "trade_date": "string", "close": "string" if incompatible else "float"}, {"ts_code": False, "trade_date": False, "close": True})
+        self.catalog.record_schema_change(
+            "daily",
+            "schema_daily_1",
+            "schema_daily_2",
+            "incompatible_type_change" if incompatible else "add_column",
+            {"added": ["close"]},
+            approved=not incompatible,
+        )
 
     def fetch_trade_cal_range(self, start_date: str, end_date: str):
         result = FileLakeStore(self.root, self.catalog).fetch(
@@ -694,6 +714,63 @@ class StopPolicyReportTests(PreBackfillOperationsTestCase):
         self.assertEqual(payload["report_version"], "stop-policy/v1")
         self.assertEqual(payload["category"], "financial")
         self.assertTrue(payload["execution_blocked"])
+
+
+class SchemaStatusReportTests(PreBackfillOperationsTestCase):
+    def test_fake_schema_changes_are_reported_read_only(self):
+        self.add_schema_pair()
+        before = self.metadata_counts()
+        report = SchemaStatusReporter().report(root=self.root)
+        self.assertEqual(self.metadata_counts(), before)
+        self.assertEqual(report.report_version, "schema-status/v1")
+        self.assertEqual(report.schema_count_by_api["daily"], 2)
+        self.assertEqual(report.latest_schema_by_api["daily"]["schema_id"], "schema_daily_2")
+        self.assertEqual(report.schema_change_count, 1)
+        self.assertEqual(report.incompatible_schema_count, 0)
+        self.assertEqual(report.pending_schema_change_count, 0)
+        self.assertFalse(report.blocking_errors)
+
+    def test_incompatible_schema_is_reported(self):
+        self.add_schema_pair(incompatible=True)
+        report = SchemaStatusReporter().report(root=self.root)
+        self.assertEqual(report.schema_change_count, 1)
+        self.assertEqual(report.incompatible_schema_count, 1)
+        self.assertEqual(report.pending_schema_change_count, 1)
+        self.assertTrue(any("incompatible schema" in error for error in report.blocking_errors))
+
+    def test_quarantine_is_reported(self):
+        run_id, job_key = self.make_failed_catalog_rows()
+        report = SchemaStatusReporter().report(root=self.root)
+        self.assertEqual(report.quarantine_count, 1)
+        self.assertEqual(report.quarantined_apis, ["daily"])
+        self.assertTrue(any("schema quarantine" in error for error in report.blocking_errors))
+
+    def test_cli_json_contract_and_no_side_effects_for_schema_status(self):
+        self.add_schema_pair()
+        before = self.metadata_counts()
+        result = self.run_cli(
+            "schema-status",
+            "--root", str(self.root),
+            "--json",
+        )
+        self.assertEqual(self.metadata_counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "root",
+            "schema_count_by_api",
+            "latest_schema_by_api",
+            "schema_change_count",
+            "incompatible_schema_count",
+            "pending_schema_change_count",
+            "quarantine_count",
+            "quarantined_apis",
+            "warnings",
+            "blocking_errors",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "schema-status/v1")
+        self.assertEqual(payload["schema_count_by_api"]["daily"], 2)
 
 
 if __name__ == "__main__":
