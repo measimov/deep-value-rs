@@ -14,7 +14,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorNextBatchReporter, MirrorOrchestrator, MirrorStatusReporter
+from tushare_mirror.mirror import DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -545,6 +545,102 @@ class MirrorBatchBundleTests(PreBackfillOperationsTestCase):
         self.assertEqual(payload["status"], "created")
         self.assertEqual(payload["commands_execute_guard"], "USER_CONFIRMATION_REQUIRED")
         self.assertTrue((output / "commands.sh").exists())
+
+
+class MirrorOperatorChecklistTests(PreBackfillOperationsTestCase):
+    def checklist(self, *, token_available: bool = True):
+        return MirrorOperatorChecklistReporter(token_available=token_available).report(
+            root=self.root,
+            backup=self.backup,
+            scope="low-risk-a-share",
+            start_date="20250201",
+            end_date="20250228",
+        )
+
+    def test_healthy_checklist_ready(self):
+        self.build_pilot()
+        before = self.counts()
+        report = self.checklist()
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(report.report_version, "mirror-operator-checklist/v1")
+        self.assertTrue(report.paths_valid)
+        self.assertTrue(report.backup_not_nested)
+        self.assertTrue(report.restore_check_passed)
+        self.assertTrue(report.backup_not_mutated)
+        self.assertTrue(report.readiness_not_blocked)
+        self.assertTrue(report.no_schema_quarantine)
+        self.assertTrue(report.no_failed_validation)
+        self.assertTrue(report.token_available)
+        self.assertTrue(report.max_jobs_guardrail["passed"])
+        self.assertTrue(report.batch_plan_available)
+        self.assertTrue(report.ready)
+        self.assertIn("USER_CONFIRMATION_REQUIRED", json.dumps(report.exact_execute_command))
+
+    def test_missing_token_blocks_without_plaintext(self):
+        self.build_pilot()
+        report = self.checklist(token_available=False)
+        self.assertFalse(report.token_available)
+        self.assertFalse(report.ready)
+        self.assertTrue(any("TUSHARE_TOKEN" in error for error in report.blocking_errors))
+        self.assertNotIn("fake-token-for-hash-only", json.dumps(report.to_dict()))
+
+    def test_mutated_backup_blocks_checklist(self):
+        self.build_pilot()
+        Validator(self.backup, CatalogStore(self.backup)).validate_latest_snapshots(record=True)
+        report = self.checklist()
+        self.assertFalse(report.backup_not_mutated)
+        self.assertFalse(report.restore_check_passed)
+        self.assertFalse(report.ready)
+        self.assertTrue(any("modified after backup creation" in error for error in report.blocking_errors))
+
+    def test_failed_readiness_blocks_checklist(self):
+        self.build_pilot()
+        with sqlite3.connect(self.catalog.db_path) as conn:
+            conn.execute("update snapshots set status='superseded' where api_name='trade_cal'")
+        report = self.checklist()
+        self.assertFalse(report.readiness_not_blocked)
+        self.assertFalse(report.ready)
+        self.assertTrue(any("mirror-readiness is blocked" in error for error in report.blocking_errors))
+
+    def test_cli_json_contract_and_no_side_effects_for_operator_checklist(self):
+        self.build_pilot()
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-operator-checklist",
+            "--root", str(self.root),
+            "--backup", str(self.backup),
+            "--scope", "low-risk-a-share",
+            "--start-date", "20250201",
+            "--end-date", "20250228",
+            "--json",
+            token="fake-checklist-token",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "paths_valid",
+            "backup_not_nested",
+            "restore_check_passed",
+            "backup_not_mutated",
+            "readiness_not_blocked",
+            "no_schema_quarantine",
+            "no_failed_validation",
+            "token_available",
+            "max_jobs_guardrail",
+            "batch_plan_available",
+            "disk_space_warning",
+            "stop_conditions",
+            "exact_plan_command",
+            "exact_execute_command",
+            "warnings",
+            "blocking_errors",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "mirror-operator-checklist/v1")
+        self.assertTrue(payload["token_available"])
+        self.assertIn("USER_CONFIRMATION_REQUIRED", json.dumps(payload["exact_execute_command"]))
+        self.assertNotIn("fake-checklist-token", result.stdout)
 
 
 if __name__ == "__main__":

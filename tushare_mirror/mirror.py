@@ -378,6 +378,39 @@ class MirrorBatchBundleResult:
 
 
 @dataclass(frozen=True)
+class MirrorOperatorChecklistResult:
+    report_version: str
+    root: str
+    backup: str
+    scope: str
+    start_date: str
+    end_date: str
+    paths_valid: bool
+    backup_not_nested: bool
+    restore_check_passed: bool
+    backup_not_mutated: bool
+    readiness_not_blocked: bool
+    no_schema_quarantine: bool
+    no_failed_validation: bool
+    token_available: bool
+    max_jobs_guardrail: dict[str, Any]
+    batch_plan_available: bool
+    disk_space_warning: str | None
+    stop_conditions: dict[str, Any]
+    exact_plan_command: str
+    exact_execute_command: dict[str, str]
+    ready: bool
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class MirrorBatchEndpointPlan:
     endpoint: str
     category: str
@@ -1538,6 +1571,166 @@ class MirrorBatchBundleReporter:
                 "any command that fetches real Tushare data",
             ],
         }
+
+
+class MirrorOperatorChecklistReporter:
+    REPORT_VERSION = "mirror-operator-checklist/v1"
+    MAX_JOBS_PER_API = 20
+
+    def __init__(self, *, token_available: bool | None = None):
+        self._token_available_override = token_available
+
+    def report(
+        self,
+        *,
+        root: Path | str,
+        backup: Path | str,
+        scope: str,
+        start_date: str,
+        end_date: str,
+    ) -> MirrorOperatorChecklistResult:
+        ensure_mirror_scope(scope)
+        mirror_root = _resolve_path(Path(root))
+        backup_root = _resolve_path(Path(backup))
+        warnings: list[str] = ["mirror-operator-checklist is read-only and does not execute generated commands"]
+        blocking_errors: list[str] = []
+
+        catalog = CatalogStore(mirror_root, read_only=True)
+        paths_valid = catalog.db_path.exists() and backup_root.exists() and backup_root.is_dir()
+        if not catalog.db_path.exists():
+            blocking_errors.append(f"catalog not found: {catalog.db_path}; run init-catalog first")
+        if not backup_root.exists():
+            blocking_errors.append(f"backup not found: {backup_root}")
+        elif not backup_root.is_dir():
+            blocking_errors.append("backup path exists but is not a directory")
+
+        relationship = MirrorPreflightChecker(token_available=True)._path_relationship(mirror_root, backup_root)
+        backup_not_nested = relationship == "ok"
+        if not backup_not_nested:
+            blocking_errors.append(f"unsafe backup path relationship: {relationship}")
+
+        restore_check_passed = False
+        backup_not_mutated = False
+        if backup_root.exists() and backup_root.is_dir():
+            inspect = BackupInspector().inspect(backup_root)
+            restore = RestoreChecker().check(backup_root)
+            restore_check_passed = restore.status == "succeeded"
+            backup_not_mutated = not bool(inspect.possible_mutation or restore.possible_mutation)
+            if not restore_check_passed:
+                blocking_errors.append("restore-check failed")
+            if not backup_not_mutated:
+                blocking_errors.append("backup catalog may have been modified after backup creation")
+
+        readiness_not_blocked = False
+        current_validation_status = None
+        try:
+            readiness = MirrorReadinessReporter().report(root=mirror_root, backup=backup_root, scope=scope)
+            readiness_not_blocked = readiness.readiness_status != "blocked"
+            current_validation_status = (readiness.review or {}).get("validation_status")
+            warnings.extend(readiness.warnings)
+            if not readiness_not_blocked:
+                blocking_errors.append("mirror-readiness is blocked")
+        except Exception as exc:
+            blocking_errors.append(f"mirror-readiness failed: {exc}")
+
+        no_schema_quarantine, no_failed_validation = self._catalog_quality_flags(catalog, blocking_errors)
+        if current_validation_status is not None:
+            no_failed_validation = current_validation_status != "failed"
+            if not no_failed_validation:
+                blocking_errors.append("current readiness validation failed")
+        token_available = self._token_available()
+        if not token_available:
+            blocking_errors.append("TUSHARE_TOKEN is not available")
+        max_jobs_guardrail = {
+            "max_jobs_per_api": self.MAX_JOBS_PER_API,
+            "max_allowed_for_pilot": MODE_MAX_JOBS["pilot"],
+            "passed": self.MAX_JOBS_PER_API <= MODE_MAX_JOBS["pilot"],
+        }
+        if not max_jobs_guardrail["passed"]:
+            blocking_errors.append("max-jobs-per-api guardrail failed")
+
+        batch_plan_available = self._batch_plan_available(mirror_root, catalog, scope, start_date, end_date, blocking_errors)
+        disk_warning = self._disk_warning(mirror_root, backup_root, warnings)
+        plan_command, execute_command = self._commands(mirror_root, backup_root, scope, start_date, end_date)
+        stop_conditions = MirrorBatchBundleReporter()._stop_policy(scope)
+        ready = not blocking_errors
+        return MirrorOperatorChecklistResult(
+            report_version=self.REPORT_VERSION,
+            root=str(mirror_root),
+            backup=str(backup_root),
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            paths_valid=paths_valid,
+            backup_not_nested=backup_not_nested,
+            restore_check_passed=restore_check_passed,
+            backup_not_mutated=backup_not_mutated,
+            readiness_not_blocked=readiness_not_blocked,
+            no_schema_quarantine=no_schema_quarantine,
+            no_failed_validation=no_failed_validation,
+            token_available=token_available,
+            max_jobs_guardrail=max_jobs_guardrail,
+            batch_plan_available=batch_plan_available,
+            disk_space_warning=disk_warning,
+            stop_conditions=stop_conditions,
+            exact_plan_command=plan_command,
+            exact_execute_command=execute_command,
+            ready=ready,
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _token_available(self) -> bool:
+        if self._token_available_override is not None:
+            return self._token_available_override
+        return _token_available_from_env()
+
+    def _catalog_quality_flags(self, catalog: CatalogStore, blocking_errors: list[str]) -> tuple[bool, bool]:
+        if not catalog.db_path.exists():
+            return False, False
+        try:
+            with catalog.connect() as conn:
+                quarantine_count = int(conn.execute("select count(*) from quarantine_files").fetchone()[0])
+        except Exception as exc:
+            blocking_errors.append(f"catalog quality check failed: {exc}")
+            return False, False
+        if quarantine_count:
+            blocking_errors.append("schema quarantine is present")
+        return quarantine_count == 0, True
+
+    def _batch_plan_available(self, root: Path, catalog: CatalogStore, scope: str, start_date: str, end_date: str, blocking_errors: list[str]) -> bool:
+        if not catalog.db_path.exists():
+            return False
+        try:
+            MirrorBatchPlanner(root, catalog).plan(
+                scope=scope,
+                start_date=start_date,
+                end_date=end_date,
+                calendar_exchange="SSE",
+                max_jobs_per_api=self.MAX_JOBS_PER_API,
+            )
+            return True
+        except Exception as exc:
+            blocking_errors.append(f"mirror-batch-plan unavailable: {exc}")
+            return False
+
+    def _disk_warning(self, root: Path, backup: Path, warnings: list[str]) -> str | None:
+        disk_warnings: list[str] = []
+        disk = MirrorPreflightChecker(token_available=True)._disk_space_summary(root, backup, disk_warnings)
+        warnings.extend(disk_warnings)
+        return disk.get("warning") if isinstance(disk, dict) else None
+
+    def _commands(self, root: Path, backup: Path, scope: str, start_date: str, end_date: str) -> tuple[str, dict[str, str]]:
+        plan = (
+            f"python3 -m tushare_mirror mirror-batch-plan --root {root} --scope {scope} "
+            f"--start-date {start_date} --end-date {end_date} --max-jobs-per-api {self.MAX_JOBS_PER_API}"
+        )
+        execute = (
+            f"python3 -m tushare_mirror mirror-run --root {root} --scope {scope} --mode pilot "
+            f"--start-date {start_date} --end-date {end_date} --max-jobs-per-api {self.MAX_JOBS_PER_API} "
+            f"--backup-target {backup} --execute"
+        )
+        return plan, {"confirmation": "USER_CONFIRMATION_REQUIRED", "command": execute}
 
 
 class MirrorBatchPlanner:
