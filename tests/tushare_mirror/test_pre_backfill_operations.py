@@ -9,11 +9,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tushare_mirror.backfill import BackfillExecutor, BackfillPlanner, DatePlanner
 from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import MirrorAuditReporter, MirrorOrchestrator, MirrorStatusReporter
+from tushare_mirror.mirror import DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorNextBatchReporter, MirrorOrchestrator, MirrorStatusReporter
+from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
 
@@ -72,6 +74,37 @@ class PreBackfillFakeClient:
             else:
                 values.append(1.0)
         return values
+
+
+class CalendarRangeFakeClient(PreBackfillFakeClient):
+    def query_paginated(self, api_name, params, fields, page_size=None):
+        if api_name != "trade_cal":
+            return super().query_paginated(api_name, params, fields, page_size)
+        from datetime import datetime, timedelta
+
+        start = params.get("start_date", "20250101")
+        end = params.get("end_date", "20250131")
+        current = datetime.strptime(start, "%Y%m%d")
+        stop = datetime.strptime(end, "%Y%m%d")
+        previous_open = "20241231"
+        items = []
+        while current <= stop:
+            date = current.strftime("%Y%m%d")
+            is_open = 1 if current.weekday() < 5 else 0
+            items.append(["SSE", date, is_open, previous_open])
+            if is_open:
+                previous_open = date
+            current += timedelta(days=1)
+        fields_list = ["exchange", "cal_date", "is_open", "pretrade_date"]
+        event = {
+            "code": 0,
+            "msg": None,
+            "data": {"fields": fields_list, "items": items, "has_more": False},
+            "_http_status": 200,
+            "_page_index": 0,
+            "_request_params": dict(params),
+        }
+        return QueryResult(events=[event], fields=fields_list, items=items)
 
 
 class PreBackfillOperationsTestCase(unittest.TestCase):
@@ -141,6 +174,33 @@ class PreBackfillOperationsTestCase(unittest.TestCase):
         )
         self.catalog.finish_run(run_id, "failed", error_message="schema drift", error_type="schema_incompatible", summary={"api_name": "daily", "failed_jobs": 1})
         return run_id, job_key
+
+    def fetch_trade_cal_range(self, start_date: str, end_date: str):
+        result = FileLakeStore(self.root, self.catalog).fetch(
+            "trade_cal",
+            {"exchange": "SSE", "start_date": start_date, "end_date": end_date},
+            CalendarRangeFakeClient(),
+        )
+        self.assertTrue(result.snapshot_id)
+
+    def cover_daily_like_range(self, start_date: str, end_date: str, apis: list[str] | None = None):
+        self.fetch_trade_cal_range(start_date, end_date)
+        dates, calendar = DatePlanner(self.root, self.catalog).plan_dates_with_metadata(
+            start_date=start_date,
+            end_date=end_date,
+            trading_days_only=True,
+            calendar_exchange="SSE",
+        )
+        self.assertTrue(dates)
+        for api_name in apis or DAILY_LIKE_MIRROR_APIS:
+            plan = BackfillPlanner(self.root, self.catalog).plan_date_backfill(
+                api_name,
+                dates,
+                max_jobs=len(dates),
+                calendar_metadata=calendar,
+            )
+            result = BackfillExecutor(self.root, self.catalog).execute(plan, PreBackfillFakeClient())
+            self.assertEqual(result.status, "succeeded")
 
 
 class MirrorStatusDashboardTests(PreBackfillOperationsTestCase):
@@ -300,6 +360,87 @@ class MirrorAuditReportTests(PreBackfillOperationsTestCase):
         report = MirrorAuditReporter().report(root=missing_root, scope="low-risk-a-share")
         self.assertFalse((missing_root / "_catalog" / "catalog.sqlite").exists())
         self.assertTrue(any("catalog not found" in error for error in report.blocking_errors))
+
+
+class MirrorNextBatchRecommenderTests(PreBackfillOperationsTestCase):
+    def test_no_coverage_recommends_january(self):
+        before = self.counts()
+        report = MirrorNextBatchReporter().report(root=self.root, scope="low-risk-a-share")
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(report.current_completed_months, [])
+        self.assertIsNone(report.last_complete_month)
+        self.assertEqual(report.recommended_next_start_date, "20250101")
+        self.assertEqual(report.recommended_next_end_date, "20250131")
+        self.assertIn("no completed month", report.reason)
+        self.assertEqual(report.required_trade_cal_range["status"], "missing_snapshot")
+        self.assertFalse(report.blocking_errors)
+
+    def test_january_covered_recommends_february(self):
+        self.cover_daily_like_range("20250101", "20250131")
+        before = self.counts()
+        report = MirrorNextBatchReporter().report(root=self.root, scope="low-risk-a-share")
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(report.current_completed_months, ["202501"])
+        self.assertEqual(report.last_complete_month, "202501")
+        self.assertEqual(report.recommended_next_start_date, "20250201")
+        self.assertEqual(report.recommended_next_end_date, "20250228")
+        self.assertIn("latest complete month is 202501", report.reason)
+        self.assertIn("USER_CONFIRMATION_REQUIRED", json.dumps(report.execute_command_preview))
+
+    def test_february_covered_recommends_march(self):
+        self.cover_daily_like_range("20250101", "20250131")
+        self.cover_daily_like_range("20250201", "20250228")
+        before = self.counts()
+        report = MirrorNextBatchReporter().report(root=self.root, scope="low-risk-a-share")
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(report.current_completed_months, ["202501", "202502"])
+        self.assertEqual(report.last_complete_month, "202502")
+        self.assertEqual(report.recommended_next_start_date, "20250301")
+        self.assertEqual(report.recommended_next_end_date, "20250331")
+
+    def test_partial_coverage_recommends_missing_month(self):
+        self.cover_daily_like_range("20250101", "20250131", apis=["daily"])
+        before = self.counts()
+        report = MirrorNextBatchReporter().report(root=self.root, scope="low-risk-a-share")
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(report.current_completed_months, [])
+        self.assertEqual(report.recommended_next_start_date, "20250101")
+        self.assertEqual(report.recommended_next_end_date, "20250131")
+        self.assertIn("partial coverage", report.reason)
+        self.assertEqual(report.required_trade_cal_range["status"], "covered")
+
+    def test_cli_json_contract_and_no_side_effects_for_next_batch(self):
+        self.cover_daily_like_range("20250101", "20250131")
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-next-batch",
+            "--root", str(self.root),
+            "--scope", "low-risk-a-share",
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "root",
+            "scope",
+            "current_completed_months",
+            "last_complete_month",
+            "recommended_next_start_date",
+            "recommended_next_end_date",
+            "reason",
+            "required_trade_cal_range",
+            "estimated_request_count",
+            "recommended_max_jobs_per_api",
+            "plan_command_preview",
+            "execute_command_preview",
+            "warnings",
+            "blocking_errors",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "mirror-next-batch/v1")
+        self.assertEqual(payload["recommended_next_start_date"], "20250201")
+        self.assertIn("USER_CONFIRMATION_REQUIRED", json.dumps(payload["execute_command_preview"]))
 
 
 if __name__ == "__main__":

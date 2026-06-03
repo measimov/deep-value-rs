@@ -312,6 +312,47 @@ class MirrorAuditResult:
 
 
 @dataclass(frozen=True)
+class MirrorNextBatchResult:
+    report_version: str
+    root: str
+    scope: str
+    current_completed_months: list[str]
+    last_complete_month: str | None
+    recommended_next_start_date: str | None
+    recommended_next_end_date: str | None
+    reason: str
+    required_trade_cal_range: dict[str, Any] | None
+    estimated_request_count: int
+    recommended_max_jobs_per_api: int
+    plan_command_preview: str | None
+    execute_command_preview: dict[str, str] | None
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "report_version": self.report_version,
+            "root": self.root,
+            "scope": self.scope,
+            "current_completed_months": self.current_completed_months,
+            "last_complete_month": self.last_complete_month,
+            "recommended_next_start_date": self.recommended_next_start_date,
+            "recommended_next_end_date": self.recommended_next_end_date,
+            "reason": self.reason,
+            "required_trade_cal_range": self.required_trade_cal_range,
+            "estimated_request_count": self.estimated_request_count,
+            "recommended_max_jobs_per_api": self.recommended_max_jobs_per_api,
+            "plan_command_preview": self.plan_command_preview,
+            "execute_command_preview": self.execute_command_preview,
+            "warnings": self.warnings,
+            "blocking_errors": self.blocking_errors,
+        }
+
+
+@dataclass(frozen=True)
 class MirrorBatchEndpointPlan:
     endpoint: str
     category: str
@@ -1095,6 +1136,187 @@ class MirrorAuditReporter:
             "manifest_warning_count": inspect.manifest_warning_count,
             "manifest_error_count": inspect.manifest_error_count,
         }
+
+
+class MirrorNextBatchReporter:
+    REPORT_VERSION = "mirror-next-batch/v1"
+    FIRST_CONTROLLED_MONTH = "202501"
+    MAX_MONTHS_TO_SCAN = 48
+    RECOMMENDED_MAX_JOBS_PER_API = 20
+
+    def report(
+        self,
+        *,
+        root: Path | str,
+        scope: str = "low-risk-a-share",
+    ) -> MirrorNextBatchResult:
+        ensure_mirror_scope(scope)
+        mirror_root = Path(root)
+        warnings = ["mirror-next-batch is read-only; it does not execute mirror-run, fetch, or backfill"]
+        blocking_errors: list[str] = []
+        catalog = CatalogStore(mirror_root, read_only=True)
+        if not catalog.db_path.exists():
+            blocking_errors.append(f"catalog not found: {catalog.db_path}; run init-catalog first")
+            return self._result(mirror_root, scope, [], None, None, None, "catalog missing", None, 0, warnings, blocking_errors)
+
+        completed: list[str] = []
+        month = self.FIRST_CONTROLLED_MONTH
+        incomplete: dict[str, Any] | None = None
+        try:
+            for _ in range(self.MAX_MONTHS_TO_SCAN):
+                status = self._month_status(mirror_root, catalog, month)
+                if status["complete"]:
+                    completed.append(month)
+                    month = self._next_month(month)
+                    continue
+                incomplete = status
+                break
+        except Exception as exc:
+            blocking_errors.append(f"next batch inspection failed: {exc}")
+            return self._result(mirror_root, scope, completed, completed[-1] if completed else None, None, None, "inspection failed", None, 0, warnings, blocking_errors)
+
+        target_month = (incomplete or {}).get("month") or month
+        start, end = self._month_range(target_month)
+        reason = self._reason(completed, incomplete)
+        required_trade_cal_range = (incomplete or {}).get("calendar")
+        estimated = self._estimated_request_count(mirror_root, catalog, scope, start, end, warnings)
+        return self._result(
+            mirror_root,
+            scope,
+            completed,
+            completed[-1] if completed else None,
+            start,
+            end,
+            reason,
+            required_trade_cal_range,
+            estimated,
+            warnings,
+            blocking_errors,
+        )
+
+    def _result(
+        self,
+        root: Path,
+        scope: str,
+        completed: list[str],
+        last_complete: str | None,
+        start: str | None,
+        end: str | None,
+        reason: str,
+        required_trade_cal_range: dict[str, Any] | None,
+        estimated_request_count: int,
+        warnings: list[str],
+        blocking_errors: list[str],
+    ) -> MirrorNextBatchResult:
+        plan_command = None
+        execute_preview = None
+        if start and end:
+            plan_command = (
+                f"python3 -m tushare_mirror mirror-batch-plan --root {root} --scope {scope} "
+                f"--start-date {start} --end-date {end} --max-jobs-per-api {self.RECOMMENDED_MAX_JOBS_PER_API}"
+            )
+            execute_preview = {
+                "confirmation": "USER_CONFIRMATION_REQUIRED",
+                "command": (
+                    f"python3 -m tushare_mirror mirror-run --root {root} --scope {scope} --mode pilot "
+                    f"--start-date {start} --end-date {end} --max-jobs-per-api {self.RECOMMENDED_MAX_JOBS_PER_API} --execute"
+                ),
+            }
+        return MirrorNextBatchResult(
+            report_version=self.REPORT_VERSION,
+            root=str(root),
+            scope=scope,
+            current_completed_months=completed,
+            last_complete_month=last_complete,
+            recommended_next_start_date=start,
+            recommended_next_end_date=end,
+            reason=reason,
+            required_trade_cal_range=required_trade_cal_range,
+            estimated_request_count=estimated_request_count,
+            recommended_max_jobs_per_api=self.RECOMMENDED_MAX_JOBS_PER_API,
+            plan_command_preview=plan_command,
+            execute_command_preview=execute_preview,
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _month_status(self, root: Path, catalog: CatalogStore, month: str) -> dict[str, Any]:
+        start, end = self._month_range(month)
+        planner = MirrorBatchPlanner(root, catalog)
+        calendar = planner._calendar_range(start, end, "SSE")
+        calendar_summary = {
+            "start_date": start,
+            "end_date": end,
+            "exchange": "SSE",
+            "status": calendar.get("status"),
+            "missing_calendar_dates": calendar.get("missing_calendar_dates") or [],
+            "trading_dates": calendar.get("open_dates") or [],
+        }
+        if calendar.get("status") != "covered":
+            return {"month": month, "complete": False, "reason": "missing_trade_cal_range", "calendar": calendar_summary}
+        coverage = []
+        for api_name in DAILY_LIKE_MIRROR_APIS:
+            report = CoverageReporter(root, catalog).report(
+                api_name,
+                start_date=start,
+                end_date=end,
+                trading_days_only=True,
+                calendar_exchange="SSE",
+            )
+            data = report.to_dict()
+            data.pop("items", None)
+            coverage.append(data)
+        complete = bool(coverage) and all(
+            int(row.get("total_dates") or 0) > 0
+            and int(row.get("covered_dates") or 0) == int(row.get("total_dates") or 0)
+            and int(row.get("missing_dates") or 0) == 0
+            and int(row.get("failed_dates") or 0) == 0
+            and int(row.get("quarantined_dates") or 0) == 0
+            for row in coverage
+        )
+        return {
+            "month": month,
+            "complete": complete,
+            "reason": "complete" if complete else "partial_daily_like_coverage",
+            "calendar": calendar_summary,
+            "coverage": coverage,
+        }
+
+    def _reason(self, completed: list[str], incomplete: dict[str, Any] | None) -> str:
+        if not completed and incomplete and incomplete.get("reason") == "missing_trade_cal_range":
+            return "no completed month found; recommend first controlled month and required local trade_cal range"
+        if not completed:
+            return f"partial coverage detected for {incomplete.get('month') if incomplete else self.FIRST_CONTROLLED_MONTH}; recommend completing that month"
+        if incomplete and incomplete.get("reason") == "partial_daily_like_coverage":
+            return f"partial coverage detected for {incomplete['month']}; recommend completing that month before advancing"
+        return f"latest complete month is {completed[-1]}; recommend next bounded month"
+
+    def _estimated_request_count(self, root: Path, catalog: CatalogStore, scope: str, start: str, end: str, warnings: list[str]) -> int:
+        try:
+            plan = MirrorBatchPlanner(root, catalog).plan(
+                scope=scope,
+                start_date=start,
+                end_date=end,
+                calendar_exchange="SSE",
+                max_jobs_per_api=self.RECOMMENDED_MAX_JOBS_PER_API,
+            )
+            return plan.estimated_request_count
+        except Exception as exc:
+            warnings.append(f"request estimate unavailable from mirror-batch-plan: {exc}")
+            return 0
+
+    def _month_range(self, month: str) -> tuple[str, str]:
+        start = datetime.strptime(month + "01", "%Y%m%d")
+        next_month = datetime.strptime(self._next_month(month) + "01", "%Y%m%d")
+        end = next_month - timedelta(days=1)
+        return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+
+    def _next_month(self, month: str) -> str:
+        year = int(month[:4])
+        month_num = int(month[4:])
+        if month_num == 12:
+            return f"{year + 1}01"
+        return f"{year}{month_num + 1:02d}"
 
 
 class MirrorBatchPlanner:
