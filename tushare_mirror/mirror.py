@@ -505,6 +505,32 @@ class MirrorCoverageMatrixResult:
 
 
 @dataclass(frozen=True)
+class RequestEstimateResult:
+    report_version: str
+    root: str
+    scope: str
+    start_date: str
+    end_date: str
+    estimated_requests_by_api: dict[str, int]
+    estimated_total_requests: int
+    planned_trade_cal_requests: int
+    daily_like_requests: int
+    weekly_monthly_requests: int
+    reference_refresh_requests: int
+    risk_level: str
+    assumptions: list[str]
+    warnings: list[str]
+    not_a_quota_guarantee: bool
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class MirrorBatchEndpointPlan:
     endpoint: str
     category: str
@@ -2198,6 +2224,108 @@ class MirrorCoverageMatrixReporter:
 
     def _monthly_dates(self, start_date: str, end_date: str) -> list[str]:
         return MirrorBatchPlanner(Path("."), CatalogStore(Path("."), read_only=True))._monthly_dates(start_date, end_date)
+
+
+class RequestEstimateReporter:
+    REPORT_VERSION = "request-estimate/v1"
+
+    def report(
+        self,
+        *,
+        root: Path | str,
+        scope: str,
+        start_date: str,
+        end_date: str,
+    ) -> RequestEstimateResult:
+        ensure_mirror_scope(scope)
+        mirror_root = Path(root)
+        warnings = ["request-estimate is read-only, does not call Tushare, and does not inspect token quota"]
+        blocking_errors: list[str] = []
+        catalog = CatalogStore(mirror_root, read_only=True)
+        if not catalog.db_path.exists():
+            blocking_errors.append(f"catalog not found: {catalog.db_path}; run init-catalog first")
+            return self._result(mirror_root, scope, start_date, end_date, {}, 0, 0, 0, 0, 0, "unknown", warnings, blocking_errors)
+        try:
+            plan = MirrorBatchPlanner(mirror_root, catalog).plan(
+                scope=scope,
+                start_date=start_date,
+                end_date=end_date,
+                calendar_exchange="SSE",
+                max_jobs_per_api=MirrorNextBatchReporter.RECOMMENDED_MAX_JOBS_PER_API,
+            )
+        except Exception as exc:
+            blocking_errors.append(f"request estimate failed: {exc}")
+            return self._result(mirror_root, scope, start_date, end_date, {}, 0, 0, 0, 0, 0, "unknown", warnings, blocking_errors)
+        by_api = {item.endpoint: int(item.missing_jobs) for item in plan.endpoint_plans}
+        daily_like = sum(by_api.get(api_name, 0) for api_name in DAILY_LIKE_MIRROR_APIS)
+        weekly_monthly = by_api.get("weekly", 0) + by_api.get("monthly", 0)
+        reference_refresh = by_api.get("stock_basic", 0) + by_api.get("hs_const", 0)
+        trade_cal_requests = by_api.get("trade_cal", 0)
+        if plan.trade_cal_dependency_status != "covered":
+            warnings.append(f"local trade_cal range is {plan.trade_cal_dependency_status}; daily-like estimates may be deferred until calendar is present")
+        total = sum(by_api.values())
+        return self._result(
+            mirror_root,
+            scope,
+            start_date,
+            end_date,
+            by_api,
+            total,
+            trade_cal_requests,
+            daily_like,
+            weekly_monthly,
+            reference_refresh,
+            self._risk_level(total),
+            warnings,
+            blocking_errors,
+        )
+
+    def _result(
+        self,
+        root: Path,
+        scope: str,
+        start_date: str,
+        end_date: str,
+        estimated_requests_by_api: dict[str, int],
+        estimated_total_requests: int,
+        planned_trade_cal_requests: int,
+        daily_like_requests: int,
+        weekly_monthly_requests: int,
+        reference_refresh_requests: int,
+        risk_level: str,
+        warnings: list[str],
+        blocking_errors: list[str],
+    ) -> RequestEstimateResult:
+        return RequestEstimateResult(
+            report_version=self.REPORT_VERSION,
+            root=str(root),
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            estimated_requests_by_api=estimated_requests_by_api,
+            estimated_total_requests=estimated_total_requests,
+            planned_trade_cal_requests=planned_trade_cal_requests,
+            daily_like_requests=daily_like_requests,
+            weekly_monthly_requests=weekly_monthly_requests,
+            reference_refresh_requests=reference_refresh_requests,
+            risk_level=risk_level,
+            assumptions=[
+                "one planned missing job maps to one estimated request",
+                "daily-like requests use local trade_cal when the requested range is covered",
+                "weekly/monthly requests use bounded date lists only",
+                "stock loop, financial, object/text, intraday, and compaction execution remain excluded",
+            ],
+            warnings=_dedupe_messages(warnings),
+            not_a_quota_guarantee=True,
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _risk_level(self, total: int) -> str:
+        if total <= 25:
+            return "low"
+        if total <= 100:
+            return "moderate"
+        return "high"
 
 
 class MirrorBatchPlanner:

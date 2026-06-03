@@ -14,7 +14,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import BackupStatusReporter, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, SchemaStatusReporter, StopPolicyReporter
+from tushare_mirror.mirror import BackupStatusReporter, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -529,6 +529,59 @@ class MirrorCoverageMatrixTests(PreBackfillOperationsTestCase):
             self.assertIn(key, payload)
         self.assertEqual(payload["report_version"], "mirror-coverage-matrix/v1")
         self.assertEqual(len(payload["items"]), 6)
+
+
+class RequestEstimateReportTests(PreBackfillOperationsTestCase):
+    def test_january_estimate_uses_local_trade_cal(self):
+        self.fetch_trade_cal_range("20250101", "20250131")
+        before = self.counts()
+        report = RequestEstimateReporter().report(root=self.root, scope="low-risk-a-share", start_date="20250101", end_date="20250131")
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(report.report_version, "request-estimate/v1")
+        self.assertEqual(report.planned_trade_cal_requests, 0)
+        self.assertGreater(report.daily_like_requests, 0)
+        self.assertGreater(report.weekly_monthly_requests, 0)
+        self.assertTrue(report.not_a_quota_guarantee)
+        self.assertIn(report.risk_level, {"low", "moderate", "high"})
+
+    def test_missing_trade_cal_range_warns_and_defers_daily_like(self):
+        self.build_pilot()
+        report = RequestEstimateReporter().report(root=self.root, scope="low-risk-a-share", start_date="20250201", end_date="20250228")
+        self.assertEqual(report.planned_trade_cal_requests, 1)
+        self.assertEqual(report.daily_like_requests, 0)
+        self.assertTrue(any("trade_cal range" in warning for warning in report.warnings))
+        self.assertTrue(report.not_a_quota_guarantee)
+
+    def test_cli_json_contract_and_no_side_effects_for_request_estimate(self):
+        self.fetch_trade_cal_range("20250101", "20250131")
+        before = self.counts()
+        result = self.run_cli(
+            "request-estimate",
+            "--scope", "low-risk-a-share",
+            "--start-date", "20250101",
+            "--end-date", "20250131",
+            "--root", str(self.root),
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "estimated_requests_by_api",
+            "estimated_total_requests",
+            "planned_trade_cal_requests",
+            "daily_like_requests",
+            "weekly_monthly_requests",
+            "reference_refresh_requests",
+            "risk_level",
+            "assumptions",
+            "warnings",
+            "not_a_quota_guarantee",
+            "blocking_errors",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "request-estimate/v1")
+        self.assertTrue(payload["not_a_quota_guarantee"])
 
 
 class MirrorBatchBundleTests(PreBackfillOperationsTestCase):
