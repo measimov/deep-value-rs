@@ -465,6 +465,22 @@ class MirrorBatchLedgerResult:
 
 
 @dataclass(frozen=True)
+class MirrorBatchCertificateResult:
+    report_version: str
+    status: str
+    output: str
+    files: list[str]
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class MirrorOperatorChecklistResult:
     report_version: str
     root: str
@@ -2493,6 +2509,138 @@ class MirrorBatchLedgerReporter:
             next_month = start.replace(month=start.month + 1)
         end = next_month - timedelta(days=1)
         return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+
+
+class MirrorBatchCertificateReporter:
+    REPORT_VERSION = "mirror-batch-certificate/v1"
+    CERTIFICATE_VERSION = "mirror-batch-certificate/v1"
+    FILES = ["certificate.json", "certificate.md"]
+
+    def create(
+        self,
+        *,
+        root: Path | str,
+        backup: Path | str,
+        scope: str,
+        start_date: str,
+        end_date: str,
+        output: Path | str,
+        overwrite: bool = False,
+    ) -> MirrorBatchCertificateResult:
+        ensure_mirror_scope(scope)
+        mirror_root = _resolve_path(Path(root))
+        backup_root = _resolve_path(Path(backup))
+        output_root = _resolve_path(Path(output))
+        warnings = ["mirror-batch-certificate writes only the requested output bundle and does not execute commands"]
+        blocking_errors = self._preflight(mirror_root, backup_root, output_root, overwrite)
+        if blocking_errors:
+            return self._result(output_root, "blocked", [], warnings, blocking_errors)
+
+        try:
+            certificate = self._certificate(mirror_root, backup_root, scope, start_date, end_date)
+        except Exception as exc:
+            return self._result(output_root, "blocked", [], warnings, [f"certificate source report failed: {exc}"])
+
+        if output_root.exists() and overwrite:
+            if output_root.is_dir():
+                shutil.rmtree(output_root)
+            else:
+                output_root.unlink()
+        output_root.mkdir(parents=True, exist_ok=False)
+        (output_root / "certificate.json").write_text(json.dumps(certificate, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        (output_root / "certificate.md").write_text(self._markdown(certificate), encoding="utf-8")
+        return self._result(output_root, "created", self.FILES, warnings, [])
+
+    def _preflight(self, mirror_root: Path, backup_root: Path, output_root: Path, overwrite: bool) -> list[str]:
+        blocking_errors: list[str] = []
+        catalog_path = mirror_root / "_catalog" / "catalog.sqlite"
+        if not catalog_path.exists():
+            blocking_errors.append(f"catalog not found: {catalog_path}; run init-catalog first")
+        if not backup_root.exists():
+            blocking_errors.append(f"backup not found: {backup_root}")
+        if output_root == mirror_root or _is_relative_to(output_root, mirror_root):
+            blocking_errors.append("output path must not be inside mirror root")
+        if output_root == backup_root or _is_relative_to(output_root, backup_root):
+            blocking_errors.append("output path must not be inside backup root")
+        if output_root.exists() and not overwrite:
+            blocking_errors.append("output path already exists; pass --overwrite to replace it")
+        return blocking_errors
+
+    def _certificate(self, root: Path, backup: Path, scope: str, start_date: str, end_date: str) -> dict[str, Any]:
+        catalog = CatalogStore(root, read_only=True)
+        coverage = MirrorCoverageMatrixReporter().report(root=root, scope=scope, start_date=start_date, end_date=end_date)
+        snapshots = [
+            {
+                "api_name": item.get("api_name"),
+                "snapshot_id": item.get("snapshot_id"),
+                "status": item.get("status"),
+                "created_at": item.get("created_at"),
+                "file_count": item.get("file_count"),
+                "record_count": item.get("record_count"),
+            }
+            for item in catalog.latest_snapshots()
+        ]
+        backup_status = BackupStatusReporter().report(backup=backup)
+        validation_status = self._validation_status(catalog)
+        status = MirrorStatusReporter().report(root=root, backup=backup, scope=scope)
+        return {
+            "certificate_version": self.CERTIFICATE_VERSION,
+            "root": str(root),
+            "backup": str(backup),
+            "scope": scope,
+            "date_range": {"start_date": start_date, "end_date": end_date},
+            "coverage_summary": coverage.items,
+            "snapshot_summary": snapshots,
+            "validation_status": validation_status,
+            "backup_status": "valid" if backup_status.manifest_valid and not backup_status.possible_mutation else "blocked",
+            "restore_check_status": backup_status.restore_check_status,
+            "token_plaintext_found": status.token_plaintext_found,
+            "generated_at": now_utc(),
+            "limitations": [
+                "certificate is generated from local catalog and backup reports",
+                "financial, object/text, intraday, compaction, PostgreSQL, and full mirror automation remain out of scope",
+                "certificate does not execute validation, backup, restore, mirror-run, fetch, or backfill commands",
+            ],
+            "not_a_full_mirror": True,
+        }
+
+    def _validation_status(self, catalog: CatalogStore) -> dict[str, Any]:
+        with catalog.connect() as conn:
+            rows = conn.execute("select status, count(*) as count from validation_runs group by status").fetchall()
+        counts = {row["status"]: row["count"] for row in rows}
+        return {
+            "counts": counts,
+            "failed": int(counts.get("failed") or 0),
+            "status": "failed" if counts.get("failed") else "succeeded" if counts else "not_recorded",
+        }
+
+    def _markdown(self, certificate: dict[str, Any]) -> str:
+        date_range = certificate["date_range"]
+        return "\n".join(
+            [
+                "# Tushare Mirror Batch Certificate",
+                "",
+                f"Scope: {certificate['scope']}",
+                f"Date range: {date_range['start_date']}-{date_range['end_date']}",
+                f"Restore-check status: {certificate['restore_check_status']}",
+                f"Token plaintext found: {certificate['token_plaintext_found']}",
+                f"Not a full mirror: {certificate['not_a_full_mirror']}",
+                "",
+                "Limitations:",
+                *[f"- {item}" for item in certificate["limitations"]],
+                "",
+            ]
+        )
+
+    def _result(self, output: Path, status: str, files: list[str], warnings: list[str], blocking_errors: list[str]) -> MirrorBatchCertificateResult:
+        return MirrorBatchCertificateResult(
+            report_version=self.REPORT_VERSION,
+            status=status,
+            output=str(output),
+            files=files,
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
 
 
 class MirrorOperatorChecklistReporter:

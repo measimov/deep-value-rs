@@ -15,7 +15,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchLedgerReporter, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
+from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -1048,6 +1048,92 @@ class MirrorBatchLedgerTests(PreBackfillOperationsTestCase):
             self.assertIn(key, payload)
         self.assertEqual(payload["report_version"], "mirror-batch-ledger/v1")
         self.assertEqual(payload["ledger_status"], "passed")
+
+
+class MirrorBatchCertificateTests(PreBackfillOperationsTestCase):
+    def prepare_completed_january(self):
+        self.build_pilot()
+        self.cover_january_matrix()
+        backup = self.base / "certificate-backup"
+        plan = BackupPlanner(self.root, self.catalog).plan(backup)
+        BackupExecutor(self.root, self.catalog).backup(plan)
+        return backup
+
+    def test_certificate_generated_outside_roots_and_catalog_unchanged(self):
+        backup = self.prepare_completed_january()
+        output = self.base / "cert-202501"
+        before = self.counts()
+        result = MirrorBatchCertificateReporter().create(
+            root=self.root,
+            backup=backup,
+            scope="low-risk-a-share",
+            start_date="20250101",
+            end_date="20250131",
+            output=output,
+        )
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(result.status, "created")
+        self.assertEqual(set(result.files), {"certificate.json", "certificate.md"})
+        self.assertTrue((output / "certificate.json").exists())
+        self.assertTrue((output / "certificate.md").exists())
+        certificate = json.loads((output / "certificate.json").read_text())
+        self.assertEqual(certificate["certificate_version"], "mirror-batch-certificate/v1")
+        self.assertEqual(certificate["scope"], "low-risk-a-share")
+        self.assertEqual(certificate["date_range"], {"start_date": "20250101", "end_date": "20250131"})
+        self.assertEqual(certificate["backup_status"], "valid")
+        self.assertEqual(certificate["restore_check_status"], "succeeded")
+        self.assertFalse(certificate["token_plaintext_found"])
+        self.assertTrue(certificate["not_a_full_mirror"])
+
+    def test_certificate_output_inside_root_is_blocked(self):
+        output = self.root / "cert"
+        result = MirrorBatchCertificateReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="low-risk-a-share",
+            start_date="20250101",
+            end_date="20250131",
+            output=output,
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertTrue(any("inside mirror root" in error for error in result.blocking_errors))
+        self.assertFalse(output.exists())
+
+    def test_certificate_missing_backup_blocks_without_output(self):
+        output = self.base / "missing-backup-cert"
+        result = MirrorBatchCertificateReporter().create(
+            root=self.root,
+            backup=self.base / "missing-backup",
+            scope="low-risk-a-share",
+            start_date="20250101",
+            end_date="20250131",
+            output=output,
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertTrue(any("backup not found" in error for error in result.blocking_errors))
+        self.assertFalse(output.exists())
+
+    def test_cli_json_contract_and_no_side_effects_for_certificate(self):
+        backup = self.prepare_completed_january()
+        output = self.base / "cli-cert"
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-batch-certificate",
+            "--root", str(self.root),
+            "--backup", str(backup),
+            "--scope", "low-risk-a-share",
+            "--start-date", "20250101",
+            "--end-date", "20250131",
+            "--output", str(output),
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in ["report_version", "status", "output", "files", "warnings", "blocking_errors"]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "mirror-batch-certificate/v1")
+        self.assertEqual(payload["status"], "created")
+        self.assertTrue((output / "certificate.json").exists())
 
 
 class MirrorOperatorChecklistTests(PreBackfillOperationsTestCase):

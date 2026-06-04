@@ -33,7 +33,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchLedgerReporter, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, init_catalog_if_requested
+from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, init_catalog_if_requested
 from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
@@ -744,6 +744,23 @@ def cmd_mirror_batch_ledger(args) -> int:
     else:
         _print_key_values(result.summary())
     return 1 if result.ledger_status == "blocked" else 0
+
+
+def cmd_mirror_batch_certificate(args) -> int:
+    result = MirrorBatchCertificateReporter().create(
+        root=args.mirror_root_arg,
+        backup=args.backup,
+        scope=args.scope,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        output=args.output,
+        overwrite=args.overwrite,
+    )
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+    return 1 if result.status == "blocked" else 0
 
 
 def cmd_mirror_operator_checklist(args) -> int:
@@ -1615,6 +1632,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--scope', default='low-risk-a-share')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_batch_ledger)
+
+    p = sub.add_parser('mirror-batch-certificate', description='Read-only/file-output batch completion certificate; writes only --output outside mirror and backup roots.')
+    p.add_argument('--root', dest='mirror_root_arg', required=True)
+    p.add_argument('--backup', required=True)
+    p.add_argument('--scope', default='low-risk-a-share')
+    p.add_argument('--start-date', required=True)
+    p.add_argument('--end-date', required=True)
+    p.add_argument('--output', required=True)
+    p.add_argument('--overwrite', action='store_true')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_batch_certificate)
 
     p = sub.add_parser('mirror-operator-checklist', description='Read-only operator checklist before any user-confirmed controlled batch execution; does not make real requests or write catalog state.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
