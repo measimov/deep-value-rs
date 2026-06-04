@@ -10,7 +10,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from .api_infra import ApiInfrastructureReadinessReporter
 from .backup import BackupExecutor, BackupInspector, BackupPlanner, RestoreChecker
@@ -547,6 +547,32 @@ class MirrorFailureDrillResult:
     commands_not_to_run: list[str]
     recovery_steps: list[str]
     escalation_notes: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
+class PathDiagnosticsResult:
+    report_version: str
+    status: str
+    root: str
+    backup: str
+    root_exists: bool
+    backup_exists: bool
+    root_size: int
+    backup_size: int
+    root_file_count: int
+    backup_file_count: int
+    parent_free_bytes: dict[str, int | None]
+    backup_inside_root: bool
+    root_inside_backup: bool
+    same_device: bool | None
+    warnings: list[str]
+    blocking_errors: list[str]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -3138,6 +3164,97 @@ class MirrorFailureDrillReporter:
             },
         }
         return scenarios[scenario]
+
+
+class PathDiagnosticsReporter:
+    REPORT_VERSION = "path-diagnostics/v1"
+
+    def report(self, *, root: Path | str, backup: Path | str) -> PathDiagnosticsResult:
+        mirror_root = _resolve_path(Path(root))
+        backup_root = _resolve_path(Path(backup))
+        warnings: list[str] = []
+        blocking_errors: list[str] = []
+
+        root_exists = mirror_root.exists()
+        backup_exists = backup_root.exists()
+        if not root_exists:
+            blocking_errors.append(f"root path does not exist: {mirror_root}")
+        if not backup_exists:
+            blocking_errors.append(f"backup path does not exist: {backup_root}")
+
+        root_size, root_file_count, root_warnings = self._tree_stats(mirror_root)
+        backup_size, backup_file_count, backup_warnings = self._tree_stats(backup_root)
+        warnings.extend(root_warnings)
+        warnings.extend(backup_warnings)
+
+        root_free, root_free_warning = _disk_free(mirror_root)
+        backup_free, backup_free_warning = _disk_free(backup_root)
+        if root_free_warning:
+            warnings.append(f"root parent free space unavailable: {root_free_warning}")
+        if backup_free_warning:
+            warnings.append(f"backup parent free space unavailable: {backup_free_warning}")
+
+        backup_inside_root = backup_root == mirror_root or _is_relative_to(backup_root, mirror_root)
+        root_inside_backup = mirror_root == backup_root or _is_relative_to(mirror_root, backup_root)
+        if backup_inside_root:
+            blocking_errors.append("backup path is inside mirror root")
+        if root_inside_backup:
+            blocking_errors.append("mirror root is inside backup path")
+
+        same_device, same_device_warning = self._same_device(mirror_root, backup_root)
+        if same_device_warning:
+            warnings.append(same_device_warning)
+
+        status = "blocked" if blocking_errors else "warning" if warnings else "passed"
+        return PathDiagnosticsResult(
+            report_version=self.REPORT_VERSION,
+            status=status,
+            root=str(mirror_root),
+            backup=str(backup_root),
+            root_exists=root_exists,
+            backup_exists=backup_exists,
+            root_size=root_size,
+            backup_size=backup_size,
+            root_file_count=root_file_count,
+            backup_file_count=backup_file_count,
+            parent_free_bytes={"root_parent": root_free, "backup_parent": backup_free},
+            backup_inside_root=backup_inside_root,
+            root_inside_backup=root_inside_backup,
+            same_device=same_device,
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _tree_stats(self, path: Path) -> tuple[int, int, list[str]]:
+        if not path.exists():
+            return 0, 0, []
+        size = 0
+        count = 0
+        warnings: list[str] = []
+        files: Iterable[Path]
+        if path.is_file():
+            files = [path]
+        else:
+            files = (item for item in path.rglob("*") if item.is_file())
+        for item in files:
+            try:
+                stat = item.stat()
+            except OSError as exc:
+                warnings.append(f"could not stat file {item}: {exc}")
+                continue
+            size += int(stat.st_size)
+            count += 1
+        return size, count, warnings
+
+    def _same_device(self, root: Path, backup: Path) -> tuple[bool | None, str | None]:
+        root_parent = _nearest_existing_parent(root)
+        backup_parent = _nearest_existing_parent(backup)
+        if root_parent is None or backup_parent is None:
+            return None, "same_device unavailable because one or both paths have no existing parent"
+        try:
+            return root_parent.stat().st_dev == backup_parent.stat().st_dev, None
+        except OSError as exc:
+            return None, f"same_device unavailable: {exc}"
 
 
 class SchemaStatusReporter:

@@ -15,7 +15,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
+from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -1331,6 +1331,74 @@ class MirrorFailureDrillTests(PreBackfillOperationsTestCase):
         self.assertEqual(payload["scenario"], "rate_limited")
         self.assertTrue(payload["retry_allowed"])
         self.assertFalse(payload["continue_allowed"])
+
+
+class PathDiagnosticsTests(PreBackfillOperationsTestCase):
+    def test_normal_paths_report_sizes_and_are_read_only(self):
+        self.build_pilot()
+        before = self.guardrail_counts()
+        report = PathDiagnosticsReporter().report(root=self.root, backup=self.backup)
+        self.assertEqual(self.guardrail_counts(), before)
+        self.assertEqual(report.report_version, "path-diagnostics/v1")
+        self.assertEqual(report.status, "passed")
+        self.assertTrue(report.root_exists)
+        self.assertTrue(report.backup_exists)
+        self.assertGreater(report.root_size, 0)
+        self.assertGreater(report.backup_size, 0)
+        self.assertGreater(report.root_file_count, 0)
+        self.assertGreater(report.backup_file_count, 0)
+        self.assertFalse(report.backup_inside_root)
+        self.assertFalse(report.root_inside_backup)
+        self.assertIn("root_parent", report.parent_free_bytes)
+        self.assertIn("backup_parent", report.parent_free_bytes)
+
+    def test_backup_inside_root_blocks(self):
+        nested_backup = self.root / "nested-backup"
+        nested_backup.mkdir(parents=True)
+        before = self.counts()
+        report = PathDiagnosticsReporter().report(root=self.root, backup=nested_backup)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(report.status, "blocked")
+        self.assertTrue(report.backup_inside_root)
+        self.assertTrue(any("inside mirror root" in error for error in report.blocking_errors))
+
+    def test_missing_paths_are_reported_without_creation(self):
+        missing_root = self.base / "missing-root"
+        missing_backup = self.base / "missing-backup"
+        report = PathDiagnosticsReporter().report(root=missing_root, backup=missing_backup)
+        self.assertEqual(report.status, "blocked")
+        self.assertFalse(report.root_exists)
+        self.assertFalse(report.backup_exists)
+        self.assertFalse(missing_root.exists())
+        self.assertFalse(missing_backup.exists())
+        self.assertEqual(report.root_size, 0)
+        self.assertEqual(report.backup_size, 0)
+
+    def test_cli_json_contract_and_no_side_effects_for_path_diagnostics(self):
+        self.build_pilot()
+        before = self.guardrail_counts()
+        result = self.run_cli("path-diagnostics", "--root", str(self.root), "--backup", str(self.backup), "--json")
+        self.assertEqual(self.guardrail_counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "status",
+            "root_exists",
+            "backup_exists",
+            "root_size",
+            "backup_size",
+            "root_file_count",
+            "backup_file_count",
+            "parent_free_bytes",
+            "backup_inside_root",
+            "root_inside_backup",
+            "same_device",
+            "warnings",
+            "blocking_errors",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "path-diagnostics/v1")
+        self.assertEqual(payload["status"], "passed")
 
 
 class SchemaStatusReportTests(PreBackfillOperationsTestCase):
