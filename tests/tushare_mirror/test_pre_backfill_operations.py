@@ -15,7 +15,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, TokenHygieneScanner
+from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, MonthlyPromotionChecklistReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, TokenHygieneScanner
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -1471,6 +1471,119 @@ class TokenHygieneScannerTests(PreBackfillOperationsTestCase):
             self.assertIn(key, payload)
         self.assertEqual(payload["report_version"], "token-hygiene/v1")
         self.assertFalse(payload["token_plaintext_found"])
+
+
+class MonthlyPromotionChecklistTests(PreBackfillOperationsTestCase):
+    def promotion_backup(self, name: str = "promotion-backup") -> Path:
+        backup = self.base / name
+        plan = BackupPlanner(self.root, self.catalog).plan(backup)
+        BackupExecutor(self.root, self.catalog).backup(plan)
+        return backup
+
+    def prepare_ready_promotion(self) -> Path:
+        self.build_pilot()
+        self.cover_january_matrix()
+        self.fetch_trade_cal_range("20250201", "20250228")
+        return self.promotion_backup()
+
+    def prepare_completed_source_without_next_plan(self) -> Path:
+        self.build_pilot()
+        self.cover_january_matrix()
+        return self.promotion_backup("source-only-backup")
+
+    def test_ready_promotion_is_read_only(self):
+        backup = self.prepare_ready_promotion()
+        before = self.counts()
+        report = MonthlyPromotionChecklistReporter(token_available=True).report(
+            root=self.root,
+            backup=backup,
+            scope="low-risk-a-share",
+            from_month="202501",
+            to_month="202502",
+        )
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(report.report_version, "monthly-promotion-checklist/v1")
+        self.assertTrue(report.ready_to_promote)
+        self.assertEqual(report.status, "ready")
+        self.assertFalse(report.blocking_errors)
+        self.assertTrue(report.required_user_confirmation)
+        self.assertTrue(report.checks["source_month_coverage_complete"]["passed"])
+        self.assertTrue(report.checks["next_batch_plan_available"]["passed"])
+        self.assertTrue(report.checks["request_estimate_low_or_moderate"]["passed"])
+        self.assertTrue(report.checks["operator_checklist_ready"]["passed"])
+        self.assertIn("USER_CONFIRMATION_REQUIRED", json.dumps(report.next_commands))
+
+    def test_incomplete_source_month_blocks(self):
+        self.build_pilot()
+        self.fetch_trade_cal_range("20250201", "20250228")
+        backup = self.promotion_backup()
+        report = MonthlyPromotionChecklistReporter(token_available=True).report(
+            root=self.root,
+            backup=backup,
+            scope="low-risk-a-share",
+            from_month="202501",
+            to_month="202502",
+        )
+        self.assertFalse(report.ready_to_promote)
+        self.assertTrue(any("source month 202501 coverage is incomplete" in error for error in report.blocking_errors))
+
+    def test_mutated_backup_blocks_promotion(self):
+        backup = self.prepare_ready_promotion()
+        Validator(backup, CatalogStore(backup)).validate_latest_snapshots(record=True)
+        report = MonthlyPromotionChecklistReporter(token_available=True).report(
+            root=self.root,
+            backup=backup,
+            scope="low-risk-a-share",
+            from_month="202501",
+            to_month="202502",
+        )
+        self.assertFalse(report.ready_to_promote)
+        self.assertFalse(report.checks["backup_not_mutated"]["passed"])
+        self.assertTrue(any("modified after backup creation" in error for error in report.blocking_errors))
+
+    def test_missing_next_plan_blocks_with_clear_error(self):
+        backup = self.prepare_completed_source_without_next_plan()
+        report = MonthlyPromotionChecklistReporter(token_available=True).report(
+            root=self.root,
+            backup=backup,
+            scope="low-risk-a-share",
+            from_month="202501",
+            to_month="202502",
+        )
+        self.assertFalse(report.ready_to_promote)
+        self.assertFalse(report.checks["next_batch_plan_available"]["passed"])
+        self.assertTrue(any("next batch plan has" in error for error in report.blocking_errors))
+
+    def test_cli_json_contract_and_no_side_effects_for_monthly_promotion(self):
+        backup = self.prepare_ready_promotion()
+        before = self.counts()
+        result = self.run_cli(
+            "monthly-promotion-checklist",
+            "--root", str(self.root),
+            "--backup", str(backup),
+            "--scope", "low-risk-a-share",
+            "--from-month", "202501",
+            "--to-month", "202502",
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "status",
+            "from_month",
+            "to_month",
+            "ready_to_promote",
+            "checks",
+            "blocking_errors",
+            "warnings",
+            "required_user_confirmation",
+            "next_commands",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "monthly-promotion-checklist/v1")
+        self.assertTrue(payload["ready_to_promote"])
+        self.assertIn("USER_CONFIRMATION_REQUIRED", json.dumps(payload["next_commands"]))
 
 
 class SchemaStatusReportTests(PreBackfillOperationsTestCase):

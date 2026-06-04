@@ -602,6 +602,31 @@ class TokenHygieneResult:
 
 
 @dataclass(frozen=True)
+class MonthlyPromotionChecklistResult:
+    report_version: str
+    status: str
+    root: str
+    backup: str
+    scope: str
+    from_month: str
+    to_month: str
+    from_range: dict[str, str]
+    to_range: dict[str, str]
+    ready_to_promote: bool
+    checks: dict[str, Any]
+    warnings: list[str]
+    blocking_errors: list[str]
+    required_user_confirmation: bool
+    next_commands: list[dict[str, str]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class SchemaStatusResult:
     report_version: str
     root: str
@@ -3461,6 +3486,192 @@ class TokenHygieneScanner:
             warnings=_dedupe_messages(warnings),
             blocking_errors=_dedupe_messages(blocking_errors),
         )
+
+
+class MonthlyPromotionChecklistReporter:
+    REPORT_VERSION = "monthly-promotion-checklist/v1"
+
+    def __init__(self, *, token_available: bool | None = None):
+        self._token_available_override = token_available
+
+    def report(
+        self,
+        *,
+        root: Path | str,
+        backup: Path | str,
+        scope: str,
+        from_month: str,
+        to_month: str,
+        bundle: Path | str | None = None,
+    ) -> MonthlyPromotionChecklistResult:
+        ensure_mirror_scope(scope)
+        mirror_root = _resolve_path(Path(root))
+        backup_root = _resolve_path(Path(backup))
+        from_start, from_end = self._month_range(from_month)
+        to_start, to_end = self._month_range(to_month)
+        warnings: list[str] = ["monthly-promotion-checklist is read-only and does not execute mirror-run or generated commands"]
+        blocking_errors: list[str] = []
+        checks: dict[str, Any] = {}
+
+        coverage = MirrorCoverageMatrixReporter().report(root=mirror_root, scope=scope, start_date=from_start, end_date=from_end)
+        source_complete = bool(coverage.items) and not coverage.blocking_errors and all(item.get("status") == "complete" for item in coverage.items)
+        checks["source_month_coverage_complete"] = {
+            "passed": source_complete,
+            "summary": coverage.items,
+        }
+        warnings.extend(coverage.warnings)
+        blocking_errors.extend(coverage.blocking_errors)
+        if not source_complete:
+            blocking_errors.append(f"source month {from_month} coverage is incomplete")
+
+        backup_status = BackupStatusReporter().report(backup=backup_root)
+        backup_valid = bool(backup_status.manifest_valid and backup_status.restore_check_status == "succeeded")
+        backup_not_mutated = not backup_status.possible_mutation
+        checks["backup_valid"] = {"passed": backup_valid, "report": backup_status.to_dict()}
+        checks["backup_not_mutated"] = {"passed": backup_not_mutated}
+        warnings.extend(backup_status.warnings)
+        if not backup_valid:
+            blocking_errors.append("backup is not valid or restore-check did not succeed")
+        if not backup_not_mutated:
+            blocking_errors.append("backup catalog may have been modified after backup creation")
+        blocking_errors.extend(backup_status.blocking_errors)
+
+        schema_status = SchemaStatusReporter().report(root=mirror_root)
+        schema_clear = not schema_status.blocking_errors and schema_status.incompatible_schema_count == 0 and schema_status.quarantine_count == 0
+        checks["no_schema_quarantine_blockers"] = {"passed": schema_clear, "report": schema_status.to_dict()}
+        warnings.extend(schema_status.warnings)
+        blocking_errors.extend(schema_status.blocking_errors)
+        if not schema_clear:
+            blocking_errors.append("schema or quarantine blockers are present")
+
+        plan_available, plan_report, plan_errors = self._next_plan(mirror_root, scope, to_start, to_end)
+        checks["next_batch_plan_available"] = {"passed": plan_available, "report": plan_report}
+        blocking_errors.extend(plan_errors)
+
+        request_estimate = RequestEstimateReporter().report(root=mirror_root, scope=scope, start_date=to_start, end_date=to_end)
+        request_risk_ok = request_estimate.risk_level in {"low", "moderate"}
+        checks["request_estimate_low_or_moderate"] = {"passed": request_risk_ok, "report": request_estimate.to_dict()}
+        warnings.extend(request_estimate.warnings)
+        blocking_errors.extend(request_estimate.blocking_errors)
+        if not request_risk_ok:
+            blocking_errors.append(f"request estimate risk is {request_estimate.risk_level}")
+
+        checklist = MirrorOperatorChecklistReporter(token_available=self._token_available_override).report(
+            root=mirror_root,
+            backup=backup_root,
+            scope=scope,
+            start_date=to_start,
+            end_date=to_end,
+        )
+        checks["operator_checklist_ready"] = {"passed": checklist.ready, "report": checklist.to_dict()}
+        warnings.extend(checklist.warnings)
+        blocking_errors.extend(checklist.blocking_errors)
+        if not checklist.ready:
+            blocking_errors.append("operator checklist is not ready")
+
+        if bundle is not None:
+            bundle_result = MirrorBatchBundleVerifier().verify(bundle=bundle)
+            checks["bundle_verified"] = {"passed": bundle_result.status == "passed", "report": bundle_result.to_dict()}
+            warnings.extend(bundle_result.warnings)
+            blocking_errors.extend(bundle_result.blocking_errors)
+            if bundle_result.status == "blocked":
+                blocking_errors.append("provided bundle verification is blocked")
+        else:
+            checks["bundle_verified"] = {"passed": None, "report": None}
+            warnings.append("no bundle path provided; verify the February bundle before user confirmation")
+
+        checks["explicit_user_confirmation_required"] = {"passed": True, "marker": "USER_CONFIRMATION_REQUIRED"}
+        next_commands = self._next_commands(mirror_root, backup_root, scope, to_start, to_end, bundle)
+        blocking_errors = _dedupe_messages(blocking_errors)
+        warnings = _dedupe_messages(warnings)
+        ready = not blocking_errors
+        return MonthlyPromotionChecklistResult(
+            report_version=self.REPORT_VERSION,
+            status="ready" if ready else "blocked",
+            root=str(mirror_root),
+            backup=str(backup_root),
+            scope=scope,
+            from_month=from_month,
+            to_month=to_month,
+            from_range={"start_date": from_start, "end_date": from_end},
+            to_range={"start_date": to_start, "end_date": to_end},
+            ready_to_promote=ready,
+            checks=checks,
+            warnings=warnings,
+            blocking_errors=blocking_errors,
+            required_user_confirmation=True,
+            next_commands=next_commands,
+        )
+
+    def _month_range(self, month: str) -> tuple[str, str]:
+        try:
+            start = datetime.strptime(month + "01", "%Y%m%d")
+        except ValueError as exc:
+            raise ValueError(f"month must be YYYYMM: {month}") from exc
+        if start.month == 12:
+            next_month = start.replace(year=start.year + 1, month=1)
+        else:
+            next_month = start.replace(month=start.month + 1)
+        end = next_month - timedelta(days=1)
+        return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+
+    def _next_plan(self, root: Path, scope: str, start_date: str, end_date: str) -> tuple[bool, dict[str, Any] | None, list[str]]:
+        catalog = CatalogStore(root, read_only=True)
+        if not catalog.db_path.exists():
+            return False, None, [f"catalog not found: {catalog.db_path}; run init-catalog first"]
+        try:
+            plan = MirrorBatchPlanner(root, catalog).plan(
+                scope=scope,
+                start_date=start_date,
+                end_date=end_date,
+                calendar_exchange="SSE",
+                max_jobs_per_api=MirrorNextBatchReporter.RECOMMENDED_MAX_JOBS_PER_API,
+            )
+        except Exception as exc:
+            return False, None, [f"next batch plan failed: {exc}"]
+        report = plan.to_dict()
+        if plan.blocked_endpoints:
+            return False, report, [f"next batch plan has {plan.blocked_endpoints} blocked endpoints"]
+        if plan.total_planned_jobs <= 0:
+            return False, report, ["next batch plan has no planned jobs"]
+        return True, report, []
+
+    def _next_commands(self, root: Path, backup: Path, scope: str, start_date: str, end_date: str, bundle: Path | str | None) -> list[dict[str, str]]:
+        output = "/tmp/tushare-mirror-batch-bundle-" + start_date[:6]
+        commands = [
+            {
+                "name": "generate_bundle",
+                "command": (
+                    f"python3 -m tushare_mirror mirror-batch-bundle --root {root} --backup {backup} --scope {scope} "
+                    f"--start-date {start_date} --end-date {end_date} --max-jobs-per-api {MirrorNextBatchReporter.RECOMMENDED_MAX_JOBS_PER_API} --output {output} --json"
+                ),
+            },
+        ]
+        verify_target = str(bundle) if bundle is not None else output
+        commands.extend(
+            [
+                {"name": "verify_bundle", "command": f"python3 -m tushare_mirror mirror-batch-bundle-verify --bundle {verify_target} --json"},
+                {"name": "command_safety_check", "command": f"python3 -m tushare_mirror command-safety-check --file {verify_target}/commands.sh --json"},
+                {"name": "rehearse", "command": f"python3 -m tushare_mirror mirror-batch-rehearse --root {root} --backup {backup} --bundle {verify_target} --json"},
+                {
+                    "name": "operator_checklist",
+                    "command": (
+                        f"python3 -m tushare_mirror mirror-operator-checklist --root {root} --backup {backup} --scope {scope} "
+                        f"--start-date {start_date} --end-date {end_date} --json"
+                    ),
+                },
+                {
+                    "name": "user_confirmation_required_execute",
+                    "command": (
+                        "USER_CONFIRMATION_REQUIRED: "
+                        f"python3 -m tushare_mirror mirror-run --root {root} --scope {scope} "
+                        f"--mode pilot --start-date {start_date} --end-date {end_date} "
+                        f"--max-jobs-per-api {MirrorNextBatchReporter.RECOMMENDED_MAX_JOBS_PER_API} --backup-target {backup} --execute"
+                    ),
+                },
+            ]
+        )
+        return commands
 
 
 class SchemaStatusReporter:
