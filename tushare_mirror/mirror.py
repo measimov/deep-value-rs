@@ -627,6 +627,30 @@ class MonthlyPromotionChecklistResult:
 
 
 @dataclass(frozen=True)
+class MirrorOpsReportResult:
+    report_version: str
+    overall_status: str
+    ready_for_next_user_confirmed_batch: bool
+    root: str
+    backup: str
+    scope: str
+    start_date: str
+    end_date: str
+    next_start_date: str
+    next_end_date: str
+    sections: dict[str, Any]
+    warnings: list[str]
+    blocking_errors: list[str]
+    recommended_next_action: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class SchemaStatusResult:
     report_version: str
     root: str
@@ -3672,6 +3696,116 @@ class MonthlyPromotionChecklistReporter:
             ]
         )
         return commands
+
+
+class MirrorOpsReportReporter:
+    REPORT_VERSION = "mirror-ops-report/v1"
+
+    def __init__(self, *, token_available: bool | None = None):
+        self._token_available_override = token_available
+
+    def report(
+        self,
+        *,
+        root: Path | str,
+        backup: Path | str,
+        scope: str,
+        start_date: str,
+        end_date: str,
+        next_start_date: str,
+        next_end_date: str,
+    ) -> MirrorOpsReportResult:
+        ensure_mirror_scope(scope)
+        mirror_root = _resolve_path(Path(root))
+        backup_root = _resolve_path(Path(backup))
+        warnings: list[str] = ["mirror-ops-report is read-only and does not execute generated commands"]
+        blocking_errors: list[str] = []
+        sections: dict[str, Any] = {}
+
+        self._add_section(sections, warnings, blocking_errors, "mirror_status", MirrorStatusReporter().report(root=mirror_root, backup=backup_root, scope=scope).to_dict())
+        self._add_section(sections, warnings, blocking_errors, "mirror_audit", MirrorAuditReporter().report(root=mirror_root, backup=backup_root, scope=scope).to_dict())
+        self._add_section(sections, warnings, blocking_errors, "mirror_next_batch", MirrorNextBatchReporter().report(root=mirror_root, scope=scope).to_dict())
+        self._add_section(sections, warnings, blocking_errors, "backup_status", BackupStatusReporter().report(backup=backup_root).to_dict())
+        self._add_section(sections, warnings, blocking_errors, "schema_status", SchemaStatusReporter().report(root=mirror_root).to_dict())
+        self._add_section(sections, warnings, blocking_errors, "coverage_matrix", MirrorCoverageMatrixReporter().report(root=mirror_root, scope=scope, start_date=start_date, end_date=end_date).to_dict())
+        self._add_section(sections, warnings, blocking_errors, "request_estimate", RequestEstimateReporter().report(root=mirror_root, scope=scope, start_date=next_start_date, end_date=next_end_date).to_dict())
+        self._add_section(
+            sections,
+            warnings,
+            blocking_errors,
+            "operator_checklist",
+            MirrorOperatorChecklistReporter(token_available=self._token_available_override).report(
+                root=mirror_root,
+                backup=backup_root,
+                scope=scope,
+                start_date=next_start_date,
+                end_date=next_end_date,
+            ).to_dict(),
+        )
+        self._add_section(sections, warnings, blocking_errors, "stop_policy", StopPolicyReporter().report(scope=scope).to_dict())
+        self._add_section(sections, warnings, blocking_errors, "path_diagnostics", PathDiagnosticsReporter().report(root=mirror_root, backup=backup_root).to_dict())
+        token_root = TokenHygieneScanner().scan(path=mirror_root)
+        token_backup = TokenHygieneScanner().scan(path=backup_root)
+        token_section = {
+            "root": token_root.to_dict(),
+            "backup": token_backup.to_dict(),
+            "token_plaintext_found": token_root.token_plaintext_found or token_backup.token_plaintext_found,
+            "blocking_errors": [*token_root.blocking_errors, *token_backup.blocking_errors],
+            "warnings": [*token_root.warnings, *token_backup.warnings],
+        }
+        self._add_section(sections, warnings, blocking_errors, "token_hygiene", token_section)
+        self._add_section(
+            sections,
+            warnings,
+            blocking_errors,
+            "promotion_checklist",
+            MonthlyPromotionChecklistReporter(token_available=self._token_available_override).report(
+                root=mirror_root,
+                backup=backup_root,
+                scope=scope,
+                from_month=start_date[:6],
+                to_month=next_start_date[:6],
+            ).to_dict(),
+        )
+
+        warnings = _dedupe_messages(warnings)
+        blocking_errors = _dedupe_messages(blocking_errors)
+        ready = not blocking_errors
+        return MirrorOpsReportResult(
+            report_version=self.REPORT_VERSION,
+            overall_status="ready" if ready else "blocked",
+            ready_for_next_user_confirmed_batch=ready,
+            root=str(mirror_root),
+            backup=str(backup_root),
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            next_start_date=next_start_date,
+            next_end_date=next_end_date,
+            sections=sections,
+            warnings=warnings,
+            blocking_errors=blocking_errors,
+            recommended_next_action=self._recommended_next_action(ready),
+        )
+
+    def _add_section(
+        self,
+        sections: dict[str, Any],
+        warnings: list[str],
+        blocking_errors: list[str],
+        name: str,
+        payload: dict[str, Any],
+    ) -> None:
+        sections[name] = payload
+        for warning in payload.get("warnings") or []:
+            warnings.append(f"{name}: {warning}")
+        for error in payload.get("blocking_errors") or []:
+            blocking_errors.append(f"{name}: {error}")
+
+    def _recommended_next_action(self, ready: bool) -> str:
+        if not ready:
+            return "resolve blocking errors, regenerate or verify the February bundle, and rerun mirror-ops-report before seeking user confirmation"
+        return "review bundle verification, command safety, rehearsal, and operator checklist; only then request explicit user confirmation for mirror-run --execute"
 
 
 class SchemaStatusReporter:

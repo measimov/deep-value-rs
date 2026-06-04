@@ -15,7 +15,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, MonthlyPromotionChecklistReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, TokenHygieneScanner
+from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOpsReportReporter, MirrorOrchestrator, MirrorStatusReporter, MonthlyPromotionChecklistReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, TokenHygieneScanner
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -1584,6 +1584,92 @@ class MonthlyPromotionChecklistTests(PreBackfillOperationsTestCase):
         self.assertEqual(payload["report_version"], "monthly-promotion-checklist/v1")
         self.assertTrue(payload["ready_to_promote"])
         self.assertIn("USER_CONFIRMATION_REQUIRED", json.dumps(payload["next_commands"]))
+
+
+class MirrorOpsReportTests(PreBackfillOperationsTestCase):
+    def prepare_ready_ops(self) -> Path:
+        self.build_pilot()
+        self.cover_january_matrix()
+        self.fetch_trade_cal_range("20250201", "20250228")
+        backup = self.base / "ops-backup"
+        plan = BackupPlanner(self.root, self.catalog).plan(backup)
+        BackupExecutor(self.root, self.catalog).backup(plan)
+        return backup
+
+    def report(self, backup: Path):
+        return MirrorOpsReportReporter(token_available=True).report(
+            root=self.root,
+            backup=backup,
+            scope="low-risk-a-share",
+            start_date="20250101",
+            end_date="20250131",
+            next_start_date="20250201",
+            next_end_date="20250228",
+        )
+
+    def test_aggregate_healthy_fake_mirror_is_read_only(self):
+        backup = self.prepare_ready_ops()
+        before = self.counts()
+        report = self.report(backup)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(report.report_version, "mirror-ops-report/v1")
+        self.assertEqual(report.overall_status, "ready")
+        self.assertTrue(report.ready_for_next_user_confirmed_batch)
+        self.assertFalse(report.blocking_errors)
+        for section in [
+            "mirror_status",
+            "mirror_audit",
+            "mirror_next_batch",
+            "backup_status",
+            "schema_status",
+            "coverage_matrix",
+            "request_estimate",
+            "operator_checklist",
+            "stop_policy",
+            "path_diagnostics",
+            "token_hygiene",
+            "promotion_checklist",
+        ]:
+            self.assertIn(section, report.sections)
+        self.assertIn("mirror-run --execute", report.recommended_next_action)
+
+    def test_blocking_section_propagates(self):
+        backup = self.prepare_ready_ops()
+        Validator(backup, CatalogStore(backup)).validate_latest_snapshots(record=True)
+        report = self.report(backup)
+        self.assertEqual(report.overall_status, "blocked")
+        self.assertFalse(report.ready_for_next_user_confirmed_batch)
+        self.assertTrue(any("backup_status" in error or "promotion_checklist" in error for error in report.blocking_errors))
+
+    def test_cli_json_contract_and_no_side_effects_for_ops_report(self):
+        backup = self.prepare_ready_ops()
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-ops-report",
+            "--root", str(self.root),
+            "--backup", str(backup),
+            "--scope", "low-risk-a-share",
+            "--start-date", "20250101",
+            "--end-date", "20250131",
+            "--next-start-date", "20250201",
+            "--next-end-date", "20250228",
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "overall_status",
+            "ready_for_next_user_confirmed_batch",
+            "sections",
+            "warnings",
+            "blocking_errors",
+            "recommended_next_action",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "mirror-ops-report/v1")
+        self.assertEqual(payload["overall_status"], "ready")
+        self.assertTrue(payload["ready_for_next_user_confirmed_batch"])
 
 
 class SchemaStatusReportTests(PreBackfillOperationsTestCase):
