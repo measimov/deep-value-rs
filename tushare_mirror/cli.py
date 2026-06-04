@@ -33,7 +33,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import BackupStatusReporter, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchPlanner, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, init_catalog_if_requested
+from .mirror import BackupStatusReporter, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchPlanner, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, init_catalog_if_requested
 from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
@@ -708,6 +708,15 @@ def cmd_mirror_batch_bundle(args) -> int:
     else:
         _print_key_values(result.summary())
     return 1 if result.blocking_errors else 0
+
+
+def cmd_mirror_batch_bundle_verify(args) -> int:
+    result = MirrorBatchBundleVerifier().verify(bundle=args.bundle)
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+    return 1 if result.status == "blocked" else 0
 
 
 def cmd_mirror_operator_checklist(args) -> int:
@@ -1556,6 +1565,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--overwrite', action='store_true')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_batch_bundle)
+
+    p = sub.add_parser('mirror-batch-bundle-verify', description='Read-only batch bundle verification; checks manifest, hashes, command guards, and token hygiene without executing commands.')
+    p.add_argument('--bundle', required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_batch_bundle_verify)
 
     p = sub.add_parser('mirror-operator-checklist', description='Read-only operator checklist before any user-confirmed controlled batch execution; does not make real requests or write catalog state.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)

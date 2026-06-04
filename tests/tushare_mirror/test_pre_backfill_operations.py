@@ -15,7 +15,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import BackupStatusReporter, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
+from tushare_mirror.mirror import BackupStatusReporter, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -727,6 +727,105 @@ class MirrorBatchBundleTests(PreBackfillOperationsTestCase):
         self.assertEqual(payload["commands_execute_guard"], "USER_CONFIRMATION_REQUIRED")
         self.assertTrue((output / "commands.sh").exists())
         self.assertTrue((output / "bundle_manifest.json").exists())
+
+
+class MirrorBatchBundleVerifyTests(PreBackfillOperationsTestCase):
+    def create_bundle(self, output: Path):
+        self.build_pilot()
+        result = MirrorBatchBundleReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="low-risk-a-share",
+            start_date="20250201",
+            end_date="20250228",
+            max_jobs_per_api=20,
+            output=output,
+        )
+        self.assertEqual(result.status, "created")
+
+    def test_valid_bundle_verification_passes_and_is_read_only(self):
+        output = self.base / "verify-bundle"
+        self.create_bundle(output)
+        before = self.counts()
+        result = MirrorBatchBundleVerifier().verify(bundle=output)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(result.report_version, "mirror-batch-bundle-verify/v1")
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(result.file_count, 9)
+        self.assertEqual(result.checked_file_count, 8)
+        self.assertEqual(result.missing_file_count, 0)
+        self.assertEqual(result.checksum_failure_count, 0)
+        self.assertEqual(result.command_guard_status, "passed")
+        self.assertFalse(result.token_plaintext_found)
+        self.assertFalse(result.blocking_errors)
+
+    def test_missing_file_blocks_bundle_verification(self):
+        output = self.base / "missing-file-bundle"
+        self.create_bundle(output)
+        (output / "readiness.json").unlink()
+        result = MirrorBatchBundleVerifier().verify(bundle=output)
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.missing_file_count, 1)
+        self.assertTrue(any("readiness.json" in error for error in result.blocking_errors))
+
+    def test_checksum_mismatch_blocks_bundle_verification(self):
+        output = self.base / "tampered-bundle"
+        self.create_bundle(output)
+        (output / "review.json").write_text("{}\n", encoding="utf-8")
+        result = MirrorBatchBundleVerifier().verify(bundle=output)
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.checksum_failure_count, 1)
+        self.assertTrue(any("review.json" in error for error in result.blocking_errors))
+
+    def test_unguarded_commands_block_bundle_verification(self):
+        output = self.base / "unguarded-bundle"
+        self.create_bundle(output)
+        (output / "commands.sh").write_text(
+            "python3 -m tushare_mirror mirror-run --root /tmp/mirror --scope low-risk-a-share --execute\n",
+            encoding="utf-8",
+        )
+        result = MirrorBatchBundleVerifier().verify(bundle=output)
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.command_guard_status, "blocked")
+        self.assertTrue(any("USER_CONFIRMATION_REQUIRED" in error for error in result.blocking_errors))
+        self.assertTrue(any("unguarded execute" in error for error in result.blocking_errors))
+
+    def test_token_plaintext_fixture_blocks_without_printing_token(self):
+        output = self.base / "token-bundle"
+        self.create_bundle(output)
+        secret = "secret-token-should-not-appear"
+        (output / "README.md").write_text(f"TUSHARE_TOKEN={secret}\n", encoding="utf-8")
+        result = self.run_cli("mirror-batch-bundle-verify", "--bundle", str(output), "--json", token=secret, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertTrue(payload["token_plaintext_found"])
+        self.assertNotIn(secret, result.stdout)
+        self.assertNotIn(secret, result.stderr)
+
+    def test_cli_json_contract_for_bundle_verification(self):
+        output = self.base / "cli-verify-bundle"
+        self.create_bundle(output)
+        before = self.counts()
+        result = self.run_cli("mirror-batch-bundle-verify", "--bundle", str(output), "--json")
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "status",
+            "bundle_id",
+            "file_count",
+            "checked_file_count",
+            "missing_file_count",
+            "checksum_failure_count",
+            "command_guard_status",
+            "token_plaintext_found",
+            "warnings",
+            "blocking_errors",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "mirror-batch-bundle-verify/v1")
+        self.assertEqual(payload["status"], "passed")
 
 
 class MirrorOperatorChecklistTests(PreBackfillOperationsTestCase):

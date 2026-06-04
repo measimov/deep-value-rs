@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import hashlib
+import re
 import shutil
 import sqlite3
 import time
@@ -368,6 +369,28 @@ class MirrorBatchBundleResult:
     overwritten: bool
     files: list[str]
     commands_execute_guard: str
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
+class MirrorBatchBundleVerifyResult:
+    report_version: str
+    status: str
+    bundle: str
+    bundle_id: str | None
+    file_count: int
+    checked_file_count: int
+    missing_file_count: int
+    checksum_failure_count: int
+    command_guard_status: str
+    token_plaintext_found: bool
     warnings: list[str]
     blocking_errors: list[str]
 
@@ -1789,6 +1812,175 @@ class MirrorBatchBundleReporter:
             except OSError:
                 continue
         return False
+
+
+class MirrorBatchBundleVerifier:
+    REPORT_VERSION = "mirror-batch-bundle-verify/v1"
+    TOKEN_PATTERN = re.compile(r"(?i)(?:TUSHARE_TOKEN|token)\s*[:=]\s*['\"]?[A-Za-z0-9][A-Za-z0-9_\-]{10,}")
+    JSON_REPORTS = ["batch_plan.json", "readiness.json", "review.json", "status.json", "audit.json", "stop_policy.json"]
+
+    def verify(self, *, bundle: Path | str) -> MirrorBatchBundleVerifyResult:
+        bundle_root = _resolve_path(Path(bundle))
+        warnings = ["mirror-batch-bundle-verify is read-only and does not execute commands"]
+        blocking_errors: list[str] = []
+        checked_file_count = 0
+        missing_file_count = 0
+        checksum_failure_count = 0
+        command_guard_status = "blocked"
+        bundle_id: str | None = None
+
+        if not bundle_root.exists() or not bundle_root.is_dir():
+            return self._result(bundle_root, None, 0, 0, 0, 0, "blocked", False, warnings, [f"bundle not found: {bundle_root}"])
+
+        file_count = self._file_count(bundle_root)
+        manifest_path = bundle_root / MirrorBatchBundleReporter.MANIFEST_FILE
+        manifest: dict[str, Any] | None = None
+        if not manifest_path.exists():
+            blocking_errors.append("bundle_manifest.json not found")
+        else:
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                blocking_errors.append(f"bundle_manifest.json is invalid JSON: {exc}")
+            else:
+                bundle_id = manifest.get("bundle_id")
+                if manifest.get("manifest_version") != MirrorBatchBundleReporter.MANIFEST_VERSION:
+                    blocking_errors.append(f"unsupported manifest_version: {manifest.get('manifest_version')}")
+
+        if manifest:
+            for item in manifest.get("files") or []:
+                relative_path = str(item.get("relative_path") or "")
+                path = bundle_root / relative_path
+                if item.get("required") and not path.exists():
+                    missing_file_count += 1
+                    blocking_errors.append(f"required bundle file missing: {relative_path}")
+                    continue
+                if not path.exists():
+                    continue
+                checked_file_count += 1
+                expected_size = item.get("size_bytes")
+                expected_sha = item.get("sha256")
+                actual_size = path.stat().st_size
+                actual_sha = self._sha256(path)
+                if expected_size != actual_size or expected_sha != actual_sha:
+                    checksum_failure_count += 1
+                    blocking_errors.append(f"bundle file checksum mismatch: {relative_path}")
+
+        for relative_path in ["README.md", "commands.sh", *self.JSON_REPORTS]:
+            path = bundle_root / relative_path
+            if not path.exists():
+                if relative_path not in {str((item or {}).get("relative_path")) for item in ((manifest or {}).get("files") or [])}:
+                    missing_file_count += 1
+                    blocking_errors.append(f"required bundle file missing: {relative_path}")
+                continue
+            if relative_path.endswith(".json"):
+                try:
+                    json.loads(path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError as exc:
+                    blocking_errors.append(f"{relative_path} is invalid JSON: {exc}")
+
+        commands_path = bundle_root / "commands.sh"
+        command_guard_status = self._command_guard_status(commands_path, warnings, blocking_errors)
+        token_plaintext_found = self._token_plaintext_found(bundle_root)
+        if token_plaintext_found:
+            blocking_errors.append("token-like plaintext found in bundle")
+
+        status = "blocked" if blocking_errors else ("warning" if warnings[1:] or command_guard_status == "warning" else "passed")
+        return self._result(
+            bundle_root,
+            bundle_id,
+            file_count,
+            checked_file_count,
+            missing_file_count,
+            checksum_failure_count,
+            command_guard_status,
+            token_plaintext_found,
+            warnings,
+            blocking_errors,
+            status=status,
+        )
+
+    def _result(
+        self,
+        bundle: Path,
+        bundle_id: str | None,
+        file_count: int,
+        checked_file_count: int,
+        missing_file_count: int,
+        checksum_failure_count: int,
+        command_guard_status: str,
+        token_plaintext_found: bool,
+        warnings: list[str],
+        blocking_errors: list[str],
+        *,
+        status: str | None = None,
+    ) -> MirrorBatchBundleVerifyResult:
+        final_status = status or ("blocked" if blocking_errors else ("warning" if warnings[1:] else "passed"))
+        return MirrorBatchBundleVerifyResult(
+            report_version=self.REPORT_VERSION,
+            status=final_status,
+            bundle=str(bundle),
+            bundle_id=bundle_id,
+            file_count=file_count,
+            checked_file_count=checked_file_count,
+            missing_file_count=missing_file_count,
+            checksum_failure_count=checksum_failure_count,
+            command_guard_status=command_guard_status,
+            token_plaintext_found=token_plaintext_found,
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _file_count(self, bundle_root: Path) -> int:
+        return sum(1 for path in bundle_root.iterdir() if path.is_file())
+
+    def _sha256(self, path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _command_guard_status(self, commands_path: Path, warnings: list[str], blocking_errors: list[str]) -> str:
+        if not commands_path.exists():
+            return "blocked"
+        content = commands_path.read_text(encoding="utf-8", errors="ignore")
+        marker_present = "USER_CONFIRMATION_REQUIRED" in content
+        if not marker_present:
+            blocking_errors.append("commands.sh missing USER_CONFIRMATION_REQUIRED marker")
+        unguarded_execute = []
+        for raw_line in content.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "mirror-run" in stripped and "--execute" in stripped:
+                unguarded_execute.append(stripped)
+            if "backfill" in stripped and "--execute" in stripped:
+                unguarded_execute.append(stripped)
+        if unguarded_execute:
+            blocking_errors.append("commands.sh contains unguarded execute command")
+        if commands_path.stat().st_mode & 0o111:
+            warnings.append("commands.sh is executable; keep bundle command previews non-executable by default")
+            return "warning" if marker_present and not unguarded_execute else "blocked"
+        return "passed" if marker_present and not unguarded_execute else "blocked"
+
+    def _token_plaintext_found(self, bundle_root: Path) -> bool:
+        env_token = os.environ.get("TUSHARE_TOKEN")
+        for path in bundle_root.iterdir():
+            if not path.is_file():
+                continue
+            if path.suffix not in {".json", ".md", ".sh", ".txt", ".yaml", ".yml"}:
+                continue
+            try:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if env_token and env_token in content:
+                return True
+            if self.TOKEN_PATTERN.search(content):
+                return True
+        return False
+
 
 class MirrorOperatorChecklistReporter:
     REPORT_VERSION = "mirror-operator-checklist/v1"
