@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -630,6 +631,7 @@ class MirrorBatchBundleTests(PreBackfillOperationsTestCase):
             "audit.json",
             "stop_policy.json",
             "commands.sh",
+            "bundle_manifest.json",
         }
         self.assertEqual(set(result.files), expected)
         self.assertEqual({path.name for path in output.iterdir()}, expected)
@@ -638,6 +640,28 @@ class MirrorBatchBundleTests(PreBackfillOperationsTestCase):
         commands = (output / "commands.sh").read_text()
         self.assertIn("USER_CONFIRMATION_REQUIRED", commands)
         self.assertIn("# python3 -m tushare_mirror mirror-run", commands)
+        manifest = json.loads((output / "bundle_manifest.json").read_text())
+        self.assertEqual(manifest["manifest_version"], "mirror-batch-bundle-manifest/v1")
+        self.assertEqual(manifest["source_root"], str(self.root.resolve()))
+        self.assertEqual(manifest["backup_root"], str(self.backup.resolve()))
+        self.assertTrue(manifest["requires_user_confirmation"])
+        self.assertTrue(manifest["execute_command_present"])
+        self.assertTrue(manifest["commands_guarded"])
+        self.assertFalse(manifest["token_plaintext_found"])
+        by_file = {item["relative_path"]: item for item in manifest["files"]}
+        self.assertEqual(set(by_file), expected - {"bundle_manifest.json"})
+        for relative_path, item in by_file.items():
+            data = (output / relative_path).read_bytes()
+            self.assertEqual(item["size_bytes"], len(data))
+            self.assertEqual(item["sha256"], hashlib.sha256(data).hexdigest())
+            self.assertTrue(item["required"])
+        by_command = {item["command_name"]: item for item in manifest["commands"]}
+        self.assertFalse(by_command["mirror-batch-plan"]["would_execute_real_requests"])
+        self.assertTrue(by_command["mirror-run"]["would_execute_real_requests"])
+        self.assertTrue(by_command["mirror-run"]["requires_user_confirmation"])
+        self.assertTrue(by_command["mirror-run"]["guarded"])
+        self.assertTrue(by_command["mirror-run"]["allowed_in_bundle"])
+        self.assertNotIn("secret-token-should-not-appear", json.dumps(manifest))
 
     def test_existing_output_refused_without_overwrite(self):
         self.build_pilot()
@@ -702,6 +726,7 @@ class MirrorBatchBundleTests(PreBackfillOperationsTestCase):
         self.assertEqual(payload["status"], "created")
         self.assertEqual(payload["commands_execute_guard"], "USER_CONFIRMATION_REQUIRED")
         self.assertTrue((output / "commands.sh").exists())
+        self.assertTrue((output / "bundle_manifest.json").exists())
 
 
 class MirrorOperatorChecklistTests(PreBackfillOperationsTestCase):

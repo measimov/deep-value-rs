@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import hashlib
 import shutil
 import sqlite3
 import time
@@ -1499,7 +1500,9 @@ class MirrorNextBatchReporter:
 
 class MirrorBatchBundleReporter:
     REPORT_VERSION = "mirror-batch-bundle/v1"
-    BUNDLE_FILES = [
+    MANIFEST_VERSION = "mirror-batch-bundle-manifest/v1"
+    MANIFEST_FILE = "bundle_manifest.json"
+    REPORT_FILES = [
         "README.md",
         "batch_plan.json",
         "readiness.json",
@@ -1509,6 +1512,7 @@ class MirrorBatchBundleReporter:
         "stop_policy.json",
         "commands.sh",
     ]
+    BUNDLE_FILES = [*REPORT_FILES, MANIFEST_FILE]
 
     def create(
         self,
@@ -1569,7 +1573,18 @@ class MirrorBatchBundleReporter:
             self._commands(mirror_root, backup_root, scope, start_date, end_date, max_jobs_per_api),
             encoding="utf-8",
         )
-        commands.chmod(0o755)
+        commands.chmod(0o644)
+        manifest = self._manifest(
+            output_root=output_root,
+            mirror_root=mirror_root,
+            backup_root=backup_root,
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            max_jobs_per_api=max_jobs_per_api,
+            input_reports=payloads,
+        )
+        (output_root / self.MANIFEST_FILE).write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         return self._result(mirror_root, backup_root, output_root, scope, start_date, end_date, max_jobs_per_api, "created", overwrite, self.BUNDLE_FILES, warnings, [])
 
     def _preflight(self, mirror_root: Path, backup_root: Path, output_root: Path, overwrite: bool) -> list[str]:
@@ -1656,6 +1671,124 @@ class MirrorBatchBundleReporter:
                 "",
             ]
         )
+
+    def _manifest(
+        self,
+        *,
+        output_root: Path,
+        mirror_root: Path,
+        backup_root: Path,
+        scope: str,
+        start_date: str,
+        end_date: str,
+        max_jobs_per_api: int,
+        input_reports: dict[str, Any],
+    ) -> dict[str, Any]:
+        commands_path = output_root / "commands.sh"
+        command_text = commands_path.read_text(encoding="utf-8")
+        commands = self._command_manifest_items(command_text)
+        return {
+            "manifest_version": self.MANIFEST_VERSION,
+            "bundle_id": f"{scope}_{start_date}_{end_date}_{max_jobs_per_api}",
+            "created_at": now_utc(),
+            "source_root": str(mirror_root),
+            "backup_root": str(backup_root),
+            "scope": scope,
+            "start_date": start_date,
+            "end_date": end_date,
+            "max_jobs_per_api": max_jobs_per_api,
+            "generated_by": "python3 -m tushare_mirror mirror-batch-bundle",
+            "input_reports": [
+                {
+                    "relative_path": filename,
+                    "report_version": payload.get("report_version") if isinstance(payload, dict) else None,
+                }
+                for filename, payload in sorted(input_reports.items())
+            ],
+            "files": [self._manifest_file_item(output_root, relative_path) for relative_path in self.REPORT_FILES],
+            "commands": commands,
+            "safety_boundaries": [
+                "bundle generation is read-only except for the requested output directory",
+                "commands.sh must not be auto-executed",
+                "mirror-run --execute requires explicit user confirmation",
+                "no real Tushare requests are made during bundle generation",
+            ],
+            "requires_user_confirmation": any(item["requires_user_confirmation"] for item in commands),
+            "execute_command_present": any(item["would_execute_real_requests"] for item in commands),
+            "commands_guarded": all((not item["would_execute_real_requests"]) or item["guarded"] for item in commands),
+            "token_plaintext_found": self._token_plaintext_found(output_root, self.REPORT_FILES),
+        }
+
+    def _manifest_file_item(self, output_root: Path, relative_path: str) -> dict[str, Any]:
+        path = output_root / relative_path
+        return {
+            "relative_path": relative_path,
+            "size_bytes": path.stat().st_size,
+            "sha256": self._sha256(path),
+            "file_kind": self._file_kind(relative_path),
+            "required": True,
+        }
+
+    def _sha256(self, path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _file_kind(self, relative_path: str) -> str:
+        if relative_path.endswith(".json"):
+            return "json_report"
+        if relative_path.endswith(".md"):
+            return "readme"
+        if relative_path.endswith(".sh"):
+            return "command_preview"
+        return "artifact"
+
+    def _command_manifest_items(self, content: str) -> list[dict[str, Any]]:
+        marker_present = "USER_CONFIRMATION_REQUIRED" in content
+        items: list[dict[str, Any]] = []
+        for raw_line in content.splitlines():
+            stripped = raw_line.strip()
+            if "python3 -m tushare_mirror" not in stripped:
+                continue
+            guarded = stripped.startswith("#") or marker_present
+            command_text = stripped.lstrip("#").strip()
+            parts = command_text.split()
+            try:
+                command_name = parts[parts.index("tushare_mirror") + 1]
+            except (ValueError, IndexError):
+                command_name = "unknown"
+            would_execute = (
+                (command_name == "mirror-run" and "--execute" in parts)
+                or (command_name in {"backfill", "backfill-missing"} and "--execute" in parts)
+            )
+            items.append(
+                {
+                    "command_name": command_name,
+                    "command_text": command_text,
+                    "would_execute_real_requests": would_execute,
+                    "requires_user_confirmation": would_execute,
+                    "guarded": guarded,
+                    "allowed_in_bundle": command_name in {"mirror-batch-plan", "mirror-run"} and ((not would_execute) or guarded),
+                }
+            )
+        return items
+
+    def _token_plaintext_found(self, output_root: Path, relative_paths: list[str]) -> bool:
+        token = os.environ.get("TUSHARE_TOKEN")
+        if not token:
+            return False
+        for relative_path in relative_paths:
+            path = output_root / relative_path
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                if token in path.read_text(encoding="utf-8", errors="ignore"):
+                    return True
+            except OSError:
+                continue
+        return False
 
 class MirrorOperatorChecklistReporter:
     REPORT_VERSION = "mirror-operator-checklist/v1"
