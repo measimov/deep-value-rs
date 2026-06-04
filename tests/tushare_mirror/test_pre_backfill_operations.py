@@ -15,7 +15,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import BackupStatusReporter, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
+from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -826,6 +826,85 @@ class MirrorBatchBundleVerifyTests(PreBackfillOperationsTestCase):
             self.assertIn(key, payload)
         self.assertEqual(payload["report_version"], "mirror-batch-bundle-verify/v1")
         self.assertEqual(payload["status"], "passed")
+
+
+class CommandSafetyAnalyzerTests(PreBackfillOperationsTestCase):
+    def write_script(self, name: str, content: str) -> Path:
+        path = self.base / name
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_guarded_mirror_run_is_warning_not_blocked(self):
+        script = self.write_script(
+            "guarded.sh",
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    "set -euo pipefail",
+                    "# USER_CONFIRMATION_REQUIRED: operator must review before execution.",
+                    "# python3 -m tushare_mirror mirror-run --root /tmp/mirror --scope low-risk-a-share --max-jobs-per-api 20 --execute",
+                    "",
+                ]
+            ),
+        )
+        result = CommandSafetyAnalyzer().analyze(file=script)
+        self.assertEqual(result.status, "warning")
+        self.assertEqual(len(result.execute_commands_found), 1)
+        self.assertEqual(result.guarded_execute_commands, result.execute_commands_found)
+        self.assertEqual(result.unguarded_execute_commands, [])
+        self.assertFalse(result.blocking_errors)
+
+    def test_unguarded_mirror_run_is_blocked(self):
+        script = self.write_script(
+            "unguarded.sh",
+            "python3 -m tushare_mirror mirror-run --root /tmp/mirror --scope low-risk-a-share --execute\n",
+        )
+        result = CommandSafetyAnalyzer().analyze(file=script)
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.unguarded_execute_commands, result.execute_commands_found)
+        self.assertTrue(any("unguarded execute" in error for error in result.blocking_errors))
+
+    def test_destructive_rm_rf_is_blocked(self):
+        script = self.write_script("destructive.sh", "rm -rf /mnt/gw/TuShare\n")
+        result = CommandSafetyAnalyzer().analyze(file=script)
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.destructive_commands_found, ["rm -rf /mnt/gw/TuShare"])
+        self.assertTrue(any("destructive" in error for error in result.blocking_errors))
+
+    def test_token_plaintext_blocks_without_printing_token(self):
+        secret = "secret-token-should-not-appear"
+        script = self.write_script("token.sh", f"TUSHARE_TOKEN={secret}\n")
+        result = self.run_cli("command-safety-check", "--file", str(script), "--json", token=secret, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertTrue(payload["token_plaintext_found"])
+        self.assertNotIn(secret, result.stdout)
+        self.assertNotIn(secret, result.stderr)
+
+    def test_cli_json_stable_and_does_not_execute_commands(self):
+        marker = self.base / "should-not-exist"
+        script = self.write_script("no-exec.sh", f"touch {marker}\n")
+        result = self.run_cli("command-safety-check", "--file", str(script), "--json", check=False)
+        self.assertFalse(marker.exists())
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "file",
+            "status",
+            "execute_commands_found",
+            "guarded_execute_commands",
+            "unguarded_execute_commands",
+            "destructive_commands_found",
+            "network_commands_found",
+            "token_plaintext_found",
+            "warnings",
+            "blocking_errors",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "command-safety-check/v1")
+        self.assertTrue(any("unknown high-risk" in error for error in payload["blocking_errors"]))
 
 
 class MirrorOperatorChecklistTests(PreBackfillOperationsTestCase):

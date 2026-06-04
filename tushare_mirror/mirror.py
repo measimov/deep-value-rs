@@ -402,6 +402,27 @@ class MirrorBatchBundleVerifyResult:
 
 
 @dataclass(frozen=True)
+class CommandSafetyCheckResult:
+    report_version: str
+    file: str
+    status: str
+    execute_commands_found: list[str]
+    guarded_execute_commands: list[str]
+    unguarded_execute_commands: list[str]
+    destructive_commands_found: list[str]
+    network_commands_found: list[str]
+    token_plaintext_found: bool
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class MirrorOperatorChecklistResult:
     report_version: str
     root: str
@@ -1980,6 +2001,178 @@ class MirrorBatchBundleVerifier:
             if self.TOKEN_PATTERN.search(content):
                 return True
         return False
+
+
+class CommandSafetyAnalyzer:
+    REPORT_VERSION = "command-safety-check/v1"
+    TOKEN_PATTERN = MirrorBatchBundleVerifier.TOKEN_PATTERN
+
+    def analyze(self, *, file: Path | str) -> CommandSafetyCheckResult:
+        path = _resolve_path(Path(file))
+        warnings = ["command-safety-check is read-only and does not execute command files"]
+        blocking_errors: list[str] = []
+        execute_commands: list[str] = []
+        guarded_execute: list[str] = []
+        unguarded_execute: list[str] = []
+        destructive: list[str] = []
+        network: list[str] = []
+
+        if not path.exists() or not path.is_file():
+            return self._result(path, "blocked", [], [], [], [], [], False, warnings, [f"command file not found: {path}"])
+
+        content = path.read_text(encoding="utf-8", errors="ignore")
+        marker_present = "USER_CONFIRMATION_REQUIRED" in content
+        token_plaintext_found = self._token_plaintext_found(content)
+        if token_plaintext_found:
+            blocking_errors.append("token-like plaintext found in command file")
+
+        for raw_line in content.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#!") or stripped.startswith("set ") or stripped.startswith("echo "):
+                continue
+            command_text = stripped.lstrip("#").strip()
+            is_comment = stripped.startswith("#")
+            if self._is_execute_command(command_text):
+                execute_commands.append(command_text)
+                if is_comment and marker_present:
+                    guarded_execute.append(command_text)
+                else:
+                    unguarded_execute.append(command_text)
+            if self._is_destructive_rm(command_text):
+                destructive.append(command_text)
+            if self._is_network_command(command_text):
+                network.append(command_text)
+            self._detect_path_relationship_risks(command_text, blocking_errors)
+            self._detect_python_fetch_risk(command_text, is_comment, marker_present, blocking_errors)
+            self._detect_unknown_high_risk(command_text, is_comment, blocking_errors)
+
+        if execute_commands:
+            warnings.append("execute command previews were found; explicit user confirmation is required before any execution")
+        if execute_commands and not marker_present:
+            blocking_errors.append("USER_CONFIRMATION_REQUIRED marker missing for execute command preview")
+        if unguarded_execute:
+            blocking_errors.append("unguarded execute command found")
+        if destructive:
+            blocking_errors.append("destructive rm -rf command found")
+        if network:
+            blocking_errors.append("network command or URL found")
+
+        status = "blocked" if blocking_errors else ("warning" if warnings[1:] else "passed")
+        return self._result(path, status, execute_commands, guarded_execute, unguarded_execute, destructive, network, token_plaintext_found, warnings, blocking_errors)
+
+    def _result(
+        self,
+        path: Path,
+        status: str,
+        execute_commands: list[str],
+        guarded_execute: list[str],
+        unguarded_execute: list[str],
+        destructive: list[str],
+        network: list[str],
+        token_plaintext_found: bool,
+        warnings: list[str],
+        blocking_errors: list[str],
+    ) -> CommandSafetyCheckResult:
+        return CommandSafetyCheckResult(
+            report_version=self.REPORT_VERSION,
+            file=str(path),
+            status=status,
+            execute_commands_found=_dedupe_messages(execute_commands),
+            guarded_execute_commands=_dedupe_messages(guarded_execute),
+            unguarded_execute_commands=_dedupe_messages(unguarded_execute),
+            destructive_commands_found=_dedupe_messages(destructive),
+            network_commands_found=_dedupe_messages(network),
+            token_plaintext_found=token_plaintext_found,
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _is_execute_command(self, command_text: str) -> bool:
+        parts = command_text.split()
+        return (
+            ("mirror-run" in parts and "--execute" in parts)
+            or ("backfill" in parts and "--execute" in parts)
+            or ("backfill-missing" in parts and "--execute" in parts)
+        )
+
+    def _is_destructive_rm(self, command_text: str) -> bool:
+        parts = command_text.split()
+        return bool(parts and parts[0] == "rm" and any(flag in {"-rf", "-fr", "-r", "-R"} for flag in parts[1:]))
+
+    def _is_network_command(self, command_text: str) -> bool:
+        parts = command_text.split()
+        return bool(parts and parts[0] in {"curl", "wget"}) or "http://" in command_text or "https://" in command_text
+
+    def _token_plaintext_found(self, content: str) -> bool:
+        env_token = os.environ.get("TUSHARE_TOKEN")
+        return bool((env_token and env_token in content) or self.TOKEN_PATTERN.search(content))
+
+    def _detect_path_relationship_risks(self, command_text: str, blocking_errors: list[str]) -> None:
+        parts = command_text.split()
+        root = self._option_value(parts, "--root")
+        output = self._option_value(parts, "--output")
+        backup = self._option_value(parts, "--backup") or self._option_value(parts, "--backup-target")
+        if root and output:
+            try:
+                root_path = _resolve_path(Path(root))
+                output_path = _resolve_path(Path(output))
+            except OSError:
+                return
+            if output_path == root_path or _is_relative_to(output_path, root_path):
+                blocking_errors.append("output path is inside mirror root")
+        if root and backup:
+            try:
+                root_path = _resolve_path(Path(root))
+                backup_path = _resolve_path(Path(backup))
+            except OSError:
+                return
+            if backup_path == root_path or _is_relative_to(backup_path, root_path):
+                blocking_errors.append("backup path is inside mirror root")
+
+    def _detect_python_fetch_risk(self, command_text: str, is_comment: bool, marker_present: bool, blocking_errors: list[str]) -> None:
+        parts = command_text.split()
+        if not parts:
+            return
+        if parts[0].startswith("python") and "tushare_real_smoke.py" in command_text:
+            blocking_errors.append("python command would run real smoke requests")
+            return
+        if parts[0].startswith("python") and "tushare_mirror" in parts:
+            command_name = self._mirror_command_name(parts)
+            if command_name == "fetch" and "--dry-run" not in parts:
+                blocking_errors.append("python command would fetch real Tushare data")
+            if command_name in {"backfill", "backfill-missing", "mirror-run"} and "--execute" in parts and not (is_comment and marker_present):
+                blocking_errors.append("python command would execute real Tushare requests without guard")
+
+    def _detect_unknown_high_risk(self, command_text: str, is_comment: bool, blocking_errors: list[str]) -> None:
+        if is_comment:
+            return
+        parts = command_text.split()
+        if not parts:
+            return
+        if parts[0].startswith("python") and "tushare_mirror" in parts:
+            command_name = self._mirror_command_name(parts)
+            if command_name not in {"mirror-batch-plan", "mirror-status", "mirror-audit", "mirror-next-batch", "mirror-batch-bundle-verify", "command-safety-check"}:
+                blocking_errors.append(f"unknown or high-risk active tushare_mirror command: {command_name}")
+        elif parts[0] not in {"echo"}:
+            if self.TOKEN_PATTERN.search(command_text):
+                blocking_errors.append("unknown high-risk active command contains token-like assignment")
+            else:
+                blocking_errors.append(f"unknown high-risk active command: {parts[0]}")
+
+    def _mirror_command_name(self, parts: list[str]) -> str:
+        try:
+            return parts[parts.index("tushare_mirror") + 1]
+        except (ValueError, IndexError):
+            return "unknown"
+
+    def _option_value(self, parts: list[str], option: str) -> str | None:
+        try:
+            index = parts.index(option)
+        except ValueError:
+            return None
+        if index + 1 >= len(parts):
+            return None
+        return parts[index + 1]
 
 
 class MirrorOperatorChecklistReporter:
