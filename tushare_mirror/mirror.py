@@ -445,6 +445,26 @@ class MirrorBatchRehearsalResult:
 
 
 @dataclass(frozen=True)
+class MirrorBatchLedgerResult:
+    report_version: str
+    root: str
+    scope: str
+    ledger_status: str
+    batches: list[dict[str, Any]]
+    inferred_batches: list[dict[str, Any]]
+    latest_completed_batch: dict[str, Any] | None
+    next_recommended_batch: dict[str, Any] | None
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class MirrorOperatorChecklistResult:
     report_version: str
     root: str
@@ -2344,6 +2364,135 @@ class MirrorBatchRehearsalReporter:
             "description": description,
             "details": details,
         }
+
+
+class MirrorBatchLedgerReporter:
+    REPORT_VERSION = "mirror-batch-ledger/v1"
+
+    def report(self, *, root: Path | str, scope: str) -> MirrorBatchLedgerResult:
+        ensure_mirror_scope(scope)
+        mirror_root = _resolve_path(Path(root))
+        warnings = ["mirror-batch-ledger is read-only and infers history; no explicit batch ledger table is written"]
+        blocking_errors: list[str] = []
+        catalog = CatalogStore(mirror_root, read_only=True)
+        if not catalog.db_path.exists():
+            blocking_errors.append(f"catalog not found: {catalog.db_path}; run init-catalog first")
+            return self._result(mirror_root, scope, "blocked", [], [], None, None, warnings, blocking_errors)
+
+        batches = self._mirror_run_batches(catalog)
+        next_batch = MirrorNextBatchReporter().report(root=mirror_root, scope=scope)
+        inferred = [
+            self._inferred_month_batch(month, mirror_root, scope)
+            for month in next_batch.current_completed_months
+        ]
+        latest_completed = inferred[-1] if inferred else (batches[0] if batches else None)
+        recommended = None
+        if next_batch.recommended_next_start_date and next_batch.recommended_next_end_date:
+            recommended = {
+                "start_date": next_batch.recommended_next_start_date,
+                "end_date": next_batch.recommended_next_end_date,
+                "reason": next_batch.reason,
+                "estimated_request_count": next_batch.estimated_request_count,
+                "required_trade_cal_range": next_batch.required_trade_cal_range,
+            }
+        if not batches and not inferred:
+            warnings.append("no completed batch history could be inferred")
+        elif not inferred:
+            warnings.append("no complete month coverage inferred from daily-like endpoints")
+        ledger_status = "blocked" if blocking_errors else ("empty" if not batches and not inferred else ("warning" if not inferred else "passed"))
+        return self._result(mirror_root, scope, ledger_status, batches, inferred, latest_completed, recommended, warnings, blocking_errors)
+
+    def _result(
+        self,
+        root: Path,
+        scope: str,
+        status: str,
+        batches: list[dict[str, Any]],
+        inferred: list[dict[str, Any]],
+        latest_completed: dict[str, Any] | None,
+        recommended: dict[str, Any] | None,
+        warnings: list[str],
+        blocking_errors: list[str],
+    ) -> MirrorBatchLedgerResult:
+        return MirrorBatchLedgerResult(
+            report_version=self.REPORT_VERSION,
+            root=str(root),
+            scope=scope,
+            ledger_status=status,
+            batches=batches,
+            inferred_batches=inferred,
+            latest_completed_batch=latest_completed,
+            next_recommended_batch=recommended,
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _mirror_run_batches(self, catalog: CatalogStore) -> list[dict[str, Any]]:
+        batches: list[dict[str, Any]] = []
+        for run in catalog.list_runs(limit=1000):
+            if run.get("run_type") != "mirror":
+                continue
+            jobs = catalog.jobs_for_run(str(run["run_id"]))
+            start_date, end_date = self._date_range_from_jobs(jobs)
+            summary = run.get("summary") or {}
+            batches.append(
+                {
+                    "batch_id": run["run_id"],
+                    "source": "mirror_run",
+                    "status": run.get("status"),
+                    "mode": summary.get("mode"),
+                    "date_range": {"start_date": start_date, "end_date": end_date},
+                    "executed_endpoints": sorted({job["api_name"] for job in jobs if job.get("status") == "done"}),
+                    "backup_status": summary.get("backup_status"),
+                    "backup_target": summary.get("backup_target"),
+                    "restore_check_status": summary.get("restore_check_status"),
+                    "validation_status": summary.get("validation_status"),
+                    "coverage_status": "inferred_from_run",
+                    "started_at": run.get("started_at"),
+                    "finished_at": run.get("finished_at"),
+                }
+            )
+        return batches
+
+    def _date_range_from_jobs(self, jobs: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+        dates: list[str] = []
+        for job in jobs:
+            params = job.get("params") or {}
+            for key in ["trade_date", "cal_date", "ann_date", "end_date"]:
+                value = params.get(key)
+                if isinstance(value, str) and len(value) == 8 and value.isdigit():
+                    dates.append(value)
+            for key in ["start_date", "end_date"]:
+                value = params.get(key)
+                if isinstance(value, str) and len(value) == 8 and value.isdigit():
+                    dates.append(value)
+        if not dates:
+            return None, None
+        return min(dates), max(dates)
+
+    def _inferred_month_batch(self, month: str, root: Path, scope: str) -> dict[str, Any]:
+        start_date, end_date = self._month_range(month)
+        coverage = MirrorCoverageMatrixReporter().report(root=root, scope=scope, start_date=start_date, end_date=end_date)
+        complete = all(item.get("status") == "complete" for item in coverage.items if item.get("api") in DAILY_LIKE_MIRROR_APIS)
+        return {
+            "batch_id": f"inferred_{month}",
+            "source": "coverage_matrix",
+            "month": month,
+            "date_range": {"start_date": start_date, "end_date": end_date},
+            "coverage_status": "complete" if complete else "partial",
+            "coverage_summary": coverage.items,
+            "validation_status": "inferred_not_recorded",
+            "backup_status": "see_backup_status_report",
+        }
+
+    def _month_range(self, month: str) -> tuple[str, str]:
+        start = datetime.strptime(month + "01", "%Y%m%d")
+        if start.month == 12:
+            next_month = start.replace(year=start.year + 1, month=1)
+        else:
+            next_month = start.replace(month=start.month + 1)
+        end = next_month - timedelta(days=1)
+        return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
 
 class MirrorOperatorChecklistReporter:

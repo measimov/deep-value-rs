@@ -15,7 +15,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
+from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchLedgerReporter, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -988,6 +988,66 @@ class MirrorBatchRehearsalTests(PreBackfillOperationsTestCase):
             self.assertIn(key, payload)
         self.assertEqual(payload["report_version"], "mirror-batch-rehearse/v1")
         self.assertEqual(payload["rehearsal_status"], "passed")
+
+
+class MirrorBatchLedgerTests(PreBackfillOperationsTestCase):
+    def test_infers_january_pilot_and_next_batch(self):
+        self.build_pilot()
+        self.cover_january_matrix()
+        before = self.counts()
+        result = MirrorBatchLedgerReporter().report(root=self.root, scope="low-risk-a-share")
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(result.report_version, "mirror-batch-ledger/v1")
+        self.assertEqual(result.ledger_status, "passed")
+        self.assertTrue(result.batches)
+        self.assertEqual(result.batches[0]["source"], "mirror_run")
+        self.assertEqual(result.batches[0]["mode"], "pilot")
+        self.assertEqual(result.inferred_batches[0]["month"], "202501")
+        self.assertEqual(result.inferred_batches[0]["coverage_status"], "complete")
+        self.assertEqual(result.latest_completed_batch["month"], "202501")
+        self.assertEqual(result.next_recommended_batch["start_date"], "20250201")
+
+    def test_incomplete_month_is_detected_without_completed_batch(self):
+        self.cover_daily_like_range("20250101", "20250131", apis=["daily"])
+        result = MirrorBatchLedgerReporter().report(root=self.root, scope="low-risk-a-share")
+        self.assertEqual(result.ledger_status, "empty")
+        self.assertEqual(result.inferred_batches, [])
+        self.assertEqual(result.next_recommended_batch["start_date"], "20250101")
+        self.assertTrue(any("no completed batch" in warning for warning in result.warnings))
+
+    def test_no_batches_case_is_empty_and_read_only(self):
+        before = self.counts()
+        result = MirrorBatchLedgerReporter().report(root=self.root, scope="low-risk-a-share")
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(result.ledger_status, "empty")
+        self.assertEqual(result.batches, [])
+        self.assertEqual(result.inferred_batches, [])
+        self.assertIsNone(result.latest_completed_batch)
+
+    def test_cli_json_contract_and_no_side_effects_for_ledger(self):
+        self.build_pilot()
+        self.cover_january_matrix()
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-batch-ledger",
+            "--root", str(self.root),
+            "--scope", "low-risk-a-share",
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "ledger_status",
+            "batches",
+            "inferred_batches",
+            "latest_completed_batch",
+            "next_recommended_batch",
+            "warnings",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "mirror-batch-ledger/v1")
+        self.assertEqual(payload["ledger_status"], "passed")
 
 
 class MirrorOperatorChecklistTests(PreBackfillOperationsTestCase):
