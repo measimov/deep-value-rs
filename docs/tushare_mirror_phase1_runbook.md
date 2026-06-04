@@ -2121,3 +2121,224 @@ read-only review and bundle-generation process around a bounded low-risk batch.
 It has no scheduler, no remote backup, no restore-into workflow, no PostgreSQL
 loader, no parallel execution, and no automatic transition from recommendation
 to execution.
+
+## Batch Execution Safety Suite
+
+This section is for the final infrastructure-only checks before a user-confirmed
+February controlled batch. These commands do not fetch real Tushare data, do not
+run `mirror-run`, do not backfill dates, do not enable executable endpoints, and
+do not run `commands.sh` from a generated bundle. Commands that write files write
+only to an explicit user-provided output path outside the mirror and backup
+roots.
+
+Use the same durable paths:
+
+```bash
+MIRROR_ROOT=/mnt/gw/TuShare
+MIRROR_BACKUP=/mnt/gw/TuShare-backup
+BUNDLE=/tmp/tushare-mirror-batch-bundle-202502
+```
+
+Verify a generated bundle before reviewing it as an execution candidate:
+
+```bash
+python3 -m tushare_mirror mirror-batch-bundle-verify \
+  --bundle "$BUNDLE" \
+  --json
+```
+
+The verifier checks `bundle_manifest.json`, required file hashes, required JSON
+reports, `README.md`, `commands.sh`, the `USER_CONFIRMATION_REQUIRED` marker,
+token hygiene, and whether `commands.sh` is unexpectedly executable. It does not
+execute any command in the bundle.
+
+Analyze command previews without running them:
+
+```bash
+python3 -m tushare_mirror command-safety-check \
+  --file "$BUNDLE/commands.sh" \
+  --json
+```
+
+The analyzer detects unguarded `mirror-run --execute`, backfill execution,
+destructive shell commands, network commands, unsafe output paths, token-like
+strings, and other high-risk active commands. A guarded execution preview may be
+reported with a warning, but it still requires human confirmation.
+
+Rehearse the batch sequence without executing any step:
+
+```bash
+python3 -m tushare_mirror mirror-batch-rehearse \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --bundle "$BUNDLE" \
+  --json
+```
+
+The rehearsal simulates preflight, review, readiness, batch-plan, operator
+checklist, the command that would execute, validation, backup, restore-check, and
+post-batch review. It does not call `mirror-run`, fetch, backfill, write catalog
+state, or write backup state.
+
+Inspect inferred batch history and the next bounded recommendation:
+
+```bash
+python3 -m tushare_mirror mirror-batch-ledger \
+  --root "$MIRROR_ROOT" \
+  --scope low-risk-a-share \
+  --json
+```
+
+The ledger is inferred from local catalog runs and coverage. It is not an
+execution ledger and does not create ledger rows.
+
+Generate a completion certificate only after a completed bounded batch and clean
+backup/restore checks:
+
+```bash
+python3 -m tushare_mirror mirror-batch-certificate \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope low-risk-a-share \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --output /tmp/tushare-batch-cert-202501 \
+  --json
+```
+
+The certificate bundle contains `certificate.json` and `certificate.md`. The
+output path must not be inside the mirror root or backup root, and existing
+output is refused unless `--overwrite` is provided.
+
+Run failure drills as read-only operator guidance:
+
+```bash
+python3 -m tushare_mirror mirror-failure-drill \
+  --scenario rate_limited \
+  --scope low-risk-a-share \
+  --json
+
+python3 -m tushare_mirror mirror-failure-drill \
+  --scenario backup_failed \
+  --scope low-risk-a-share \
+  --json
+
+python3 -m tushare_mirror mirror-failure-drill \
+  --scenario schema_incompatible \
+  --scope low-risk-a-share \
+  --json
+```
+
+Supported scenarios include `rate_limited`, `permission_denied`,
+`invalid_params`, `schema_incompatible`, `validation_failed`, `backup_failed`,
+`restore_check_failed`, `trade_cal_missing`, `token_missing`, and
+`disk_space_low`. These drills do not inject failures into the catalog.
+
+Inspect filesystem topology and local capacity:
+
+```bash
+python3 -m tushare_mirror path-diagnostics \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --json
+```
+
+This reports path existence, local file counts and sizes, parent free bytes,
+nested root/backup relationships, and same-device status when available. It does
+not write files.
+
+Scan mirror and backup artifacts for accidental token plaintext:
+
+```bash
+python3 -m tushare_mirror token-hygiene \
+  --path "$MIRROR_ROOT" \
+  --json
+
+python3 -m tushare_mirror token-hygiene \
+  --path "$MIRROR_BACKUP" \
+  --json
+```
+
+The scanner reports counts and suspicious paths only. It never prints matched
+token-like values. It scans text-like files and SQLite text fields, and skips
+binary/raw formats such as Parquet and compressed raw archives.
+
+Decide whether January can promote to the February controlled batch:
+
+```bash
+python3 -m tushare_mirror monthly-promotion-checklist \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope low-risk-a-share \
+  --from-month 202501 \
+  --to-month 202502 \
+  --json
+```
+
+The checklist verifies source-month coverage, backup validity, backup mutation
+status, schema/quarantine status, next batch plan availability, request-estimate
+risk, operator checklist readiness, optional bundle verification, and explicit
+user-confirmation requirements.
+
+Use the aggregate report for a single operator packet:
+
+```bash
+python3 -m tushare_mirror mirror-ops-report \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope low-risk-a-share \
+  --start-date 20250101 \
+  --end-date 20250131 \
+  --next-start-date 20250201 \
+  --next-end-date 20250228 \
+  --json
+```
+
+The aggregate report includes mirror status, audit, next-batch recommendation,
+backup status, schema status, coverage matrix, request estimate, operator
+checklist, stop policy, path diagnostics, token hygiene, and monthly promotion
+checklist. It does not execute commands.
+
+Recommended operator flow:
+
+1. Run `mirror-status`.
+2. Run `mirror-audit`.
+3. Run `mirror-next-batch`.
+4. Generate or refresh `mirror-batch-bundle`.
+5. Run `mirror-batch-bundle-verify`.
+6. Run `command-safety-check` on `commands.sh`.
+7. Run `mirror-batch-rehearse`.
+8. Run `mirror-operator-checklist`.
+9. Run `monthly-promotion-checklist`.
+10. Obtain explicit user confirmation.
+11. Only after confirmation, run the reviewed `mirror-run --execute` command.
+
+Do not run step 11 from `commands.sh` automatically. `commands.sh` is an
+inspection artifact, not an executable workflow. It exists so the exact command
+can be reviewed, copied deliberately by an operator, and compared against the
+bundle manifest and safety reports.
+
+After each user-confirmed batch, report:
+
+- run ID
+- batch date range
+- endpoints included
+- planned, skipped, executed, and failed job counts
+- validation status and failed validation IDs
+- schema and quarantine status
+- backup ID and restore-check status
+- token hygiene result
+- path diagnostics result
+- next recommended bounded month
+
+Stop before user confirmation if any safety report is blocked, if token
+plaintext is detected, if the backup is missing or mutated, if restore-check
+fails, if schema/quarantine blockers exist, if command safety finds an unguarded
+execution command, if the bundle cannot be verified, or if request risk exceeds
+the operator's quota window.
+
+This suite is still not full mirror automation. It does not add new executable
+endpoints, execute stock loops, enable financial/PIT/object/intraday/compaction
+execution, implement PostgreSQL loading, implement remote backup or restore-into,
+run a scheduler, or introduce parallel execution. It is a read-only and
+file-output safety layer around one bounded low-risk batch.
