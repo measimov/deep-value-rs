@@ -15,7 +15,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
+from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -1283,6 +1283,54 @@ class StopPolicyReportTests(PreBackfillOperationsTestCase):
         self.assertEqual(payload["report_version"], "stop-policy/v1")
         self.assertEqual(payload["category"], "financial")
         self.assertTrue(payload["execution_blocked"])
+
+
+class MirrorFailureDrillTests(PreBackfillOperationsTestCase):
+    def test_all_supported_scenarios_produce_output_read_only(self):
+        before = self.counts()
+        for scenario in sorted(MirrorFailureDrillReporter.SUPPORTED_SCENARIOS):
+            report = MirrorFailureDrillReporter().report(scenario=scenario, scope="low-risk-a-share")
+            self.assertEqual(report.report_version, "mirror-failure-drill/v1")
+            self.assertEqual(report.scenario, scenario)
+            self.assertTrue(report.stop_condition)
+            self.assertTrue(report.required_operator_action)
+            self.assertTrue(report.commands_to_inspect)
+            self.assertTrue(report.commands_not_to_run)
+            self.assertTrue(report.recovery_steps)
+            self.assertTrue(report.escalation_notes)
+        self.assertEqual(self.counts(), before)
+
+    def test_unknown_scenario_is_rejected(self):
+        with self.assertRaises(ValueError):
+            MirrorFailureDrillReporter().report(scenario="not_real", scope="low-risk-a-share")
+
+        result = self.run_cli("mirror-failure-drill", "--scenario", "not_real", "--scope", "low-risk-a-share", "--json", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown failure drill scenario", result.stderr)
+
+    def test_cli_json_contract_and_no_side_effects_for_failure_drill(self):
+        before = self.counts()
+        result = self.run_cli("mirror-failure-drill", "--scenario", "rate_limited", "--scope", "low-risk-a-share", "--json")
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "scenario",
+            "severity",
+            "stop_condition",
+            "retry_allowed",
+            "continue_allowed",
+            "required_operator_action",
+            "commands_to_inspect",
+            "commands_not_to_run",
+            "recovery_steps",
+            "escalation_notes",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "mirror-failure-drill/v1")
+        self.assertEqual(payload["scenario"], "rate_limited")
+        self.assertTrue(payload["retry_allowed"])
+        self.assertFalse(payload["continue_allowed"])
 
 
 class SchemaStatusReportTests(PreBackfillOperationsTestCase):

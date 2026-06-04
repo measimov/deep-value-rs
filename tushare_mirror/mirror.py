@@ -535,6 +535,27 @@ class StopPolicyResult:
 
 
 @dataclass(frozen=True)
+class MirrorFailureDrillResult:
+    report_version: str
+    scenario: str
+    severity: str
+    stop_condition: bool
+    retry_allowed: bool
+    continue_allowed: bool
+    required_operator_action: str
+    commands_to_inspect: list[str]
+    commands_not_to_run: list[str]
+    recovery_steps: list[str]
+    escalation_notes: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class SchemaStatusResult:
     report_version: str
     root: str
@@ -2919,6 +2940,204 @@ class StopPolicyReporter:
                 *base["stop_immediately"],
             ]
         return base
+
+
+class MirrorFailureDrillReporter:
+    REPORT_VERSION = "mirror-failure-drill/v1"
+    SUPPORTED_SCENARIOS = {
+        "rate_limited",
+        "permission_denied",
+        "invalid_params",
+        "schema_incompatible",
+        "validation_failed",
+        "backup_failed",
+        "restore_check_failed",
+        "trade_cal_missing",
+        "token_missing",
+        "disk_space_low",
+    }
+
+    def report(self, *, scenario: str, scope: str = "low-risk-a-share") -> MirrorFailureDrillResult:
+        ensure_mirror_scope(scope)
+        if scenario not in self.SUPPORTED_SCENARIOS:
+            supported = ", ".join(sorted(self.SUPPORTED_SCENARIOS))
+            raise ValueError(f"unknown failure drill scenario: {scenario}; supported: {supported}")
+        drill = self._scenario(scenario)
+        return MirrorFailureDrillResult(report_version=self.REPORT_VERSION, scenario=scenario, **drill)
+
+    def _scenario(self, scenario: str) -> dict[str, Any]:
+        common_not_to_run = [
+            "commands.sh",
+            "python3 -m tushare_mirror mirror-run --execute",
+            "python3 -m tushare_mirror backfill --execute",
+            "python3 -m tushare_mirror backfill-missing --execute",
+        ]
+        common_inspect = [
+            "python3 -m tushare_mirror stop-policy --scope low-risk-a-share --json",
+            "python3 -m tushare_mirror mirror-status --root MIRROR_ROOT --backup MIRROR_BACKUP --scope low-risk-a-share --json",
+            "python3 -m tushare_mirror mirror-audit --root MIRROR_ROOT --backup MIRROR_BACKUP --scope low-risk-a-share --json",
+        ]
+        scenarios: dict[str, dict[str, Any]] = {
+            "rate_limited": {
+                "severity": "warning",
+                "stop_condition": True,
+                "retry_allowed": True,
+                "continue_allowed": False,
+                "required_operator_action": "pause execution, preserve logs, wait for the configured retry window, and lower request pace before any user-confirmed retry",
+                "commands_to_inspect": [
+                    *common_inspect,
+                    "python3 -m tushare_mirror rate-policy --scope low-risk-a-share --json",
+                    "python3 -m tushare_mirror request-estimate --scope low-risk-a-share --start-date START --end-date END --root MIRROR_ROOT --json",
+                ],
+                "commands_not_to_run": common_not_to_run,
+                "recovery_steps": [
+                    "confirm the failure is rate_limited and not permission_denied or invalid_params",
+                    "review rate-policy and request-estimate before retry planning",
+                    "retry only after user confirmation and only with a bounded batch command",
+                ],
+                "escalation_notes": ["escalate if rate limits persist after the retry window or affect multiple APIs"],
+            },
+            "permission_denied": {
+                "severity": "blocking",
+                "stop_condition": True,
+                "retry_allowed": False,
+                "continue_allowed": False,
+                "required_operator_action": "stop the batch and verify token permissions without printing token values",
+                "commands_to_inspect": [*common_inspect, "python3 -m tushare_mirror token-hygiene --path MIRROR_ROOT --json"],
+                "commands_not_to_run": common_not_to_run,
+                "recovery_steps": [
+                    "verify the token is configured without exposing plaintext",
+                    "confirm the requested API is permitted for the token",
+                    "regenerate the bounded batch plan after permissions are corrected",
+                ],
+                "escalation_notes": ["requires operator or account owner action before any retry"],
+            },
+            "invalid_params": {
+                "severity": "blocking",
+                "stop_condition": True,
+                "retry_allowed": False,
+                "continue_allowed": False,
+                "required_operator_action": "stop and inspect the generated plan parameters before building a corrected bundle",
+                "commands_to_inspect": [*common_inspect, "python3 -m tushare_mirror mirror-batch-bundle-verify --bundle BUNDLE --json"],
+                "commands_not_to_run": common_not_to_run,
+                "recovery_steps": [
+                    "inspect batch_plan.json and commands.sh without executing them",
+                    "correct the plan generator or date range before regenerating the bundle",
+                    "rerun bundle verification and rehearsal after regeneration",
+                ],
+                "escalation_notes": ["treat repeated invalid parameters as a planner defect"],
+            },
+            "schema_incompatible": {
+                "severity": "blocking",
+                "stop_condition": True,
+                "retry_allowed": False,
+                "continue_allowed": False,
+                "required_operator_action": "stop immediately and quarantine the schema change for review",
+                "commands_to_inspect": [*common_inspect, "python3 -m tushare_mirror schema-status --root MIRROR_ROOT --json"],
+                "commands_not_to_run": common_not_to_run,
+                "recovery_steps": [
+                    "inspect schema-status and quarantine details",
+                    "do not enable affected endpoints until compatibility is reviewed",
+                    "update schema handling in a separate infrastructure commit before retry",
+                ],
+                "escalation_notes": ["requires schema owner review"],
+            },
+            "validation_failed": {
+                "severity": "blocking",
+                "stop_condition": True,
+                "retry_allowed": True,
+                "continue_allowed": False,
+                "required_operator_action": "stop promotion and inspect validation failures before retrying validation",
+                "commands_to_inspect": [*common_inspect, "python3 -m tushare_mirror mirror-coverage-matrix --root MIRROR_ROOT --scope low-risk-a-share --start-date START --end-date END --json"],
+                "commands_not_to_run": common_not_to_run,
+                "recovery_steps": [
+                    "identify failed validation IDs and affected snapshots",
+                    "rerun only read-only validation/report commands until root cause is understood",
+                    "retry execution only after a corrected bundle and user confirmation",
+                ],
+                "escalation_notes": ["escalate if validation failure indicates data loss or schema mismatch"],
+            },
+            "backup_failed": {
+                "severity": "blocking",
+                "stop_condition": True,
+                "retry_allowed": True,
+                "continue_allowed": False,
+                "required_operator_action": "stop promotion until a valid backup can be produced and inspected",
+                "commands_to_inspect": [*common_inspect, "python3 -m tushare_mirror backup-status --backup MIRROR_BACKUP --json"],
+                "commands_not_to_run": common_not_to_run,
+                "recovery_steps": [
+                    "inspect backup-status for manifest or checksum failures",
+                    "verify path diagnostics and disk space before creating another backup",
+                    "run restore-check before considering the batch complete",
+                ],
+                "escalation_notes": ["do not proceed to a larger batch without a clean backup and restore-check"],
+            },
+            "restore_check_failed": {
+                "severity": "blocking",
+                "stop_condition": True,
+                "retry_allowed": True,
+                "continue_allowed": False,
+                "required_operator_action": "treat backup as unusable until restore-check succeeds",
+                "commands_to_inspect": [*common_inspect, "python3 -m tushare_mirror backup-status --backup MIRROR_BACKUP --json"],
+                "commands_not_to_run": common_not_to_run,
+                "recovery_steps": [
+                    "inspect backup manifest and restore-check errors",
+                    "rebuild the backup only after understanding the restore failure",
+                    "regenerate completion certificate only after restore-check succeeds",
+                ],
+                "escalation_notes": ["possible backup corruption or unsafe path configuration"],
+            },
+            "trade_cal_missing": {
+                "severity": "blocking",
+                "stop_condition": True,
+                "retry_allowed": False,
+                "continue_allowed": False,
+                "required_operator_action": "stop daily-like planning until the local trade_cal coverage is available",
+                "commands_to_inspect": [
+                    *common_inspect,
+                    "python3 -m tushare_mirror mirror-next-batch --root MIRROR_ROOT --scope low-risk-a-share --json",
+                    "python3 -m tushare_mirror mirror-coverage-matrix --root MIRROR_ROOT --scope low-risk-a-share --start-date START --end-date END --json",
+                ],
+                "commands_not_to_run": common_not_to_run,
+                "recovery_steps": [
+                    "confirm the missing trade_cal range using read-only reports",
+                    "do not infer trading days from wall-calendar dates for execution",
+                    "prepare a separate user-confirmed plan to refresh trade_cal if needed",
+                ],
+                "escalation_notes": ["daily-like endpoint coverage cannot be trusted without local SSE trade_cal"],
+            },
+            "token_missing": {
+                "severity": "blocking",
+                "stop_condition": True,
+                "retry_allowed": False,
+                "continue_allowed": False,
+                "required_operator_action": "configure token availability without printing or storing token plaintext",
+                "commands_to_inspect": [*common_inspect, "python3 scripts/tushare_real_smoke.py --help"],
+                "commands_not_to_run": common_not_to_run,
+                "recovery_steps": [
+                    "verify environment/configuration only through boolean token availability checks",
+                    "scan mirror and backup paths for accidental token plaintext",
+                    "rerun operator checklist before any user-confirmed execution",
+                ],
+                "escalation_notes": ["requires operator secret-management action"],
+            },
+            "disk_space_low": {
+                "severity": "blocking",
+                "stop_condition": True,
+                "retry_allowed": False,
+                "continue_allowed": False,
+                "required_operator_action": "stop before execution and free or provision space outside the mirror and backup roots",
+                "commands_to_inspect": [*common_inspect, "python3 -m tushare_mirror path-diagnostics --root MIRROR_ROOT --backup MIRROR_BACKUP --json"],
+                "commands_not_to_run": common_not_to_run,
+                "recovery_steps": [
+                    "inspect path diagnostics and parent free bytes",
+                    "verify backup is not nested under mirror root",
+                    "rerun request-estimate and operator checklist after capacity is corrected",
+                ],
+                "escalation_notes": ["requires filesystem/operator action before execution"],
+            },
+        }
+        return scenarios[scenario]
 
 
 class SchemaStatusReporter:

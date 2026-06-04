@@ -33,7 +33,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, init_catalog_if_requested
+from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, init_catalog_if_requested
 from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
@@ -784,6 +784,18 @@ def cmd_mirror_operator_checklist(args) -> int:
 def cmd_stop_policy(args) -> int:
     try:
         result = StopPolicyReporter().report(scope=args.scope, category=args.category)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+    return 0
+
+
+def cmd_mirror_failure_drill(args) -> int:
+    try:
+        result = MirrorFailureDrillReporter().report(scenario=args.scenario, scope=args.scope)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     if args.json:
@@ -1658,6 +1670,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--category')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_stop_policy)
+
+    p = sub.add_parser('mirror-failure-drill', description='Read-only failure drill simulator; describes operator response without injecting failures, fetching, or writing catalog state.')
+    p.add_argument('--scenario', required=True)
+    p.add_argument('--scope', default='low-risk-a-share')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_failure_drill)
 
     p = sub.add_parser('schema-status', description='Read-only schema drift and quarantine status report; does not make real requests or write catalog state.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
