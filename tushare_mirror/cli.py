@@ -33,7 +33,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchPlanner, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, init_catalog_if_requested
+from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, init_catalog_if_requested
 from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
@@ -726,6 +726,15 @@ def cmd_command_safety_check(args) -> int:
     else:
         _print_key_values(result.summary())
     return 1 if result.status == "blocked" else 0
+
+
+def cmd_mirror_batch_rehearse(args) -> int:
+    result = MirrorBatchRehearsalReporter().rehearse(root=args.mirror_root_arg, backup=args.backup, bundle=args.bundle)
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+    return 1 if result.rehearsal_status == "blocked" else 0
 
 
 def cmd_mirror_operator_checklist(args) -> int:
@@ -1584,6 +1593,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--file', required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_command_safety_check)
+
+    p = sub.add_parser('mirror-batch-rehearse', description='Read-only batch rehearsal simulator; does not execute mirror-run, fetch, backfill, write catalog, or write backup.')
+    p.add_argument('--root', dest='mirror_root_arg', required=True)
+    p.add_argument('--backup', required=True)
+    p.add_argument('--bundle', required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_batch_rehearse)
 
     p = sub.add_parser('mirror-operator-checklist', description='Read-only operator checklist before any user-confirmed controlled batch execution; does not make real requests or write catalog state.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)

@@ -15,7 +15,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
+from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -905,6 +905,89 @@ class CommandSafetyAnalyzerTests(PreBackfillOperationsTestCase):
             self.assertIn(key, payload)
         self.assertEqual(payload["report_version"], "command-safety-check/v1")
         self.assertTrue(any("unknown high-risk" in error for error in payload["blocking_errors"]))
+
+
+class MirrorBatchRehearsalTests(PreBackfillOperationsTestCase):
+    def create_bundle(self, output: Path):
+        self.build_pilot()
+        result = MirrorBatchBundleReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="low-risk-a-share",
+            start_date="20250201",
+            end_date="20250228",
+            max_jobs_per_api=20,
+            output=output,
+        )
+        self.assertEqual(result.status, "created")
+
+    def test_valid_bundle_rehearsal_passes_and_is_read_only(self):
+        output = self.base / "rehearsal-bundle"
+        self.create_bundle(output)
+        before = self.counts()
+        result = MirrorBatchRehearsalReporter().rehearse(root=self.root, backup=self.backup, bundle=output)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(result.report_version, "mirror-batch-rehearse/v1")
+        self.assertEqual(result.rehearsal_status, "passed")
+        self.assertEqual(len(result.steps), 10)
+        self.assertTrue(result.would_execute_real_requests)
+        self.assertTrue(result.user_confirmation_required)
+        self.assertGreater(result.estimated_request_count, 0)
+        self.assertEqual(result.blocked_by, [])
+        self.assertIn("user confirmation", result.next_safe_action)
+
+    def test_missing_bundle_blocks_rehearsal(self):
+        result = MirrorBatchRehearsalReporter().rehearse(root=self.root, backup=self.backup, bundle=self.base / "missing-bundle")
+        self.assertEqual(result.rehearsal_status, "blocked")
+        self.assertIn("bundle_verification", result.blocked_by)
+
+    def test_unverified_bundle_blocks_rehearsal(self):
+        output = self.base / "unverified-bundle"
+        self.create_bundle(output)
+        (output / "bundle_manifest.json").unlink()
+        result = MirrorBatchRehearsalReporter().rehearse(root=self.root, backup=self.backup, bundle=output)
+        self.assertEqual(result.rehearsal_status, "blocked")
+        self.assertIn("bundle_verification", result.blocked_by)
+        self.assertIn("bundle_manifest", result.blocked_by)
+
+    def test_readiness_block_blocks_rehearsal_without_catalog_mutation(self):
+        output = self.base / "readiness-blocked-bundle"
+        self.create_bundle(output)
+        with sqlite3.connect(self.catalog.db_path) as conn:
+            conn.execute("update snapshots set status='superseded' where api_name='trade_cal'")
+        before = self.counts()
+        result = MirrorBatchRehearsalReporter().rehearse(root=self.root, backup=self.backup, bundle=output)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(result.rehearsal_status, "blocked")
+        self.assertIn("readiness", result.blocked_by)
+
+    def test_cli_json_contract_and_no_side_effects_for_rehearsal(self):
+        output = self.base / "cli-rehearsal-bundle"
+        self.create_bundle(output)
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-batch-rehearse",
+            "--root", str(self.root),
+            "--backup", str(self.backup),
+            "--bundle", str(output),
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "rehearsal_status",
+            "steps",
+            "would_execute_real_requests",
+            "estimated_request_count",
+            "blocked_by",
+            "warnings",
+            "user_confirmation_required",
+            "next_safe_action",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "mirror-batch-rehearse/v1")
+        self.assertEqual(payload["rehearsal_status"], "passed")
 
 
 class MirrorOperatorChecklistTests(PreBackfillOperationsTestCase):

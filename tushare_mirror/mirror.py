@@ -423,6 +423,28 @@ class CommandSafetyCheckResult:
 
 
 @dataclass(frozen=True)
+class MirrorBatchRehearsalResult:
+    report_version: str
+    root: str
+    backup: str
+    bundle: str
+    rehearsal_status: str
+    steps: list[dict[str, Any]]
+    would_execute_real_requests: bool
+    estimated_request_count: int
+    blocked_by: list[str]
+    warnings: list[str]
+    user_confirmation_required: bool
+    next_safe_action: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class MirrorOperatorChecklistResult:
     report_version: str
     root: str
@@ -2173,6 +2195,155 @@ class CommandSafetyAnalyzer:
         if index + 1 >= len(parts):
             return None
         return parts[index + 1]
+
+
+class MirrorBatchRehearsalReporter:
+    REPORT_VERSION = "mirror-batch-rehearse/v1"
+
+    def rehearse(self, *, root: Path | str, backup: Path | str, bundle: Path | str) -> MirrorBatchRehearsalResult:
+        mirror_root = _resolve_path(Path(root))
+        backup_root = _resolve_path(Path(backup))
+        bundle_root = _resolve_path(Path(bundle))
+        warnings = ["mirror-batch-rehearse is read-only and does not execute generated commands"]
+        blocked_by: list[str] = []
+        steps: list[dict[str, Any]] = []
+        estimated_request_count = 0
+
+        manifest = self._read_manifest(bundle_root, warnings, blocked_by)
+        verification = MirrorBatchBundleVerifier().verify(bundle=bundle_root)
+        if verification.status == "blocked":
+            blocked_by.append("bundle_verification")
+        elif verification.status == "warning":
+            warnings.extend(verification.warnings)
+        steps.append(self._step("preflight", "blocked" if blocked_by else "passed", "verify bundle, root, and backup paths", verification.to_dict()))
+
+        if not manifest:
+            return self._result(mirror_root, backup_root, bundle_root, "blocked", steps, estimated_request_count, blocked_by, warnings)
+
+        scope = str(manifest.get("scope") or "low-risk-a-share")
+        start_date = str(manifest.get("start_date") or "")
+        end_date = str(manifest.get("end_date") or "")
+        max_jobs_per_api = int(manifest.get("max_jobs_per_api") or 20)
+        ensure_mirror_scope(scope)
+        self._warn_if_manifest_paths_differ(manifest, mirror_root, backup_root, warnings)
+
+        catalog = CatalogStore(mirror_root, read_only=True)
+        try:
+            review = MirrorReviewer().review(root=mirror_root, backup=backup_root, scope=scope, mode="pilot", start_date="20250101", end_date="20250131")
+            if review.blocking_errors:
+                blocked_by.append("review")
+            steps.append(self._step("review", "blocked" if review.blocking_errors else "passed", "read current mirror review", review.summary()))
+        except Exception as exc:
+            blocked_by.append("review")
+            steps.append(self._step("review", "blocked", "read current mirror review", {"error": str(exc)}))
+
+        try:
+            readiness = MirrorReadinessReporter().report(root=mirror_root, backup=backup_root, scope=scope)
+            if readiness.readiness_status == "blocked":
+                blocked_by.append("readiness")
+            steps.append(self._step("readiness", readiness.readiness_status, "read current mirror readiness", readiness.summary()))
+        except Exception as exc:
+            blocked_by.append("readiness")
+            steps.append(self._step("readiness", "blocked", "read current mirror readiness", {"error": str(exc)}))
+
+        try:
+            plan = MirrorBatchPlanner(mirror_root, catalog).plan(
+                scope=scope,
+                start_date=start_date,
+                end_date=end_date,
+                calendar_exchange="SSE",
+                max_jobs_per_api=max_jobs_per_api,
+            )
+            estimated_request_count = plan.estimated_request_count
+            steps.append(self._step("batch-plan", "passed", "simulate batch planning only", plan.summary()))
+        except Exception as exc:
+            blocked_by.append("batch_plan")
+            steps.append(self._step("batch-plan", "blocked", "simulate batch planning only", {"error": str(exc)}))
+
+        try:
+            checklist = MirrorOperatorChecklistReporter(token_available=True).report(
+                root=mirror_root,
+                backup=backup_root,
+                scope=scope,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if checklist.blocking_errors:
+                blocked_by.append("operator_checklist")
+            steps.append(self._step("operator-checklist", "blocked" if checklist.blocking_errors else "passed", "read operator checklist", checklist.summary()))
+        except Exception as exc:
+            blocked_by.append("operator_checklist")
+            steps.append(self._step("operator-checklist", "blocked", "read operator checklist", {"error": str(exc)}))
+
+        steps.extend(
+            [
+                self._step("execute-command-would-run", "requires_user_confirmation", "mirror-run --execute is not run by rehearsal", {"would_execute_real_requests": True}),
+                self._step("validate-no-record-would-run", "simulated", "validate --no-record would run after user-confirmed execution", {"would_write_catalog": False}),
+                self._step("backup-would-run", "simulated", "backup would run after successful user-confirmed execution", {"would_write_backup": True}),
+                self._step("restore-check-would-run", "simulated", "restore-check would run after backup", BackupStatusReporter().report(backup=backup_root).summary()),
+                self._step("post-batch-review-would-run", "simulated", "post-batch review would run after backup and restore-check", {"would_write_catalog": False}),
+            ]
+        )
+
+        status = "blocked" if blocked_by else ("warning" if verification.status == "warning" else "passed")
+        return self._result(mirror_root, backup_root, bundle_root, status, steps, estimated_request_count, blocked_by, warnings)
+
+    def _result(
+        self,
+        root: Path,
+        backup: Path,
+        bundle: Path,
+        status: str,
+        steps: list[dict[str, Any]],
+        estimated_request_count: int,
+        blocked_by: list[str],
+        warnings: list[str],
+    ) -> MirrorBatchRehearsalResult:
+        blocked = _dedupe_messages(blocked_by)
+        return MirrorBatchRehearsalResult(
+            report_version=self.REPORT_VERSION,
+            root=str(root),
+            backup=str(backup),
+            bundle=str(bundle),
+            rehearsal_status=status,
+            steps=steps,
+            would_execute_real_requests=True,
+            estimated_request_count=estimated_request_count,
+            blocked_by=blocked,
+            warnings=_dedupe_messages(warnings),
+            user_confirmation_required=True,
+            next_safe_action=(
+                "resolve blocked rehearsal sections before any execution"
+                if blocked
+                else "review rehearsal output and obtain explicit user confirmation before mirror-run --execute"
+            ),
+        )
+
+    def _read_manifest(self, bundle_root: Path, warnings: list[str], blocked_by: list[str]) -> dict[str, Any] | None:
+        manifest_path = bundle_root / MirrorBatchBundleReporter.MANIFEST_FILE
+        if not manifest_path.exists():
+            blocked_by.append("bundle_manifest")
+            return None
+        try:
+            return json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            blocked_by.append("bundle_manifest")
+            warnings.append(f"bundle manifest cannot be parsed: {exc}")
+            return None
+
+    def _warn_if_manifest_paths_differ(self, manifest: dict[str, Any], root: Path, backup: Path, warnings: list[str]) -> None:
+        if manifest.get("source_root") and _resolve_path(Path(str(manifest["source_root"]))) != root:
+            warnings.append("bundle source_root differs from rehearsal root")
+        if manifest.get("backup_root") and _resolve_path(Path(str(manifest["backup_root"]))) != backup:
+            warnings.append("bundle backup_root differs from rehearsal backup")
+
+    def _step(self, name: str, status: str, description: str, details: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "step": name,
+            "status": status,
+            "description": description,
+            "details": details,
+        }
 
 
 class MirrorOperatorChecklistReporter:
