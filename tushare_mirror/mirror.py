@@ -582,6 +582,26 @@ class PathDiagnosticsResult:
 
 
 @dataclass(frozen=True)
+class TokenHygieneResult:
+    report_version: str
+    status: str
+    path: str
+    scanned_file_count: int
+    skipped_file_count: int
+    suspicious_match_count: int
+    suspicious_paths: list[str]
+    token_plaintext_found: bool
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class SchemaStatusResult:
     report_version: str
     root: str
@@ -3255,6 +3275,192 @@ class PathDiagnosticsReporter:
             return root_parent.stat().st_dev == backup_parent.stat().st_dev, None
         except OSError as exc:
             return None, f"same_device unavailable: {exc}"
+
+
+class TokenHygieneScanner:
+    REPORT_VERSION = "token-hygiene/v1"
+    TOKEN_PATTERN = re.compile(
+        r"(?i)(?:\bTUSHARE_TOKEN\b|\btushare[\s_-]?token\b|\bapi[\s_-]?token\b|\baccess[\s_-]?token\b|\bsecret[\s_-]?token\b|\btoken\b)\s*[:=]\s*['\"]?[A-Za-z0-9][A-Za-z0-9_\-]{10,}"
+    )
+    TEXT_SUFFIXES = {
+        ".cfg",
+        ".conf",
+        ".csv",
+        ".env",
+        ".ini",
+        ".json",
+        ".jsonl",
+        ".log",
+        ".md",
+        ".sh",
+        ".sql",
+        ".toml",
+        ".tsv",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
+    TEXT_FILENAMES = {".env", "README", "README.md", "commands.sh", "manifest"}
+    SQLITE_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
+    BINARY_SUFFIXES = {
+        ".br",
+        ".bz2",
+        ".gz",
+        ".lz4",
+        ".parquet",
+        ".pickle",
+        ".pkl",
+        ".png",
+        ".sqlite-journal",
+        ".wal",
+        ".zip",
+        ".zst",
+    }
+
+    def scan(self, *, path: Path | str) -> TokenHygieneResult:
+        root = _resolve_path(Path(path))
+        warnings: list[str] = ["token-hygiene reports counts and paths only; matched token-like values are never printed"]
+        blocking_errors: list[str] = []
+        if not root.exists():
+            blocking_errors.append(f"path does not exist: {root}")
+            return self._result(root, "blocked", 0, 0, 0, [], warnings, blocking_errors)
+
+        scanned_file_count = 0
+        skipped_file_count = 0
+        suspicious_match_count = 0
+        suspicious_paths: list[str] = []
+        files = [root] if root.is_file() else (item for item in root.rglob("*") if item.is_file())
+        for file_path in files:
+            if self._is_sqlite_file(file_path):
+                scanned_file_count += 1
+                matches, scan_warnings = self._scan_sqlite(file_path)
+                warnings.extend(scan_warnings)
+            elif self._is_text_file(file_path):
+                scanned_file_count += 1
+                matches, scan_warnings = self._scan_text_file(file_path)
+                warnings.extend(scan_warnings)
+            else:
+                skipped_file_count += 1
+                continue
+            if matches:
+                suspicious_match_count += matches
+                suspicious_paths.append(str(file_path))
+
+        if suspicious_match_count:
+            blocking_errors.append("token-like plaintext found; paths are reported without matched values")
+        status = "blocked" if blocking_errors else "passed"
+        return self._result(
+            root,
+            status,
+            scanned_file_count,
+            skipped_file_count,
+            suspicious_match_count,
+            suspicious_paths,
+            warnings,
+            blocking_errors,
+        )
+
+    def _is_text_file(self, path: Path) -> bool:
+        if path.name in self.TEXT_FILENAMES:
+            return True
+        if path.suffix.lower() in self.BINARY_SUFFIXES:
+            return False
+        if path.suffix.lower() in self.TEXT_SUFFIXES:
+            return True
+        if path.name.endswith(".manifest") or path.name.endswith(".manifest.json"):
+            return True
+        return False
+
+    def _is_sqlite_file(self, path: Path) -> bool:
+        name = path.name.lower()
+        return path.suffix.lower() in self.SQLITE_SUFFIXES or name.endswith(".sqlite")
+
+    def _scan_text_file(self, path: Path) -> tuple[int, list[str]]:
+        try:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            return 0, [f"could not scan text file {path}: {exc}"]
+        return len(self.TOKEN_PATTERN.findall(content)), []
+
+    def _scan_sqlite(self, path: Path) -> tuple[int, list[str]]:
+        warnings: list[str] = []
+        matches = 0
+        uri = f"file:{path.resolve(strict=False).as_posix()}?mode=ro&immutable=1"
+        try:
+            conn = sqlite3.connect(uri, uri=True)
+        except sqlite3.Error as exc:
+            return 0, [f"could not open sqlite file {path}: {exc}"]
+        try:
+            conn.row_factory = sqlite3.Row
+            tables = [
+                row["name"]
+                for row in conn.execute("select name from sqlite_master where type = 'table' and name not like 'sqlite_%'")
+            ]
+            for table in tables:
+                try:
+                    columns = list(conn.execute(f"pragma table_info({self._quote_identifier(table)})"))
+                except sqlite3.Error as exc:
+                    warnings.append(f"could not inspect sqlite table {table} in {path}: {exc}")
+                    continue
+                for column in columns:
+                    name = str(column["name"])
+                    declared_type = str(column["type"] or "").lower()
+                    if not self._is_sqlite_text_column(name, declared_type):
+                        continue
+                    try:
+                        rows = conn.execute(f"select {self._quote_identifier(name)} as value from {self._quote_identifier(table)} where {self._quote_identifier(name)} is not null")
+                    except sqlite3.Error as exc:
+                        warnings.append(f"could not scan sqlite column {table}.{name} in {path}: {exc}")
+                        continue
+                    for row in rows:
+                        value = row["value"]
+                        if value is None:
+                            continue
+                        text = str(value)
+                        if self._column_name_suggests_plaintext_token(name) and len(text.strip()) >= 8:
+                            matches += 1
+                        matches += len(self.TOKEN_PATTERN.findall(text))
+        finally:
+            conn.close()
+        return matches, warnings
+
+    def _is_sqlite_text_column(self, name: str, declared_type: str) -> bool:
+        if self._column_name_suggests_plaintext_token(name):
+            return True
+        if not declared_type:
+            return True
+        return any(marker in declared_type for marker in ["char", "clob", "json", "text", "varchar"])
+
+    def _column_name_suggests_plaintext_token(self, name: str) -> bool:
+        lowered = name.lower()
+        return "token" in lowered and "hash" not in lowered and "hashed" not in lowered
+
+    def _quote_identifier(self, value: str) -> str:
+        return '"' + value.replace('"', '""') + '"'
+
+    def _result(
+        self,
+        path: Path,
+        status: str,
+        scanned_file_count: int,
+        skipped_file_count: int,
+        suspicious_match_count: int,
+        suspicious_paths: list[str],
+        warnings: list[str],
+        blocking_errors: list[str],
+    ) -> TokenHygieneResult:
+        return TokenHygieneResult(
+            report_version=self.REPORT_VERSION,
+            status=status,
+            path=str(path),
+            scanned_file_count=scanned_file_count,
+            skipped_file_count=skipped_file_count,
+            suspicious_match_count=suspicious_match_count,
+            suspicious_paths=sorted(set(suspicious_paths)),
+            token_plaintext_found=bool(suspicious_match_count),
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
 
 
 class SchemaStatusReporter:

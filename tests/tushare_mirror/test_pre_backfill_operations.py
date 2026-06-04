@@ -15,7 +15,7 @@ from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter
+from tushare_mirror.mirror import BackupStatusReporter, CommandSafetyAnalyzer, DAILY_LIKE_MIRROR_APIS, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorStatusReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, TokenHygieneScanner
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 
@@ -1399,6 +1399,78 @@ class PathDiagnosticsTests(PreBackfillOperationsTestCase):
             self.assertIn(key, payload)
         self.assertEqual(payload["report_version"], "path-diagnostics/v1")
         self.assertEqual(payload["status"], "passed")
+
+
+class TokenHygieneScannerTests(PreBackfillOperationsTestCase):
+    def test_clean_tree_passes_and_is_read_only(self):
+        self.build_pilot()
+        before = self.guardrail_counts()
+        report = TokenHygieneScanner().scan(path=self.root)
+        self.assertEqual(self.guardrail_counts(), before)
+        self.assertEqual(report.report_version, "token-hygiene/v1")
+        self.assertEqual(report.status, "passed")
+        self.assertFalse(report.token_plaintext_found)
+        self.assertEqual(report.suspicious_match_count, 0)
+        self.assertGreater(report.scanned_file_count, 0)
+
+    def test_token_fixture_detected_without_printing_token(self):
+        secret = "0123456789abcdef0123456789abcdef01234567"
+        fixture = self.base / "token-fixture"
+        fixture.mkdir()
+        (fixture / "settings.env").write_text(f"TUSHARE_TOKEN={secret}\n", encoding="utf-8")
+        result = self.run_cli("token-hygiene", "--path", str(fixture), "--json", token=secret, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["token_plaintext_found"])
+        self.assertEqual(payload["suspicious_match_count"], 1)
+        self.assertIn(str(fixture / "settings.env"), payload["suspicious_paths"])
+        self.assertNotIn(secret, result.stdout)
+        self.assertNotIn(secret, result.stderr)
+
+    def test_binary_file_is_skipped(self):
+        fixture = self.base / "binary-scan"
+        fixture.mkdir()
+        (fixture / "raw.parquet").write_bytes(b"TUSHARE_TOKEN=0123456789abcdef0123456789abcdef01234567")
+        report = TokenHygieneScanner().scan(path=fixture)
+        self.assertEqual(report.status, "passed")
+        self.assertFalse(report.token_plaintext_found)
+        self.assertEqual(report.scanned_file_count, 0)
+        self.assertEqual(report.skipped_file_count, 1)
+
+    def test_sqlite_text_fields_are_scanned_without_values(self):
+        secret = "0123456789abcdef0123456789abcdef01234567"
+        db = self.base / "fixture.sqlite"
+        with sqlite3.connect(db) as conn:
+            conn.execute("create table config(api_token text, token_hash text)")
+            conn.execute("insert into config(api_token, token_hash) values (?, ?)", (secret, "hash-only"))
+        report = TokenHygieneScanner().scan(path=db)
+        self.assertEqual(report.status, "blocked")
+        self.assertTrue(report.token_plaintext_found)
+        self.assertEqual(report.suspicious_match_count, 1)
+        self.assertEqual(report.suspicious_paths, [str(db)])
+        self.assertNotIn(secret, json.dumps(report.to_dict()))
+
+    def test_cli_json_contract_and_no_side_effects_for_token_hygiene(self):
+        self.build_pilot()
+        before = self.guardrail_counts()
+        result = self.run_cli("token-hygiene", "--path", str(self.root), "--json")
+        self.assertEqual(self.guardrail_counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "status",
+            "path",
+            "scanned_file_count",
+            "skipped_file_count",
+            "suspicious_match_count",
+            "suspicious_paths",
+            "token_plaintext_found",
+            "warnings",
+            "blocking_errors",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "token-hygiene/v1")
+        self.assertFalse(payload["token_plaintext_found"])
 
 
 class SchemaStatusReportTests(PreBackfillOperationsTestCase):

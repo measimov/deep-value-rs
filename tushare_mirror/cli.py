@@ -33,7 +33,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, init_catalog_if_requested
+from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, TokenHygieneScanner, init_catalog_if_requested
 from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
@@ -807,6 +807,15 @@ def cmd_mirror_failure_drill(args) -> int:
 
 def cmd_path_diagnostics(args) -> int:
     result = PathDiagnosticsReporter().report(root=args.mirror_root_arg, backup=args.backup)
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+    return 1 if result.blocking_errors else 0
+
+
+def cmd_token_hygiene(args) -> int:
+    result = TokenHygieneScanner().scan(path=args.path)
     if args.json:
         _print_json(result.to_dict())
     else:
@@ -1691,6 +1700,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--backup', required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_path_diagnostics)
+
+    p = sub.add_parser('token-hygiene', description='Read-only token hygiene scanner; reports suspicious counts and paths only, never matched token values.')
+    p.add_argument('--path', required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_token_hygiene)
 
     p = sub.add_parser('schema-status', description='Read-only schema drift and quarantine status report; does not make real requests or write catalog state.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
