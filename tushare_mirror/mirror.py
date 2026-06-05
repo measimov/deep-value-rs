@@ -385,6 +385,10 @@ class MirrorBatchBundleVerifyResult:
     status: str
     bundle: str
     bundle_id: str | None
+    manifest_present: bool
+    manifest_valid: bool
+    pre_manifest_bundle_detected: bool
+    recommended_action: str | None
     file_count: int
     checked_file_count: int
     missing_file_count: int
@@ -2027,24 +2031,35 @@ class MirrorBatchBundleVerifier:
         checksum_failure_count = 0
         command_guard_status = "blocked"
         bundle_id: str | None = None
+        manifest_present = False
+        manifest_valid = False
+        pre_manifest_bundle_detected = False
+        recommended_action: str | None = None
 
         if not bundle_root.exists() or not bundle_root.is_dir():
-            return self._result(bundle_root, None, 0, 0, 0, 0, "blocked", False, warnings, [f"bundle not found: {bundle_root}"])
+            return self._result(bundle_root, None, False, False, False, None, 0, 0, 0, 0, "blocked", False, warnings, [f"bundle not found: {bundle_root}"])
 
         file_count = self._file_count(bundle_root)
         manifest_path = bundle_root / MirrorBatchBundleReporter.MANIFEST_FILE
         manifest: dict[str, Any] | None = None
         if not manifest_path.exists():
-            blocking_errors.append("bundle_manifest.json not found")
+            pre_manifest_bundle_detected = self._looks_like_pre_manifest_bundle(bundle_root)
+            recommended_action = "Regenerate bundle with mirror-batch-bundle --overwrite"
+            blocking_errors.append("missing bundle_manifest.json")
         else:
+            manifest_present = True
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
+                recommended_action = "Regenerate bundle with mirror-batch-bundle --overwrite"
                 blocking_errors.append(f"bundle_manifest.json is invalid JSON: {exc}")
             else:
                 bundle_id = manifest.get("bundle_id")
                 if manifest.get("manifest_version") != MirrorBatchBundleReporter.MANIFEST_VERSION:
+                    recommended_action = "Regenerate bundle with mirror-batch-bundle --overwrite"
                     blocking_errors.append(f"unsupported manifest_version: {manifest.get('manifest_version')}")
+                else:
+                    manifest_valid = True
 
         if manifest:
             for item in manifest.get("files") or []:
@@ -2088,6 +2103,10 @@ class MirrorBatchBundleVerifier:
         return self._result(
             bundle_root,
             bundle_id,
+            manifest_present,
+            manifest_valid,
+            pre_manifest_bundle_detected,
+            recommended_action,
             file_count,
             checked_file_count,
             missing_file_count,
@@ -2103,6 +2122,10 @@ class MirrorBatchBundleVerifier:
         self,
         bundle: Path,
         bundle_id: str | None,
+        manifest_present: bool,
+        manifest_valid: bool,
+        pre_manifest_bundle_detected: bool,
+        recommended_action: str | None,
         file_count: int,
         checked_file_count: int,
         missing_file_count: int,
@@ -2120,6 +2143,10 @@ class MirrorBatchBundleVerifier:
             status=final_status,
             bundle=str(bundle),
             bundle_id=bundle_id,
+            manifest_present=manifest_present,
+            manifest_valid=manifest_valid,
+            pre_manifest_bundle_detected=pre_manifest_bundle_detected,
+            recommended_action=recommended_action,
             file_count=file_count,
             checked_file_count=checked_file_count,
             missing_file_count=missing_file_count,
@@ -2132,6 +2159,10 @@ class MirrorBatchBundleVerifier:
 
     def _file_count(self, bundle_root: Path) -> int:
         return sum(1 for path in bundle_root.iterdir() if path.is_file())
+
+    def _looks_like_pre_manifest_bundle(self, bundle_root: Path) -> bool:
+        marker_files = {"README.md", "commands.sh", "batch_plan.json", "readiness.json", "review.json", "status.json", "audit.json", "stop_policy.json"}
+        return any((bundle_root / relative_path).exists() for relative_path in marker_files)
 
     def _sha256(self, path: Path) -> str:
         digest = hashlib.sha256()

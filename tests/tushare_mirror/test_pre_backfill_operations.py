@@ -780,6 +780,10 @@ class MirrorBatchBundleVerifyTests(PreBackfillOperationsTestCase):
         self.assertEqual(self.counts(), before)
         self.assertEqual(result.report_version, "mirror-batch-bundle-verify/v1")
         self.assertEqual(result.status, "passed")
+        self.assertTrue(result.manifest_present)
+        self.assertTrue(result.manifest_valid)
+        self.assertFalse(result.pre_manifest_bundle_detected)
+        self.assertIsNone(result.recommended_action)
         self.assertEqual(result.file_count, 9)
         self.assertEqual(result.checked_file_count, 8)
         self.assertEqual(result.missing_file_count, 0)
@@ -787,6 +791,35 @@ class MirrorBatchBundleVerifyTests(PreBackfillOperationsTestCase):
         self.assertEqual(result.command_guard_status, "passed")
         self.assertFalse(result.token_plaintext_found)
         self.assertFalse(result.blocking_errors)
+
+    def test_pre_manifest_bundle_gives_clear_diagnostics(self):
+        output = self.base / "pre-manifest-bundle"
+        output.mkdir()
+        (output / "README.md").write_text("old bundle\n", encoding="utf-8")
+        (output / "commands.sh").write_text("# USER_CONFIRMATION_REQUIRED\n", encoding="utf-8")
+        before = self.counts()
+        result = MirrorBatchBundleVerifier().verify(bundle=output)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(result.status, "blocked")
+        self.assertFalse(result.manifest_present)
+        self.assertFalse(result.manifest_valid)
+        self.assertTrue(result.pre_manifest_bundle_detected)
+        self.assertEqual(result.recommended_action, "Regenerate bundle with mirror-batch-bundle --overwrite")
+        self.assertTrue(any("missing bundle_manifest.json" in error for error in result.blocking_errors))
+
+    def test_invalid_manifest_blocks_with_regeneration_action(self):
+        output = self.base / "invalid-manifest-bundle"
+        output.mkdir()
+        (output / "bundle_manifest.json").write_text("{not-json\n", encoding="utf-8")
+        (output / "README.md").write_text("bundle\n", encoding="utf-8")
+        (output / "commands.sh").write_text("# USER_CONFIRMATION_REQUIRED\n", encoding="utf-8")
+        result = MirrorBatchBundleVerifier().verify(bundle=output)
+        self.assertEqual(result.status, "blocked")
+        self.assertTrue(result.manifest_present)
+        self.assertFalse(result.manifest_valid)
+        self.assertFalse(result.pre_manifest_bundle_detected)
+        self.assertEqual(result.recommended_action, "Regenerate bundle with mirror-batch-bundle --overwrite")
+        self.assertTrue(any("invalid JSON" in error for error in result.blocking_errors))
 
     def test_missing_file_blocks_bundle_verification(self):
         output = self.base / "missing-file-bundle"
@@ -843,6 +876,10 @@ class MirrorBatchBundleVerifyTests(PreBackfillOperationsTestCase):
             "report_version",
             "status",
             "bundle_id",
+            "manifest_present",
+            "manifest_valid",
+            "pre_manifest_bundle_detected",
+            "recommended_action",
             "file_count",
             "checked_file_count",
             "missing_file_count",
