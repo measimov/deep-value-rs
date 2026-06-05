@@ -156,3 +156,118 @@ class FinalGateModelTests(PreBackfillOperationsTestCase):
         )
         self.assertNotIn("token", payload["confirmation_phrase"].lower())
 
+
+class FinalGateCliTests(PreBackfillOperationsTestCase):
+    def promotion_backup(self, name: str = "final-gate-cli-backup") -> Path:
+        backup = self.base / name
+        plan = BackupPlanner(self.root, self.catalog).plan(backup)
+        BackupExecutor(self.root, self.catalog).backup(plan)
+        return backup
+
+    def prepare_staged_gate(self) -> tuple[Path, Path]:
+        self.build_pilot()
+        self.cover_january_matrix()
+        backup = self.promotion_backup()
+        bundle = self.base / "cli-bundle-202502"
+        result = MirrorBatchBundleReporter().create(
+            root=self.root,
+            backup=backup,
+            scope="low-risk-a-share",
+            start_date="20250201",
+            end_date="20250228",
+            max_jobs_per_api=20,
+            output=bundle,
+        )
+        self.assertEqual(result.status, "created")
+        return backup, bundle
+
+    def final_gate_args(self, backup: Path, bundle: Path) -> list[str]:
+        return [
+            "mirror-final-gate",
+            "--root", str(self.root),
+            "--backup", str(backup),
+            "--bundle", str(bundle),
+            "--scope", "low-risk-a-share",
+            "--start-date", "20250201",
+            "--end-date", "20250228",
+            "--max-jobs-per-api", "20",
+        ]
+
+    def test_cli_table_output_is_read_only(self):
+        backup, bundle = self.prepare_staged_gate()
+        before = self.counts()
+        result = self.run_cli(*self.final_gate_args(backup, bundle))
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("gate_status", result.stdout)
+        self.assertIn("ready_for_user_confirmed_execute", result.stdout)
+        self.assertIn("command_safety_warning_only", result.stdout)
+
+    def test_cli_json_output_is_stable_and_read_only(self):
+        backup, bundle = self.prepare_staged_gate()
+        before = self.counts()
+        result = self.run_cli(*self.final_gate_args(backup, bundle), "--json")
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "gate_status",
+            "ready_for_user_confirmed_execute",
+            "ready_for_dependency_stage",
+            "ready_for_full_batch_after_dependency",
+            "requested_range",
+            "max_jobs_per_api",
+            "estimated_request_count",
+            "dependency_stage",
+            "final_command_preview",
+            "blocking_errors",
+            "warnings",
+            "safety_boundaries",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "mirror-final-gate/v1")
+        self.assertEqual(payload["gate_status"], "warning")
+        self.assertTrue(payload["ready_for_user_confirmed_execute"])
+
+    def test_cli_missing_root_error_is_clear(self):
+        backup, bundle = self.prepare_staged_gate()
+        result = self.run_cli(
+            "mirror-final-gate",
+            "--root", str(self.base / "missing-root"),
+            "--backup", str(backup),
+            "--bundle", str(bundle),
+            "--scope", "low-risk-a-share",
+            "--start-date", "20250201",
+            "--end-date", "20250228",
+            "--max-jobs-per-api", "20",
+            "--json",
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["gate_status"], "blocked")
+        self.assertTrue(any("catalog not found" in error or "review" in error for error in payload["blocking_errors"]))
+
+    def test_cli_missing_backup_error_is_clear(self):
+        backup, bundle = self.prepare_staged_gate()
+        result = self.run_cli(
+            *self.final_gate_args(self.base / "missing-backup", bundle),
+            "--json",
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["gate_status"], "blocked")
+        self.assertTrue(any("backup" in error for error in payload["blocking_errors"]))
+
+    def test_cli_missing_bundle_error_is_clear(self):
+        backup, _ = self.prepare_staged_gate()
+        result = self.run_cli(
+            *self.final_gate_args(backup, self.base / "missing-bundle"),
+            "--json",
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["gate_status"], "blocked")
+        self.assertTrue(any("bundle" in error for error in payload["blocking_errors"]))
