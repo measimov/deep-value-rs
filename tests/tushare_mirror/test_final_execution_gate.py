@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -491,3 +492,86 @@ class ExecuteReadinessReporterTests(PreBackfillOperationsTestCase):
         self.assertEqual(payload["report_version"], "mirror-execute-readiness/v1")
         self.assertEqual(payload["execute_readiness_status"], "warning")
         self.assertTrue(payload["may_execute_after_user_confirmation"])
+
+
+class FinalGateReadOnlyRegressionTests(PreBackfillOperationsTestCase):
+    def prepare_bundle(self) -> tuple[Path, Path]:
+        self.build_pilot()
+        self.cover_january_matrix()
+        backup = self.base / "readonly-backup"
+        plan = BackupPlanner(self.root, self.catalog).plan(backup)
+        BackupExecutor(self.root, self.catalog).backup(plan)
+        bundle = self.base / "readonly-bundle"
+        result = MirrorBatchBundleReporter().create(
+            root=self.root,
+            backup=backup,
+            scope="low-risk-a-share",
+            start_date="20250201",
+            end_date="20250228",
+            max_jobs_per_api=20,
+            output=bundle,
+        )
+        self.assertEqual(result.status, "created")
+        return backup, bundle
+
+    def backup_catalog_checksum(self, backup: Path) -> str:
+        path = backup / "_catalog" / "catalog.sqlite"
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def test_final_gate_commands_do_not_mutate_catalogs_or_data_files(self):
+        backup, bundle = self.prepare_bundle()
+        bundle_output = self.base / "readonly-generated-bundle"
+        script_output = self.base / "readonly-execute.sh"
+        commands = [
+            [
+                "mirror-final-gate",
+                "--root", str(self.root),
+                "--backup", str(backup),
+                "--bundle", str(bundle),
+                "--scope", "low-risk-a-share",
+                "--start-date", "20250201",
+                "--end-date", "20250228",
+                "--max-jobs-per-api", "20",
+                "--json",
+            ],
+            [
+                "mirror-execute-script",
+                "--root", str(self.root),
+                "--backup", str(backup),
+                "--bundle", str(bundle),
+                "--scope", "low-risk-a-share",
+                "--start-date", "20250201",
+                "--end-date", "20250228",
+                "--max-jobs-per-api", "20",
+                "--output", str(script_output),
+                "--json",
+            ],
+            [
+                "mirror-batch-bundle",
+                "--root", str(self.root),
+                "--backup", str(backup),
+                "--scope", "low-risk-a-share",
+                "--start-date", "20250201",
+                "--end-date", "20250228",
+                "--max-jobs-per-api", "20",
+                "--output", str(bundle_output),
+                "--json",
+            ],
+            ["mirror-execute-readiness", "--root", str(self.root), "--backup", str(backup), "--bundle", str(bundle), "--scope", "low-risk-a-share", "--start-date", "20250201", "--end-date", "20250228", "--max-jobs-per-api", "20", "--json"],
+            ["mirror-batch-bundle-verify", "--bundle", str(bundle), "--json"],
+            ["command-safety-check", "--file", str(bundle / "commands.sh"), "--json"],
+            ["mirror-batch-rehearse", "--root", str(self.root), "--backup", str(backup), "--bundle", str(bundle), "--json"],
+        ]
+        for args in commands:
+            with self.subTest(command=args[0]):
+                before = self.guardrail_counts()
+                before_checksum = self.backup_catalog_checksum(backup)
+                result = self.run_cli(*args)
+                after = self.guardrail_counts()
+                after_checksum = self.backup_catalog_checksum(backup)
+                self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+                self.assertEqual(after, before)
+                self.assertEqual(after["mirror_catalog"]["validations"], before["mirror_catalog"]["validations"])
+                self.assertEqual(after["mirror_raw_files"], before["mirror_raw_files"])
+                self.assertEqual(after["mirror_lake_files"], before["mirror_lake_files"])
+                self.assertEqual(before_checksum, after_checksum)
