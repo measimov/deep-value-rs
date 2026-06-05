@@ -1,0 +1,20 @@
+endpoints:
+  - api_name: concept_detail
+    family: concept_metadata
+    domain: stock
+    volume_class: C1_CODE_LIST
+    partition_template: family_code_snapshot
+    primary_date_field: null
+    supported_params:
+      - id
+      - ts_code
+    endpoint_kind: reference_snapshot
+    planner_kind: code_list
+    execution_status: disabled
+    reason_disabled: "requires bounded concept-code or stock-code traversal"
+    required_infra:
+      - explicit concept id source
+      - max-code policy
+      - concept membership diff policy
+    risk_level: medium
+    notes: "Inventory only; concept list is executable, but concept_detail traversal is not."

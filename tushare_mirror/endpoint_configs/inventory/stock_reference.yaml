@@ -1,16 +1,13 @@
 endpoints:
-  - api_name: stock_company
-    endpoint_kind: reference_snapshot
-    planner_kind: single_snapshot
-    execution_status: disabled
-    reason_disabled: "inventory only; not part of executable low-risk mirror scope"
-    required_infra:
-      - endpoint contract probe
-      - explicit enablement review
-    risk_level: low
-    notes: "Company reference metadata can be enabled later after scoped fake and real smoke tests."
-
   - api_name: new_share
+    family: stock_event
+    domain: stock
+    volume_class: S1_EVENT
+    partition_template: event_year_month
+    primary_date_field: issue_date
+    supported_params:
+      - start_date
+      - end_date
     endpoint_kind: event
     planner_kind: date_backfill
     execution_status: disabled

@@ -51,7 +51,7 @@ class EndpointCapabilityTaxonomyTests(unittest.TestCase):
     def test_enabled_endpoint_configs_are_normalized_with_allowed_capabilities(self):
         load_into_catalog(self.root, self.catalog)
         endpoints = self.catalog.list_endpoints()
-        self.assertEqual(len(endpoints), 12)
+        self.assertEqual(len(endpoints), 20)
         for row in endpoints:
             cfg = self.catalog.get_endpoint_config(row["api_name"])
             capability = capability_from_config(cfg)
@@ -239,7 +239,7 @@ class DisabledEndpointInventoryTests(unittest.TestCase):
         executable = {row["api_name"] for row in self.catalog.list_endpoints()}
         inventory = {item["api_name"] for item in load_inventory_configs()}
         self.assertTrue(inventory.isdisjoint(executable))
-        self.assertEqual(len(executable), 12)
+        self.assertEqual(len(executable), 20)
         plan = MirrorPlanner(self.root, self.catalog).plan(scope="low-risk-a-share", mode="smoke", max_jobs_per_api=3)
         planned = {item.endpoint for item in plan.items}
         self.assertTrue(inventory.isdisjoint(planned))

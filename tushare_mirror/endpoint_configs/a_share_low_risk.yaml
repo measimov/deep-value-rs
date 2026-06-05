@@ -1,0 +1,347 @@
+endpoints:
+  - api_name: stock_company
+    family: stock_reference
+    market: a
+    domain: stock
+    permission_class: regular
+    volume_class: S0_STATIC
+    endpoint_kind: reference_snapshot
+    planner_kind: single_snapshot
+    execution_status: enabled
+    partition_template: snapshot_date
+    primary_date_field: null
+    supported_params:
+      - exchange
+    default_params:
+      exchange: SSE
+    default_fields:
+      - ts_code
+      - exchange
+      - chairman
+      - manager
+      - secretary
+      - reg_capital
+      - setup_date
+      - province
+      - city
+      - introduction
+      - website
+      - email
+      - office
+      - employees
+      - main_business
+      - business_scope
+    probe:
+      params:
+        exchange: SSE
+      fields:
+        - ts_code
+        - exchange
+        - chairman
+      allow_empty_probe: false
+    page_size: 5000
+    risk_level: low
+    required_infra:
+      - single snapshot fetch
+      - fake fixture validation
+    notes: "Bounded exchange snapshot; future full pull may fan out over reviewed exchanges only."
+    enabled: true
+
+  - api_name: concept
+    family: concept_metadata
+    market: a
+    domain: stock
+    permission_class: regular
+    volume_class: S0_STATIC
+    endpoint_kind: reference_snapshot
+    planner_kind: single_snapshot
+    execution_status: enabled
+    partition_template: snapshot_date
+    primary_date_field: null
+    supported_params:
+      - src
+    default_params:
+      src: ts
+    default_fields:
+      - code
+      - name
+      - src
+    probe:
+      params:
+        src: ts
+      fields:
+        - code
+        - name
+        - src
+      allow_empty_probe: false
+    page_size: 5000
+    risk_level: low
+    required_infra:
+      - single snapshot fetch
+      - fake fixture validation
+    notes: "Concept list metadata only; concept_detail remains disabled because it requires concept-code traversal."
+    enabled: true
+
+  - api_name: index_basic
+    family: index_metadata
+    market: a
+    domain: index
+    permission_class: regular
+    volume_class: S0_STATIC
+    endpoint_kind: index
+    planner_kind: single_snapshot
+    execution_status: enabled
+    partition_template: snapshot_date
+    primary_date_field: null
+    supported_params:
+      - market
+      - publisher
+      - category
+      - name
+    default_params:
+      market: SSE
+    default_fields:
+      - ts_code
+      - name
+      - fullname
+      - market
+      - publisher
+      - index_type
+      - category
+      - base_date
+      - base_point
+      - list_date
+      - weight_rule
+      - desc
+      - exp_date
+    probe:
+      params:
+        market: SSE
+      fields:
+        - ts_code
+        - name
+        - market
+      allow_empty_probe: false
+    page_size: 5000
+    risk_level: low
+    required_infra:
+      - single snapshot fetch
+      - fake fixture validation
+    notes: "Bounded index metadata snapshot; no constituent or weight traversal."
+    enabled: true
+
+  - api_name: index_daily
+    family: index_market_data
+    market: a
+    domain: index
+    permission_class: regular
+    volume_class: D1_DAILY_NARROW
+    endpoint_kind: index
+    planner_kind: calendar_backfill
+    execution_status: enabled
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params:
+      - ts_code
+      - trade_date
+      - start_date
+      - end_date
+    default_fields:
+      - ts_code
+      - trade_date
+      - open
+      - high
+      - low
+      - close
+      - pre_close
+      - change
+      - pct_chg
+      - vol
+      - amount
+    probe:
+      params:
+        trade_date: '20250102'
+      fields:
+        - ts_code
+        - trade_date
+        - close
+      allow_empty_probe: false
+    page_size: 5000
+    risk_level: medium
+    required_infra:
+      - calendar-aware date planner
+      - fake fixture validation
+    notes: "Date-bounded index bars; no index-code loop is required for trade_date probes."
+    enabled: true
+
+  - api_name: index_weekly
+    family: index_market_data
+    market: a
+    domain: index
+    permission_class: regular
+    volume_class: D1_DAILY_NARROW
+    endpoint_kind: index
+    planner_kind: explicit_dates
+    execution_status: enabled
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params:
+      - ts_code
+      - trade_date
+      - start_date
+      - end_date
+    default_fields:
+      - ts_code
+      - trade_date
+      - open
+      - high
+      - low
+      - close
+      - pre_close
+      - change
+      - pct_chg
+      - vol
+      - amount
+    probe:
+      params:
+        trade_date: '20250103'
+      fields:
+        - ts_code
+        - trade_date
+        - close
+      allow_empty_probe: false
+    page_size: 5000
+    risk_level: medium
+    required_infra:
+      - explicit date planner
+      - fake fixture validation
+    notes: "Bounded explicit-date index weekly bars; no index-code loop."
+    enabled: true
+
+  - api_name: index_monthly
+    family: index_market_data
+    market: a
+    domain: index
+    permission_class: regular
+    volume_class: D1_DAILY_NARROW
+    endpoint_kind: index
+    planner_kind: explicit_dates
+    execution_status: enabled
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params:
+      - ts_code
+      - trade_date
+      - start_date
+      - end_date
+    default_fields:
+      - ts_code
+      - trade_date
+      - open
+      - high
+      - low
+      - close
+      - pre_close
+      - change
+      - pct_chg
+      - vol
+      - amount
+    probe:
+      params:
+        trade_date: '20250127'
+      fields:
+        - ts_code
+        - trade_date
+        - close
+      allow_empty_probe: false
+    page_size: 5000
+    risk_level: medium
+    required_infra:
+      - explicit date planner
+      - fake fixture validation
+    notes: "Bounded explicit-date index monthly bars; no index-code loop."
+    enabled: true
+
+  - api_name: ths_index
+    family: index_metadata
+    market: a
+    domain: index
+    permission_class: regular
+    volume_class: S0_STATIC
+    endpoint_kind: index
+    planner_kind: single_snapshot
+    execution_status: enabled
+    partition_template: snapshot_date
+    primary_date_field: null
+    supported_params:
+      - exchange
+      - type
+    default_params:
+      exchange: A
+      type: N
+    default_fields:
+      - ts_code
+      - name
+      - count
+      - exchange
+      - list_date
+      - type
+    probe:
+      params:
+        exchange: A
+        type: N
+      fields:
+        - ts_code
+        - name
+        - exchange
+      allow_empty_probe: false
+    page_size: 5000
+    risk_level: low
+    required_infra:
+      - single snapshot fetch
+      - fake fixture validation
+    notes: "THS index metadata only; ths_member remains disabled because it requires index-code traversal."
+    enabled: true
+
+  - api_name: index_classify
+    family: index_metadata
+    market: a
+    domain: index
+    permission_class: regular
+    volume_class: S0_STATIC
+    endpoint_kind: index
+    planner_kind: single_snapshot
+    execution_status: enabled
+    partition_template: snapshot_date
+    primary_date_field: null
+    supported_params:
+      - index_code
+      - level
+      - src
+    default_params:
+      src: SW2021
+      level: L1
+    default_fields:
+      - index_code
+      - industry_name
+      - level
+      - industry_code
+      - is_pub
+      - parent_code
+      - src
+    probe:
+      params:
+        src: SW2021
+        level: L1
+      fields:
+        - index_code
+        - industry_name
+        - level
+      allow_empty_probe: false
+    page_size: 5000
+    risk_level: low
+    required_infra:
+      - single snapshot fetch
+      - fake fixture validation
+    notes: "Industry classification snapshot only; no member traversal."
+    enabled: true

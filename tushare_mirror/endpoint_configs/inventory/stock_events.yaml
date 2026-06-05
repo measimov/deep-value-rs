@@ -1,5 +1,16 @@
 endpoints:
   - api_name: dividend
+    family: stock_event
+    domain: stock
+    volume_class: S2_CODE_DATE
+    partition_template: period_year
+    primary_date_field: end_date
+    supported_params:
+      - ts_code
+      - ann_date
+      - record_date
+      - ex_date
+      - imp_ann_date
     endpoint_kind: event
     planner_kind: code_date_matrix
     execution_status: disabled
@@ -12,6 +23,14 @@ endpoints:
     notes: "Do not execute until code-loop infrastructure exists."
 
   - api_name: pledge_stat
+    family: stock_pledge
+    domain: stock
+    volume_class: S2_CODE_DATE
+    partition_template: period_year
+    primary_date_field: end_date
+    supported_params:
+      - ts_code
+      - end_date
     endpoint_kind: event
     planner_kind: code_date_matrix
     execution_status: disabled
@@ -21,3 +40,127 @@ endpoints:
       - bounded matrix planner
     risk_level: high
     notes: "Inventory only; no stock loop is allowed."
+
+  - api_name: top10_holders
+    family: shareholder
+    domain: stock
+    volume_class: S2_CODE_PERIOD
+    partition_template: period_year
+    primary_date_field: end_date
+    supported_params:
+      - ts_code
+      - period
+    endpoint_kind: event
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "requires stock code and report-period traversal guardrails"
+    required_infra:
+      - explicit stock universe source
+      - bounded code/period planner
+      - max-code and max-period policy
+    risk_level: high
+    notes: "Inventory only; no stock loop is executable."
+
+  - api_name: top10_floatholders
+    family: shareholder
+    domain: stock
+    volume_class: S2_CODE_PERIOD
+    partition_template: period_year
+    primary_date_field: end_date
+    supported_params:
+      - ts_code
+      - period
+    endpoint_kind: event
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "requires stock code and report-period traversal guardrails"
+    required_infra:
+      - explicit stock universe source
+      - bounded code/period planner
+      - max-code and max-period policy
+    risk_level: high
+    notes: "Inventory only; no stock loop is executable."
+
+  - api_name: stk_holdernumber
+    family: shareholder
+    domain: stock
+    volume_class: S1_EVENT
+    partition_template: event_year_month
+    primary_date_field: ann_date
+    supported_params:
+      - ts_code
+      - ann_date
+      - start_date
+      - end_date
+    endpoint_kind: event
+    planner_kind: code_date_matrix
+    execution_status: disabled
+    reason_disabled: "requires proof that date-range requests are complete without stock-code traversal"
+    required_infra:
+      - endpoint contract probe
+      - bounded code/date matrix planner
+      - completeness validation
+    risk_level: medium
+    notes: "Plan-only inventory until endpoint completeness is proven without an unbounded stock loop."
+
+  - api_name: stk_holdertrade
+    family: shareholder
+    domain: stock
+    volume_class: S1_EVENT
+    partition_template: event_year_month
+    primary_date_field: ann_date
+    supported_params:
+      - ts_code
+      - ann_date
+      - start_date
+      - end_date
+    endpoint_kind: event
+    planner_kind: code_date_matrix
+    execution_status: disabled
+    reason_disabled: "requires proof that date-range requests are complete without stock-code traversal"
+    required_infra:
+      - endpoint contract probe
+      - bounded code/date matrix planner
+      - completeness validation
+    risk_level: medium
+    notes: "Plan-only inventory until endpoint completeness is proven without an unbounded stock loop."
+
+  - api_name: pledge_detail
+    family: stock_pledge
+    domain: stock
+    volume_class: S2_CODE_DATE
+    partition_template: event_year_month
+    primary_date_field: ann_date
+    supported_params:
+      - ts_code
+    endpoint_kind: event
+    planner_kind: code_list
+    execution_status: disabled
+    reason_disabled: "requires explicit stock code traversal guardrails"
+    required_infra:
+      - explicit stock universe source
+      - bounded code-list planner
+      - max-code policy
+    risk_level: high
+    notes: "Inventory only; no stock loop is executable."
+
+  - api_name: repurchase
+    family: stock_event
+    domain: stock
+    volume_class: S1_EVENT
+    partition_template: event_year_month
+    primary_date_field: ann_date
+    supported_params:
+      - ann_date
+      - start_date
+      - end_date
+    endpoint_kind: event
+    planner_kind: date_backfill
+    execution_status: disabled
+    reason_disabled: "requires endpoint-specific fake fixture and bounded event-date validation before execution"
+    required_infra:
+      - endpoint contract probe
+      - bounded event-date planner tests
+      - fake fixture validation
+    risk_level: medium
+    notes: "Disabled inventory until event-date semantics are tested."

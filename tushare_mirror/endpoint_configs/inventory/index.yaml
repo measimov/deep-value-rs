@@ -1,16 +1,8 @@
 endpoints:
-  - api_name: index_basic
-    endpoint_kind: index
-    planner_kind: single_snapshot
-    execution_status: disabled
-    reason_disabled: "index family is not in current executable mirror scope"
-    required_infra:
-      - endpoint contract probe
-      - scope definition
-    risk_level: medium
-    notes: "Inventory only."
-
-  - api_name: index_daily
+  - api_name: index_weight
+    family: index_weight
+    domain: index
+    volume_class: I2_CODE_DATE
     endpoint_kind: index
     planner_kind: code_date_matrix
     execution_status: disabled
@@ -18,5 +10,51 @@ endpoints:
     required_infra:
       - index code-list source
       - code/date matrix planner
+      - max-code and max-date policy
     risk_level: high
-    notes: "Inventory only."
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params:
+      - index_code
+      - trade_date
+      - start_date
+      - end_date
+    notes: "Inventory only; no index-code loop is executable."
+
+  - api_name: index_member
+    family: index_constituent
+    domain: index
+    volume_class: I1_CONSTITUENT
+    endpoint_kind: index
+    planner_kind: code_list
+    execution_status: disabled
+    reason_disabled: "requires bounded index-code traversal"
+    required_infra:
+      - explicit index code source
+      - max-code policy
+      - constituent diff policy
+    risk_level: high
+    partition_template: family_code_snapshot
+    primary_date_field: null
+    supported_params:
+      - index_code
+    notes: "Inventory only; no index-code loop is executable."
+
+  - api_name: ths_member
+    family: index_constituent
+    domain: index
+    volume_class: I1_CONSTITUENT
+    endpoint_kind: index
+    planner_kind: code_list
+    execution_status: disabled
+    reason_disabled: "requires bounded THS index-code traversal"
+    required_infra:
+      - explicit THS index source
+      - max-code policy
+      - constituent diff policy
+    risk_level: high
+    partition_template: family_code_snapshot
+    primary_date_field: null
+    supported_params:
+      - ts_code
+    notes: "Inventory only; no THS index-code loop is executable."

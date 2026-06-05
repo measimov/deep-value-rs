@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tushare_mirror.catalog import CatalogStore
+from tushare_mirror.endpoints import load_bundled_endpoint_configs, load_into_catalog, load_inventory_configs
 from tushare_mirror.mirror import MirrorScopeReporter
 
 
@@ -33,8 +35,11 @@ class AShareLowRiskScopeTests(unittest.TestCase):
         self.assertIn("stock_basic", payload["endpoints_in_scope"])
         self.assertIn("stock_company", payload["endpoints_in_scope"])
         self.assertIn("daily", payload["executable_now"])
-        self.assertIn("stock_company", payload["disabled"])
-        self.assertIn("top10_holders", payload["missing_metadata"])
+        self.assertIn("stock_company", payload["executable_now"])
+        self.assertIn("concept", payload["executable_now"])
+        self.assertIn("index_daily", payload["executable_now"])
+        self.assertIn("top10_holders", payload["disabled"])
+        self.assertEqual(payload["missing_metadata"], [])
         self.assertIn("next_enablement_step", payload)
 
     def test_high_risk_families_are_excluded(self):
@@ -70,7 +75,8 @@ class AShareLowRiskScopeTests(unittest.TestCase):
         ]:
             self.assertIn(key, payload)
         self.assertIn("daily", payload["executable_now"])
-        self.assertIn("stock_company", payload["disabled"])
+        self.assertIn("stock_company", payload["executable_now"])
+        self.assertIn("top10_holders", payload["disabled"])
 
     def test_unknown_scope_is_rejected(self):
         result = subprocess.run(
@@ -82,6 +88,80 @@ class AShareLowRiskScopeTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unknown mirror scope", result.stderr)
+
+
+class AShareLowRiskEndpointMetadataTests(unittest.TestCase):
+    EXECUTABLE_ADDED = {
+        "stock_company",
+        "concept",
+        "index_basic",
+        "index_daily",
+        "index_weekly",
+        "index_monthly",
+        "ths_index",
+        "index_classify",
+    }
+
+    DISABLED_LOW_RISK = {
+        "top10_holders",
+        "top10_floatholders",
+        "stk_holdernumber",
+        "stk_holdertrade",
+        "pledge_stat",
+        "pledge_detail",
+        "repurchase",
+        "concept_detail",
+        "index_weight",
+        "index_member",
+        "ths_member",
+    }
+
+    def test_new_executable_configs_load_with_required_metadata(self):
+        configs = {cfg["api_name"]: cfg for cfg in load_bundled_endpoint_configs()}
+        self.assertTrue(self.EXECUTABLE_ADDED <= set(configs))
+        for api_name in self.EXECUTABLE_ADDED:
+            cfg = configs[api_name]
+            for key in [
+                "family",
+                "domain",
+                "endpoint_kind",
+                "planner_kind",
+                "execution_status",
+                "volume_class",
+                "partition_template",
+                "supported_params",
+                "default_fields",
+                "probe",
+                "risk_level",
+                "required_infra",
+                "notes",
+            ]:
+                self.assertIn(key, cfg, f"{api_name}:{key}")
+            self.assertEqual(cfg["execution_status"], "enabled")
+            self.assertIn(cfg["planner_kind"], {"single_snapshot", "calendar_backfill", "explicit_dates"})
+
+    def test_unsafe_candidates_are_disabled_inventory_only(self):
+        inventory = {cfg["api_name"]: cfg for cfg in load_inventory_configs()}
+        self.assertTrue(self.DISABLED_LOW_RISK <= set(inventory))
+        for api_name in self.DISABLED_LOW_RISK:
+            cfg = inventory[api_name]
+            self.assertEqual(cfg["execution_status"], "disabled")
+            self.assertIn(cfg["planner_kind"], {"code_list", "code_date_matrix", "code_period_matrix", "date_backfill"})
+            self.assertTrue(cfg["required_infra"])
+            self.assertIn("domain", cfg)
+            self.assertIn("family", cfg)
+
+    def test_executable_catalog_excludes_disabled_inventory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "lake"
+            catalog = CatalogStore(root)
+            catalog.init()
+            load_into_catalog(root, catalog)
+            executable = {row["api_name"] for row in catalog.list_endpoints()}
+        inventory = {cfg["api_name"] for cfg in load_inventory_configs()}
+        self.assertTrue(self.EXECUTABLE_ADDED <= executable)
+        self.assertTrue(self.DISABLED_LOW_RISK.isdisjoint(executable))
+        self.assertTrue(inventory.isdisjoint(executable))
 
 
 if __name__ == "__main__":
