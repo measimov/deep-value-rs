@@ -3573,15 +3573,26 @@ class MonthlyPromotionChecklistReporter:
         checks: dict[str, Any] = {}
 
         coverage = MirrorCoverageMatrixReporter().report(root=mirror_root, scope=scope, start_date=from_start, end_date=from_end)
-        source_complete = bool(coverage.items) and not coverage.blocking_errors and all(item.get("status") == "complete" for item in coverage.items)
+        daily_like_items = [item for item in coverage.items if item.get("coverage_class") == "daily_like"]
+        weekly_monthly_items = [item for item in coverage.items if item.get("coverage_class") == "weekly_monthly"]
+        daily_like_complete = bool(daily_like_items) and not coverage.blocking_errors and all(item.get("status") == "complete" for item in daily_like_items)
+        weekly_monthly_complete = bool(weekly_monthly_items) and all(item.get("status") == "complete" for item in weekly_monthly_items)
         checks["source_month_coverage_complete"] = {
-            "passed": source_complete,
+            "passed": daily_like_complete,
             "summary": coverage.items,
+            "daily_like_summary": daily_like_items,
+            "weekly_monthly_advisory_summary": weekly_monthly_items,
+        }
+        checks["weekly_monthly_advisory_coverage"] = {
+            "passed": weekly_monthly_complete,
+            "summary": weekly_monthly_items,
         }
         warnings.extend(coverage.warnings)
         blocking_errors.extend(coverage.blocking_errors)
-        if not source_complete:
+        if not daily_like_complete:
             blocking_errors.append(f"source month {from_month} coverage is incomplete")
+        if weekly_monthly_items and not weekly_monthly_complete:
+            warnings.append(f"source month {from_month} weekly/monthly advisory coverage is partial")
 
         backup_status = BackupStatusReporter().report(backup=backup_root)
         backup_valid = bool(backup_status.manifest_valid and backup_status.restore_check_status == "succeeded")
@@ -4080,6 +4091,7 @@ class MirrorCoverageMatrixReporter:
         )
 
     def _api_row(self, root: Path, catalog: CatalogStore, api_name: str, start_date: str, end_date: str, warnings: list[str]) -> dict[str, Any]:
+        coverage_class = "daily_like" if api_name in DAILY_LIKE_MIRROR_APIS else "weekly_monthly"
         try:
             if api_name in DAILY_LIKE_MIRROR_APIS:
                 report = CoverageReporter(root, catalog).report(
@@ -4090,14 +4102,14 @@ class MirrorCoverageMatrixReporter:
                     calendar_exchange="SSE",
                 )
             else:
-                dates = self._weekly_dates(start_date, end_date) if api_name == "weekly" else self._monthly_dates(start_date, end_date)
+                dates = self._weekly_monthly_dates(api_name, start_date, end_date)
                 report = CoverageReporter(root, catalog).report(api_name, dates=dates)
         except Exception as exc:
             if api_name in DAILY_LIKE_MIRROR_APIS:
                 warnings.append(f"{api_name} coverage unavailable: {exc}")
-                return self._empty_row(api_name, "blocked_missing_trade_cal", str(exc))
+                return self._empty_row(api_name, coverage_class, "blocked_missing_trade_cal", str(exc))
             warnings.append(f"{api_name} coverage unavailable: {exc}")
-            return self._empty_row(api_name, "blocked", str(exc))
+            return self._empty_row(api_name, coverage_class, "blocked", str(exc))
         missing_dates = [item.date for item in report.items if item.existing_status == "missing"]
         failed_dates = [item.date for item in report.items if item.existing_status in {"failed_exists", "quarantined_exists"}]
         status = "complete" if report.total_dates > 0 and report.missing_dates == 0 and report.failed_dates == 0 and report.quarantined_dates == 0 else "partial"
@@ -4105,6 +4117,7 @@ class MirrorCoverageMatrixReporter:
             status = "empty"
         return {
             "api": api_name,
+            "coverage_class": coverage_class,
             "total_dates": report.total_dates,
             "covered_dates": report.covered_dates,
             "missing_dates": report.missing_dates,
@@ -4114,9 +4127,10 @@ class MirrorCoverageMatrixReporter:
             "failed_date_sample": failed_dates[:10],
         }
 
-    def _empty_row(self, api_name: str, status: str, reason: str) -> dict[str, Any]:
+    def _empty_row(self, api_name: str, coverage_class: str, status: str, reason: str) -> dict[str, Any]:
         return {
             "api": api_name,
+            "coverage_class": coverage_class,
             "total_dates": 0,
             "covered_dates": 0,
             "missing_dates": 0,
@@ -4132,6 +4146,17 @@ class MirrorCoverageMatrixReporter:
 
     def _monthly_dates(self, start_date: str, end_date: str) -> list[str]:
         return MirrorBatchPlanner(Path("."), CatalogStore(Path("."), read_only=True))._monthly_dates(start_date, end_date)
+
+    def _weekly_monthly_dates(self, api_name: str, start_date: str, end_date: str) -> list[str]:
+        if api_name == "weekly":
+            fallback_dates = self._weekly_dates(start_date, end_date)
+            pilot_dates = PILOT_JAN_2025_WEEKLY_DATES
+        else:
+            fallback_dates = self._monthly_dates(start_date, end_date)
+            pilot_dates = PILOT_JAN_2025_MONTHLY_DATES
+        expected = {date for date in fallback_dates if not ("20250101" <= date <= "20250131")}
+        expected.update(date for date in pilot_dates if start_date <= date <= end_date)
+        return sorted(expected)
 
 
 class RequestEstimateReporter:

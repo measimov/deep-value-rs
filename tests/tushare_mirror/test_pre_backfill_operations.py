@@ -246,8 +246,8 @@ class PreBackfillOperationsTestCase(unittest.TestCase):
 
     def cover_january_matrix(self):
         self.cover_daily_like_range("20250101", "20250131")
-        self.cover_date_api("weekly", ["20250103", "20250110", "20250117", "20250124", "20250131"])
-        self.cover_date_api("monthly", ["20250131"])
+        self.cover_date_api("weekly", ["20250103", "20250110", "20250117", "20250124", "20250127"])
+        self.cover_date_api("monthly", ["20250127"])
 
 
 class MirrorStatusDashboardTests(PreBackfillOperationsTestCase):
@@ -500,6 +500,11 @@ class MirrorCoverageMatrixTests(PreBackfillOperationsTestCase):
         self.assertEqual({item["api"] for item in report.items}, {"daily", "adj_factor", "daily_basic", "suspend_d", "weekly", "monthly"})
         self.assertTrue(all(item["status"] == "complete" for item in report.items))
         self.assertTrue(all(item["missing_dates"] == 0 for item in report.items))
+        by_api = {item["api"]: item for item in report.items}
+        self.assertEqual(by_api["daily"]["coverage_class"], "daily_like")
+        self.assertEqual(by_api["weekly"]["coverage_class"], "weekly_monthly")
+        self.assertEqual(by_api["monthly"]["coverage_class"], "weekly_monthly")
+        self.assertEqual(by_api["monthly"]["total_dates"], 1)
 
     def test_partial_coverage_matrix_reports_missing_dates(self):
         self.cover_daily_like_range("20250101", "20250131", apis=["daily"])
@@ -510,6 +515,16 @@ class MirrorCoverageMatrixTests(PreBackfillOperationsTestCase):
         self.assertGreater(by_api["adj_factor"]["missing_dates"], 0)
         self.assertTrue(by_api["adj_factor"]["missing_date_sample"])
         self.assertEqual(by_api["weekly"]["status"], "partial")
+        self.assertEqual(by_api["weekly"]["coverage_class"], "weekly_monthly")
+
+    def test_monthly_pilot_date_20250127_is_accepted(self):
+        self.cover_daily_like_range("20250101", "20250131")
+        self.cover_date_api("weekly", ["20250103", "20250110", "20250117", "20250124", "20250127"])
+        self.cover_date_api("monthly", ["20250127"])
+        report = MirrorCoverageMatrixReporter().report(root=self.root, scope="low-risk-a-share", start_date="20250101", end_date="20250131")
+        by_api = {item["api"]: item for item in report.items}
+        self.assertEqual(by_api["monthly"]["status"], "complete")
+        self.assertEqual(by_api["monthly"]["missing_date_sample"], [])
 
     def test_missing_trade_cal_blocks_daily_like_rows(self):
         before = self.counts()
@@ -518,6 +533,7 @@ class MirrorCoverageMatrixTests(PreBackfillOperationsTestCase):
         by_api = {item["api"]: item for item in report.items}
         for api_name in DAILY_LIKE_MIRROR_APIS:
             self.assertEqual(by_api[api_name]["status"], "blocked_missing_trade_cal")
+            self.assertEqual(by_api[api_name]["coverage_class"], "daily_like")
         self.assertEqual(by_api["weekly"]["status"], "partial")
 
     def test_cli_json_contract_and_no_side_effects_for_coverage_matrix(self):
@@ -1581,6 +1597,7 @@ class MonthlyPromotionChecklistTests(PreBackfillOperationsTestCase):
 
     def test_incomplete_source_month_blocks(self):
         self.build_pilot()
+        self.fetch_trade_cal_range("20250101", "20250131")
         self.fetch_trade_cal_range("20250201", "20250228")
         backup = self.promotion_backup()
         report = MonthlyPromotionChecklistReporter(token_available=True).report(
@@ -1592,6 +1609,23 @@ class MonthlyPromotionChecklistTests(PreBackfillOperationsTestCase):
         )
         self.assertFalse(report.ready_to_promote)
         self.assertTrue(any("source month 202501 coverage is incomplete" in error for error in report.blocking_errors))
+
+    def test_weekly_monthly_partial_is_advisory_when_daily_like_complete(self):
+        self.build_pilot()
+        self.cover_daily_like_range("20250101", "20250131")
+        self.fetch_trade_cal_range("20250201", "20250228")
+        backup = self.promotion_backup()
+        report = MonthlyPromotionChecklistReporter(token_available=True).report(
+            root=self.root,
+            backup=backup,
+            scope="low-risk-a-share",
+            from_month="202501",
+            to_month="202502",
+        )
+        self.assertFalse(report.checks["weekly_monthly_advisory_coverage"]["passed"])
+        self.assertTrue(report.checks["source_month_coverage_complete"]["passed"])
+        self.assertFalse(any("source month 202501 coverage is incomplete" in error for error in report.blocking_errors))
+        self.assertTrue(any("weekly/monthly advisory coverage is partial" in warning for warning in report.warnings))
 
     def test_mutated_backup_blocks_promotion(self):
         backup = self.prepare_ready_promotion()
