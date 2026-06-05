@@ -685,6 +685,7 @@ class FinalGateCheck:
 class FinalGateCommandPreview:
     command: str
     confirmation: str
+    confirmation_phrase: str
     would_execute_real_requests: bool
     requires_user_confirmation: bool
     do_not_run_automatically: bool
@@ -4492,6 +4493,7 @@ class FinalGateReporter:
         return FinalGateCommandPreview(
             command=command,
             confirmation="USER_CONFIRMATION_REQUIRED",
+            confirmation_phrase=confirmation_phrase(scope, start_date, end_date, max_jobs_per_api),
             would_execute_real_requests=True,
             requires_user_confirmation=True,
             do_not_run_automatically=True,

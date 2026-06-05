@@ -68,6 +68,7 @@ class FinalGateModelTests(PreBackfillOperationsTestCase):
         self.assertEqual(result.dependency_stage["dependency_action"], "fetch_trade_cal_first")
         self.assertFalse(result.dependency_stage["natural_day_fallback"])
         self.assertEqual(result.confirmation_phrase, "CONFIRM LOW-RISK-A-SHARE 20250201-20250228 MAXJOBS20")
+        self.assertEqual(result.command_preview["confirmation_phrase"], result.confirmation_phrase)
         self.assertTrue(result.do_not_run_automatically)
         self.assertFalse(result.blocking_errors)
         self.assertIn("mirror-run", result.command_preview["command"])
