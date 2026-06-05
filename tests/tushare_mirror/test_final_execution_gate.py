@@ -6,7 +6,7 @@ from pathlib import Path
 
 from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
-from tushare_mirror.mirror import CommandSafetyAnalyzer, ExecuteScriptReporter, FinalGateReporter, MirrorBatchBundleReporter, confirmation_phrase
+from tushare_mirror.mirror import CommandSafetyAnalyzer, ExecuteReadinessReporter, ExecuteScriptReporter, FinalGateReporter, MirrorBatchBundleReporter, confirmation_phrase
 from tushare_mirror.validation import Validator
 
 try:
@@ -383,3 +383,111 @@ class ExecuteScriptGeneratorTests(PreBackfillOperationsTestCase):
         self.assertEqual(payload["status"], "created")
         self.assertEqual(payload["command_safety_status"], "warning")
         self.assertTrue(output.exists())
+
+
+class ExecuteReadinessReporterTests(PreBackfillOperationsTestCase):
+    def prepare_bundle(self) -> tuple[Path, Path]:
+        self.build_pilot()
+        self.cover_january_matrix()
+        backup = self.base / "execute-readiness-backup"
+        plan = BackupPlanner(self.root, self.catalog).plan(backup)
+        BackupExecutor(self.root, self.catalog).backup(plan)
+        bundle = self.base / "execute-readiness-bundle"
+        result = MirrorBatchBundleReporter().create(
+            root=self.root,
+            backup=backup,
+            scope="low-risk-a-share",
+            start_date="20250201",
+            end_date="20250228",
+            max_jobs_per_api=20,
+            output=bundle,
+        )
+        self.assertEqual(result.status, "created")
+        return backup, bundle
+
+    def report(self, backup: Path, bundle: Path):
+        return ExecuteReadinessReporter(token_available=True).report(
+            root=self.root,
+            backup=backup,
+            bundle=bundle,
+            scope="low-risk-a-share",
+            start_date="20250201",
+            end_date="20250228",
+            max_jobs_per_api=20,
+        )
+
+    def test_healthy_staged_readiness_is_read_only(self):
+        backup, bundle = self.prepare_bundle()
+        before = self.counts()
+        result = self.report(backup, bundle)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(result.report_version, "mirror-execute-readiness/v1")
+        self.assertEqual(result.execute_readiness_status, "warning")
+        self.assertTrue(result.may_execute_after_user_confirmation)
+        self.assertTrue(result.must_not_execute_automatically)
+        self.assertEqual(result.final_gate_status, "warning")
+        self.assertEqual(result.bundle_status, "passed")
+        self.assertEqual(result.command_safety_status, "warning")
+        self.assertEqual(result.rehearsal_status, "passed")
+        self.assertEqual(result.promotion_status, "staged")
+        self.assertEqual(result.backup_status, "succeeded")
+        self.assertEqual(result.token_hygiene_status, "passed")
+        self.assertEqual(result.estimated_request_count, 6)
+        self.assertEqual(result.confirmation_phrase, "CONFIRM LOW-RISK-A-SHARE 20250201-20250228 MAXJOBS20")
+        self.assertIn("mirror-run", result.exact_user_confirmed_command)
+
+    def test_bundle_blocker_propagates(self):
+        backup, _ = self.prepare_bundle()
+        bundle = self.base / "blocked-readiness-bundle"
+        bundle.mkdir()
+        (bundle / "README.md").write_text("old bundle\n", encoding="utf-8")
+        result = self.report(backup, bundle)
+        self.assertEqual(result.execute_readiness_status, "blocked")
+        self.assertFalse(result.may_execute_after_user_confirmation)
+        self.assertEqual(result.bundle_status, "blocked")
+        self.assertTrue(any("bundle" in error for error in result.blocking_errors))
+
+    def test_backup_mutation_propagates(self):
+        backup, bundle = self.prepare_bundle()
+        Validator(backup, CatalogStore(backup)).validate_latest_snapshots(record=True)
+        result = self.report(backup, bundle)
+        self.assertEqual(result.execute_readiness_status, "blocked")
+        self.assertFalse(result.may_execute_after_user_confirmation)
+        self.assertTrue(any("possible_mutation" in error or "modified after backup creation" in error for error in result.blocking_errors))
+
+    def test_cli_json_contract_and_no_side_effects(self):
+        backup, bundle = self.prepare_bundle()
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-execute-readiness",
+            "--root", str(self.root),
+            "--backup", str(backup),
+            "--bundle", str(bundle),
+            "--scope", "low-risk-a-share",
+            "--start-date", "20250201",
+            "--end-date", "20250228",
+            "--max-jobs-per-api", "20",
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        for key in [
+            "report_version",
+            "execute_readiness_status",
+            "may_execute_after_user_confirmation",
+            "must_not_execute_automatically",
+            "final_gate_status",
+            "bundle_status",
+            "command_safety_status",
+            "rehearsal_status",
+            "promotion_status",
+            "backup_status",
+            "token_hygiene_status",
+            "estimated_request_count",
+            "confirmation_phrase",
+            "exact_user_confirmed_command",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["report_version"], "mirror-execute-readiness/v1")
+        self.assertEqual(payload["execute_readiness_status"], "warning")
+        self.assertTrue(payload["may_execute_after_user_confirmation"])

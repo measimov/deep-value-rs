@@ -772,6 +772,50 @@ class ExecuteScriptResult:
 
 
 @dataclass(frozen=True)
+class ExecuteReadinessResult:
+    report_version: str
+    execute_readiness_status: str
+    may_execute_after_user_confirmation: bool
+    must_not_execute_automatically: bool
+    final_gate_status: str
+    bundle_status: str | None
+    command_safety_status: str | None
+    rehearsal_status: str | None
+    promotion_status: str | None
+    backup_status: str | None
+    token_hygiene_status: str
+    estimated_request_count: int
+    confirmation_phrase: str
+    exact_user_confirmed_command: str
+    final_gate: dict[str, Any]
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "report_version": self.report_version,
+            "execute_readiness_status": self.execute_readiness_status,
+            "may_execute_after_user_confirmation": self.may_execute_after_user_confirmation,
+            "must_not_execute_automatically": self.must_not_execute_automatically,
+            "final_gate_status": self.final_gate_status,
+            "bundle_status": self.bundle_status,
+            "command_safety_status": self.command_safety_status,
+            "rehearsal_status": self.rehearsal_status,
+            "promotion_status": self.promotion_status,
+            "backup_status": self.backup_status,
+            "token_hygiene_status": self.token_hygiene_status,
+            "estimated_request_count": self.estimated_request_count,
+            "confirmation_phrase": self.confirmation_phrase,
+            "exact_user_confirmed_command": self.exact_user_confirmed_command,
+            "warnings": self.warnings,
+            "blocking_errors": self.blocking_errors,
+        }
+
+
+@dataclass(frozen=True)
 class SchemaStatusResult:
     report_version: str
     root: str
@@ -4778,6 +4822,64 @@ class ExecuteScriptReporter:
                 "# - do not paste or print TUSHARE_TOKEN",
                 "",
             ]
+        )
+
+
+class ExecuteReadinessReporter:
+    REPORT_VERSION = "mirror-execute-readiness/v1"
+
+    def __init__(self, *, token_available: bool | None = None):
+        self._token_available_override = token_available
+
+    def report(
+        self,
+        *,
+        root: Path | str,
+        backup: Path | str,
+        bundle: Path | str,
+        scope: str,
+        start_date: str,
+        end_date: str,
+        max_jobs_per_api: int,
+    ) -> ExecuteReadinessResult:
+        final_gate = FinalGateReporter(token_available=self._token_available_override).report(
+            root=root,
+            backup=backup,
+            bundle=bundle,
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            max_jobs_per_api=max_jobs_per_api,
+        )
+        payload = final_gate.to_dict()
+        sections = payload.get("sections") or {}
+        bundle_status = ((sections.get("bundle_verification") or {}).get("status"))
+        command_safety_status = ((sections.get("command_safety") or {}).get("status"))
+        rehearsal_status = ((sections.get("rehearsal") or {}).get("rehearsal_status"))
+        promotion_status = ((sections.get("promotion_checklist") or {}).get("status"))
+        backup_status = ((sections.get("backup_status") or {}).get("restore_check_status"))
+        token_hygiene = sections.get("token_hygiene") or {}
+        token_hygiene_status = "blocked" if token_hygiene.get("token_plaintext_found") or token_hygiene.get("blocking_errors") else "passed"
+        status = "blocked" if final_gate.gate_status == "blocked" else ("warning" if final_gate.gate_status == "warning" else "passed")
+        command = (payload.get("final_command_preview") or {}).get("command") or ""
+        return ExecuteReadinessResult(
+            report_version=self.REPORT_VERSION,
+            execute_readiness_status=status,
+            may_execute_after_user_confirmation=bool(final_gate.ready_for_user_confirmed_execute and not final_gate.blocking_errors),
+            must_not_execute_automatically=True,
+            final_gate_status=final_gate.gate_status,
+            bundle_status=bundle_status,
+            command_safety_status=command_safety_status,
+            rehearsal_status=rehearsal_status,
+            promotion_status=promotion_status,
+            backup_status=backup_status,
+            token_hygiene_status=token_hygiene_status,
+            estimated_request_count=final_gate.estimated_request_count,
+            confirmation_phrase=final_gate.confirmation_phrase,
+            exact_user_confirmed_command=command,
+            final_gate=payload,
+            warnings=final_gate.warnings,
+            blocking_errors=final_gate.blocking_errors,
         )
 
 
