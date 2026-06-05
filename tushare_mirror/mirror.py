@@ -617,6 +617,11 @@ class MonthlyPromotionChecklistResult:
     from_range: dict[str, str]
     to_range: dict[str, str]
     ready_to_promote: bool
+    hard_blockers: list[str]
+    dependency_stage: dict[str, Any]
+    ready_for_dependency_stage: bool
+    ready_for_batch_after_dependency: bool | str
+    next_safe_action: str
     checks: dict[str, Any]
     warnings: list[str]
     blocking_errors: list[str]
@@ -3665,6 +3670,7 @@ class MonthlyPromotionChecklistReporter:
         to_start, to_end = self._month_range(to_month)
         warnings: list[str] = ["monthly-promotion-checklist is read-only and does not execute mirror-run or generated commands"]
         blocking_errors: list[str] = []
+        hard_blockers: list[str] = []
         checks: dict[str, Any] = {}
 
         coverage = MirrorCoverageMatrixReporter().report(root=mirror_root, scope=scope, start_date=from_start, end_date=from_end)
@@ -3684,8 +3690,9 @@ class MonthlyPromotionChecklistReporter:
         }
         warnings.extend(coverage.warnings)
         blocking_errors.extend(coverage.blocking_errors)
+        hard_blockers.extend(coverage.blocking_errors)
         if not daily_like_complete:
-            blocking_errors.append(f"source month {from_month} coverage is incomplete")
+            hard_blockers.append(f"source month {from_month} coverage is incomplete")
         if weekly_monthly_items and not weekly_monthly_complete:
             warnings.append(f"source month {from_month} weekly/monthly advisory coverage is partial")
 
@@ -3696,30 +3703,43 @@ class MonthlyPromotionChecklistReporter:
         checks["backup_not_mutated"] = {"passed": backup_not_mutated}
         warnings.extend(backup_status.warnings)
         if not backup_valid:
-            blocking_errors.append("backup is not valid or restore-check did not succeed")
+            hard_blockers.append("backup is not valid or restore-check did not succeed")
         if not backup_not_mutated:
-            blocking_errors.append("backup catalog may have been modified after backup creation")
+            hard_blockers.append("backup catalog may have been modified after backup creation")
         blocking_errors.extend(backup_status.blocking_errors)
+        hard_blockers.extend(backup_status.blocking_errors)
 
         schema_status = SchemaStatusReporter().report(root=mirror_root)
         schema_clear = not schema_status.blocking_errors and schema_status.incompatible_schema_count == 0 and schema_status.quarantine_count == 0
         checks["no_schema_quarantine_blockers"] = {"passed": schema_clear, "report": schema_status.to_dict()}
         warnings.extend(schema_status.warnings)
         blocking_errors.extend(schema_status.blocking_errors)
+        hard_blockers.extend(schema_status.blocking_errors)
         if not schema_clear:
-            blocking_errors.append("schema or quarantine blockers are present")
+            hard_blockers.append("schema or quarantine blockers are present")
 
         plan_available, plan_report, plan_errors = self._next_plan(mirror_root, scope, to_start, to_end)
         checks["next_batch_plan_available"] = {"passed": plan_available, "report": plan_report}
-        blocking_errors.extend(plan_errors)
+        dependency_stage = self._dependency_stage(plan_report, plan_available)
+        dependency_plan_present = bool(
+            dependency_stage.get("dependency_status") == "missing"
+            and dependency_stage.get("dependency_action") == "fetch_trade_cal_first"
+            and dependency_stage.get("daily_like_status") == "blocked_until_trade_cal"
+            and dependency_stage.get("natural_day_fallback") is False
+        )
+        if plan_errors:
+            hard_blockers.extend(plan_errors)
+        elif dependency_plan_present:
+            warnings.append("target trade_cal is missing, but a safe dependency plan is present")
 
         request_estimate = RequestEstimateReporter().report(root=mirror_root, scope=scope, start_date=to_start, end_date=to_end)
         request_risk_ok = request_estimate.risk_level in {"low", "moderate"}
         checks["request_estimate_low_or_moderate"] = {"passed": request_risk_ok, "report": request_estimate.to_dict()}
         warnings.extend(request_estimate.warnings)
         blocking_errors.extend(request_estimate.blocking_errors)
+        hard_blockers.extend(request_estimate.blocking_errors)
         if not request_risk_ok:
-            blocking_errors.append(f"request estimate risk is {request_estimate.risk_level}")
+            hard_blockers.append(f"request estimate risk is {request_estimate.risk_level}")
 
         checklist = MirrorOperatorChecklistReporter(token_available=self._token_available_override).report(
             root=mirror_root,
@@ -3731,28 +3751,35 @@ class MonthlyPromotionChecklistReporter:
         checks["operator_checklist_ready"] = {"passed": checklist.ready, "report": checklist.to_dict()}
         warnings.extend(checklist.warnings)
         blocking_errors.extend(checklist.blocking_errors)
+        hard_blockers.extend(checklist.blocking_errors)
         if not checklist.ready:
-            blocking_errors.append("operator checklist is not ready")
+            hard_blockers.append("operator checklist is not ready")
 
         if bundle is not None:
             bundle_result = MirrorBatchBundleVerifier().verify(bundle=bundle)
             checks["bundle_verified"] = {"passed": bundle_result.status == "passed", "report": bundle_result.to_dict()}
             warnings.extend(bundle_result.warnings)
             blocking_errors.extend(bundle_result.blocking_errors)
+            hard_blockers.extend(bundle_result.blocking_errors)
             if bundle_result.status == "blocked":
-                blocking_errors.append("provided bundle verification is blocked")
+                hard_blockers.append("provided bundle verification is blocked")
         else:
             checks["bundle_verified"] = {"passed": None, "report": None}
             warnings.append("no bundle path provided; verify the February bundle before user confirmation")
 
         checks["explicit_user_confirmation_required"] = {"passed": True, "marker": "USER_CONFIRMATION_REQUIRED"}
         next_commands = self._next_commands(mirror_root, backup_root, scope, to_start, to_end, bundle)
-        blocking_errors = _dedupe_messages(blocking_errors)
+        hard_blockers = _dedupe_messages(hard_blockers)
+        blocking_errors = hard_blockers
         warnings = _dedupe_messages(warnings)
-        ready = not blocking_errors
+        dependency_missing = dependency_stage.get("dependency_status") == "missing"
+        ready_for_dependency_stage = not hard_blockers and dependency_missing and dependency_plan_present
+        ready_for_batch_after_dependency: bool | str = "pending" if ready_for_dependency_stage else (not hard_blockers and not dependency_missing)
+        ready = not hard_blockers and not dependency_missing
+        status = "ready" if ready else ("staged" if ready_for_dependency_stage else "blocked")
         return MonthlyPromotionChecklistResult(
             report_version=self.REPORT_VERSION,
-            status="ready" if ready else "blocked",
+            status=status,
             root=str(mirror_root),
             backup=str(backup_root),
             scope=scope,
@@ -3761,6 +3788,11 @@ class MonthlyPromotionChecklistReporter:
             from_range={"start_date": from_start, "end_date": from_end},
             to_range={"start_date": to_start, "end_date": to_end},
             ready_to_promote=ready,
+            hard_blockers=hard_blockers,
+            dependency_stage=dependency_stage,
+            ready_for_dependency_stage=ready_for_dependency_stage,
+            ready_for_batch_after_dependency=ready_for_batch_after_dependency,
+            next_safe_action=self._next_safe_action(ready, ready_for_dependency_stage, hard_blockers),
             checks=checks,
             warnings=warnings,
             blocking_errors=blocking_errors,
@@ -3796,10 +3828,57 @@ class MonthlyPromotionChecklistReporter:
             return False, None, [f"next batch plan failed: {exc}"]
         report = plan.to_dict()
         if plan.blocked_endpoints:
+            if (
+                plan.dependency_status == "missing"
+                and plan.dependency_action == "fetch_trade_cal_first"
+                and plan.daily_like_status == "blocked_until_trade_cal"
+                and plan.natural_day_fallback is False
+            ):
+                return True, report, []
             return False, report, [f"next batch plan has {plan.blocked_endpoints} blocked endpoints"]
         if plan.total_planned_jobs <= 0:
             return False, report, ["next batch plan has no planned jobs"]
         return True, report, []
+
+    def _dependency_stage(self, plan_report: dict[str, Any] | None, plan_available: bool) -> dict[str, Any]:
+        if not plan_report:
+            return {
+                "plan_available": plan_available,
+                "dependency_status": "unknown",
+                "dependency_action": None,
+                "trade_cal_params": None,
+                "daily_like_status": "unknown",
+                "natural_day_fallback": False,
+                "ready_for_dependency_stage": False,
+            }
+        ready = bool(
+            plan_available
+            and plan_report.get("dependency_status") == "missing"
+            and plan_report.get("dependency_action") == "fetch_trade_cal_first"
+            and plan_report.get("daily_like_status") == "blocked_until_trade_cal"
+            and plan_report.get("natural_day_fallback") is False
+        )
+        return {
+            "plan_available": plan_available,
+            "dependency_status": plan_report.get("dependency_status"),
+            "dependency_action": plan_report.get("dependency_action"),
+            "trade_cal_params": plan_report.get("trade_cal_params"),
+            "daily_like_status": plan_report.get("daily_like_status"),
+            "natural_day_fallback": plan_report.get("natural_day_fallback"),
+            "dependency_requests": plan_report.get("dependency_requests"),
+            "currently_unblocked_requests": plan_report.get("currently_unblocked_requests"),
+            "executable_after_dependency_requests": plan_report.get("executable_after_dependency_requests"),
+            "ready_for_dependency_stage": ready,
+        }
+
+    def _next_safe_action(self, ready: bool, ready_for_dependency_stage: bool, hard_blockers: list[str]) -> str:
+        if hard_blockers:
+            return "Resolve hard blockers before regenerating or confirming any February command."
+        if ready_for_dependency_stage:
+            return "Regenerate verified bundle; user may confirm the bounded February command that first fetches trade_cal and then proceeds under orchestrator control."
+        if ready:
+            return "Review verified bundle, rehearsal, and operator checklist; only then request explicit user confirmation for the bounded February mirror-run --execute command."
+        return "Rerun monthly-promotion-checklist after dependency state changes."
 
     def _next_commands(self, root: Path, backup: Path, scope: str, start_date: str, end_date: str, bundle: Path | str | None) -> list[dict[str, str]]:
         output = "/tmp/tushare-mirror-batch-bundle-" + start_date[:6]

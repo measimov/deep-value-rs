@@ -1622,6 +1622,10 @@ class MonthlyPromotionChecklistTests(PreBackfillOperationsTestCase):
         self.assertEqual(report.report_version, "monthly-promotion-checklist/v1")
         self.assertTrue(report.ready_to_promote)
         self.assertEqual(report.status, "ready")
+        self.assertFalse(report.hard_blockers)
+        self.assertFalse(report.ready_for_dependency_stage)
+        self.assertTrue(report.ready_for_batch_after_dependency)
+        self.assertEqual(report.dependency_stage["dependency_status"], "covered")
         self.assertFalse(report.blocking_errors)
         self.assertTrue(report.required_user_confirmation)
         self.assertTrue(report.checks["source_month_coverage_complete"]["passed"])
@@ -1643,6 +1647,8 @@ class MonthlyPromotionChecklistTests(PreBackfillOperationsTestCase):
             to_month="202502",
         )
         self.assertFalse(report.ready_to_promote)
+        self.assertFalse(report.ready_for_dependency_stage)
+        self.assertTrue(report.hard_blockers)
         self.assertTrue(any("source month 202501 coverage is incomplete" in error for error in report.blocking_errors))
 
     def test_weekly_monthly_partial_is_advisory_when_daily_like_complete(self):
@@ -1673,10 +1679,11 @@ class MonthlyPromotionChecklistTests(PreBackfillOperationsTestCase):
             to_month="202502",
         )
         self.assertFalse(report.ready_to_promote)
+        self.assertTrue(report.hard_blockers)
         self.assertFalse(report.checks["backup_not_mutated"]["passed"])
         self.assertTrue(any("modified after backup creation" in error for error in report.blocking_errors))
 
-    def test_missing_next_plan_blocks_with_clear_error(self):
+    def test_missing_trade_cal_creates_dependency_stage(self):
         backup = self.prepare_completed_source_without_next_plan()
         report = MonthlyPromotionChecklistReporter(token_available=True).report(
             root=self.root,
@@ -1686,8 +1693,35 @@ class MonthlyPromotionChecklistTests(PreBackfillOperationsTestCase):
             to_month="202502",
         )
         self.assertFalse(report.ready_to_promote)
-        self.assertFalse(report.checks["next_batch_plan_available"]["passed"])
-        self.assertTrue(any("next batch plan has" in error for error in report.blocking_errors))
+        self.assertEqual(report.status, "staged")
+        self.assertTrue(report.ready_for_dependency_stage)
+        self.assertEqual(report.ready_for_batch_after_dependency, "pending")
+        self.assertFalse(report.hard_blockers)
+        self.assertTrue(report.checks["next_batch_plan_available"]["passed"])
+        self.assertEqual(report.dependency_stage["dependency_status"], "missing")
+        self.assertEqual(report.dependency_stage["dependency_action"], "fetch_trade_cal_first")
+        self.assertEqual(report.dependency_stage["daily_like_status"], "blocked_until_trade_cal")
+        self.assertFalse(report.dependency_stage["natural_day_fallback"])
+        self.assertTrue(any("safe dependency plan" in warning for warning in report.warnings))
+        self.assertIn("Regenerate verified bundle", report.next_safe_action)
+
+    def test_invalid_bundle_is_hard_blocker(self):
+        backup = self.prepare_ready_promotion()
+        bundle = self.base / "invalid-promotion-bundle"
+        bundle.mkdir()
+        (bundle / "README.md").write_text("old bundle\n", encoding="utf-8")
+        report = MonthlyPromotionChecklistReporter(token_available=True).report(
+            root=self.root,
+            backup=backup,
+            scope="low-risk-a-share",
+            from_month="202501",
+            to_month="202502",
+            bundle=bundle,
+        )
+        self.assertFalse(report.ready_to_promote)
+        self.assertTrue(report.hard_blockers)
+        self.assertFalse(report.checks["bundle_verified"]["passed"])
+        self.assertTrue(any("provided bundle verification is blocked" in error for error in report.blocking_errors))
 
     def test_cli_json_contract_and_no_side_effects_for_monthly_promotion(self):
         backup = self.prepare_ready_promotion()
@@ -1709,6 +1743,11 @@ class MonthlyPromotionChecklistTests(PreBackfillOperationsTestCase):
             "from_month",
             "to_month",
             "ready_to_promote",
+            "hard_blockers",
+            "dependency_stage",
+            "ready_for_dependency_stage",
+            "ready_for_batch_after_dependency",
+            "next_safe_action",
             "checks",
             "blocking_errors",
             "warnings",
