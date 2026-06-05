@@ -1055,13 +1055,17 @@ def cmd_mirror_batch_plan(args) -> int:
 
 
 def cmd_api_infra_readiness(args) -> int:
-    report = ApiInfrastructureReadinessReporter().report()
+    try:
+        report = ApiInfrastructureReadinessReporter().report(scope=args.scope)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     payload = report.to_dict()
     if args.json:
         _print_json(payload)
     else:
         _print_key_values(
             {
+                "scope": payload["scope"],
                 "enabled_executable_endpoint_count": payload["enabled_executable_endpoint_count"],
                 "disabled_inventory_endpoint_count": payload["disabled_inventory_endpoint_count"],
                 "supported_endpoint_kinds": payload["supported_endpoint_kinds"],
@@ -1968,6 +1972,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_mirror_batch_plan)
 
     p = sub.add_parser('api-infra-readiness')
+    p.add_argument('--scope', default='all')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_api_infra_readiness)
 

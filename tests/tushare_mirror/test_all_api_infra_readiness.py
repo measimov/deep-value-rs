@@ -553,7 +553,8 @@ class ApiInfraReadinessReportTests(unittest.TestCase):
     def test_readiness_report_is_stable_and_includes_inventory(self):
         report = ApiInfrastructureReadinessReporter().report()
         payload = report.to_dict()
-        self.assertEqual(payload["enabled_executable_endpoint_count"], 12)
+        self.assertEqual(payload["scope"], "all")
+        self.assertEqual(payload["enabled_executable_endpoint_count"], 20)
         self.assertGreaterEqual(payload["disabled_inventory_endpoint_count"], 10)
         self.assertIn("calendar_backfill", payload["supported_planner_kinds"])
         self.assertIn("code_date_matrix", payload["supported_planner_kinds"])
@@ -605,9 +606,39 @@ class ApiInfraReadinessReportTests(unittest.TestCase):
         self.assertIn("resume strategy for code/date loops", payload["missing_for_execution"])
         self.assertIn("strategy-safe derived layer", payload["missing_for_execution"])
 
+    def test_scoped_a_share_low_risk_report_filters_high_risk_inventory(self):
+        report = ApiInfrastructureReadinessReporter().report(scope="a-share-low-risk")
+        payload = report.to_dict()
+        self.assertEqual(payload["scope"], "a-share-low-risk")
+        self.assertEqual(payload["enabled_executable_endpoint_count"], 20)
+        self.assertEqual(
+            set(payload["plan_only_api_names"]),
+            {
+                "top10_holders",
+                "top10_floatholders",
+                "stk_holdernumber",
+                "stk_holdertrade",
+                "pledge_stat",
+                "pledge_detail",
+                "repurchase",
+                "concept_detail",
+                "index_weight",
+                "index_member",
+                "ths_member",
+            },
+        )
+        self.assertIn("stock_company", payload["executable_api_names"])
+        self.assertIn("index_daily", payload["executable_api_names"])
+        self.assertIn("top10_holders", payload["disabled_inventory_api_names"])
+        self.assertNotIn("income", payload["disabled_inventory_api_names"])
+        self.assertIn("top10_holders", payload["missing_infrastructure_by_category"]["needs_period_planner"])
+        self.assertNotIn("income", payload["missing_infrastructure_by_category"]["needs_pit"])
+        self.assertIn("financial_pit", payload["excluded_high_risk_families"])
+
     def test_cli_json_fields_and_no_side_effects(self):
         result = self.run_cli("--root", str(self.root), "api-infra-readiness", "--json")
         payload = json.loads(result.stdout)
+        self.assertEqual(payload["scope"], "all")
         self.assertIn("supported_endpoint_kinds", payload)
         self.assertIn("missing_infrastructure_by_category", payload)
         self.assertIn("next_recommended_infra_phases", payload)
@@ -638,8 +669,28 @@ class ApiInfraReadinessReportTests(unittest.TestCase):
         self.assertNotIn("secret-token-should-not-appear", result.stderr)
         self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
 
+    def test_cli_scoped_json_fields_and_no_side_effects(self):
+        result = self.run_cli(
+            "--root",
+            str(self.root),
+            "api-infra-readiness",
+            "--scope",
+            "a-share-low-risk",
+            "--json",
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["scope"], "a-share-low-risk")
+        self.assertIn("stock_company", payload["executable_api_names"])
+        self.assertIn("top10_holders", payload["plan_only_api_names"])
+        self.assertNotIn("income", payload["disabled_inventory_api_names"])
+        self.assertNotIn("secret-token-should-not-appear", result.stdout)
+        self.assertNotIn("secret-token-should-not-appear", result.stderr)
+        self.assertFalse((self.root / "_catalog" / "catalog.sqlite").exists())
+
     def test_cli_table_output_is_read_only(self):
         result = self.run_cli("--root", str(self.root), "api-infra-readiness")
+        self.assertIn("scope", result.stdout)
+        self.assertIn("all", result.stdout)
         self.assertIn("enabled_executable_endpoint_count", result.stdout)
         self.assertIn("code_list_planner", result.stdout)
         self.assertIn("code_date_matrix_existing_status", result.stdout)

@@ -38,9 +38,77 @@ READINESS_CATEGORIES = [
     "unsupported",
 ]
 
+LOW_RISK_A_SHARE_EXECUTABLE_APIS = {
+    "stock_basic",
+    "trade_cal",
+    "hs_const",
+    "daily",
+    "adj_factor",
+    "daily_basic",
+    "weekly",
+    "monthly",
+    "suspend_d",
+    "namechange",
+    "stk_managers",
+    "stk_rewards",
+}
+
+A_SHARE_LOW_RISK_EXECUTABLE_APIS = LOW_RISK_A_SHARE_EXECUTABLE_APIS | {
+    "stock_company",
+    "concept",
+    "index_basic",
+    "index_daily",
+    "index_weekly",
+    "index_monthly",
+    "ths_index",
+    "index_classify",
+}
+
+A_SHARE_LOW_RISK_PLAN_ONLY_APIS = {
+    "top10_holders",
+    "top10_floatholders",
+    "stk_holdernumber",
+    "stk_holdertrade",
+    "pledge_stat",
+    "pledge_detail",
+    "repurchase",
+    "concept_detail",
+    "index_weight",
+    "index_member",
+    "ths_member",
+}
+
+SCOPE_EXECUTABLE_APIS = {
+    "low-risk-a-share": LOW_RISK_A_SHARE_EXECUTABLE_APIS,
+    "a-share-low-risk": A_SHARE_LOW_RISK_EXECUTABLE_APIS,
+}
+
+SCOPE_PLAN_ONLY_APIS = {
+    "low-risk-a-share": set(),
+    "a-share-low-risk": A_SHARE_LOW_RISK_PLAN_ONLY_APIS,
+}
+
+SCOPE_EXCLUDED_HIGH_RISK_FAMILIES = {
+    "minute",
+    "tick",
+    "order_book",
+    "realtime",
+    "financial_pit",
+    "object_download",
+    "news_research",
+    "postgres_loader",
+    "remote_backup",
+    "restore_into",
+    "compaction_executor",
+    "scheduler",
+    "parallel_execution",
+}
+
 
 @dataclass(frozen=True)
 class ApiInfraReadinessReport:
+    scope: str
+    scope_supported: bool
     supported_endpoint_kinds: list[str]
     supported_planner_kinds: list[str]
     blocked_planner_kinds: list[str]
@@ -78,6 +146,8 @@ class ApiInfraReadinessReport:
     max_safe_period_limit: int
     max_safe_candidate_jobs: int
     missing_for_execution: list[str]
+    plan_only_api_names: list[str]
+    excluded_high_risk_families: list[str]
     warnings: list[str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -85,10 +155,27 @@ class ApiInfraReadinessReport:
 
 
 class ApiInfrastructureReadinessReporter:
-    def report(self) -> ApiInfraReadinessReport:
+    def report(self, scope: str = "all") -> ApiInfraReadinessReport:
+        if scope in {"", None}:  # type: ignore[comparison-overlap]
+            scope = "all"
+        if scope not in {"all", *SCOPE_EXECUTABLE_APIS}:
+            supported = ", ".join(["all", *sorted(SCOPE_EXECUTABLE_APIS)])
+            raise ValueError(f"unsupported api-infra-readiness scope {scope!r}; supported scopes: {supported}")
+
         enabled = [normalize_endpoint_capability(cfg) for cfg in load_bundled_endpoint_configs()]
         inventory = load_inventory_configs()
         registry = planner_registry_summary()
+        plan_only_api_names: list[str] = []
+        excluded_high_risk_families: list[str] = []
+
+        if scope != "all":
+            executable_filter = SCOPE_EXECUTABLE_APIS[scope]
+            inventory_filter = SCOPE_PLAN_ONLY_APIS[scope]
+            enabled = [cfg for cfg in enabled if str(cfg["api_name"]) in executable_filter]
+            inventory = [item for item in inventory if str(item["api_name"]) in inventory_filter]
+            plan_only_api_names = sorted(inventory_filter)
+            excluded_high_risk_families = sorted(SCOPE_EXCLUDED_HIGH_RISK_FAMILIES)
+
         missing = {category: [] for category in READINESS_CATEGORIES}
         executable_api_names = sorted(cfg["api_name"] for cfg in enabled)
         disabled_api_names = sorted(item["api_name"] for item in inventory)
@@ -98,7 +185,20 @@ class ApiInfrastructureReadinessReporter:
                 missing[category].append(str(item["api_name"]))
         for key in missing:
             missing[key] = sorted(set(missing[key]))
+        warnings = [
+            "inventory endpoints are disabled and not executable",
+            "all-api readiness is infrastructure-only; it does not run mirror-run, fetch, or backfill",
+            "remote disaster recovery, compaction execution, PIT derived layers, and PostgreSQL loaders remain out of scope",
+        ]
+        if scope != "all":
+            warnings = [
+                f"{scope} readiness is scoped; excluded high-risk families are not executable",
+                "plan-only endpoints require separate bounded loop guardrails before execution",
+                "api-infra-readiness is read-only and does not run mirror-run, fetch, or backfill",
+            ]
         return ApiInfraReadinessReport(
+            scope=scope,
+            scope_supported=True,
             supported_endpoint_kinds=sorted(set(str(cfg["endpoint_kind"]) for cfg in enabled)),
             supported_planner_kinds=list(registry["supported_planner_kinds"]),
             blocked_planner_kinds=list(registry["blocked_planner_kinds"]),
@@ -151,11 +251,9 @@ class ApiInfrastructureReadinessReporter:
                 "failure aggregation",
                 "strategy-safe derived layer",
             ],
-            warnings=[
-                "inventory endpoints are disabled and not executable",
-                "all-api readiness is infrastructure-only; it does not run mirror-run, fetch, or backfill",
-                "remote disaster recovery, compaction execution, PIT derived layers, and PostgreSQL loaders remain out of scope",
-            ],
+            plan_only_api_names=plan_only_api_names,
+            excluded_high_risk_families=excluded_high_risk_families,
+            warnings=warnings,
         )
 
     def _categories_for_inventory_item(self, item: dict[str, Any]) -> list[str]:
