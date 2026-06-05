@@ -2444,3 +2444,112 @@ These blocker-resolution commands remain infrastructure-only. They do not run
 enter full mirror mode, add executable endpoints, run stock loops, enable
 financial/PIT/object/intraday/compaction execution, implement PostgreSQL
 loading, or add remote backup, restore-into, scheduler, or parallel execution.
+
+## Final User-confirmed Execution Gate
+
+The final gate is still infrastructure-only. It does not execute February,
+does not run `commands.sh`, does not fetch real Tushare data, does not backfill
+dates, and does not enter full mirror. Codex or any other automation must not
+run `mirror-run --execute` without explicit user confirmation.
+
+Use `mirror-final-gate` immediately before asking for that confirmation:
+
+```bash
+python3 -m tushare_mirror mirror-final-gate \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --bundle "$BUNDLE" \
+  --scope low-risk-a-share \
+  --start-date 20250201 \
+  --end-date 20250228 \
+  --max-jobs-per-api 20 \
+  --json
+```
+
+The final gate aggregates bundle verification, command safety, rehearsal,
+promotion checklist, ops report, backup status, schema status, path diagnostics,
+token hygiene, and stop policy. It reports whether the bounded command is ready
+for user-confirmed execution, whether February is only ready for the dependency
+stage, and whether full batch readiness after dependency is still pending.
+
+The output includes a non-secret confirmation phrase:
+
+```text
+CONFIRM LOW-RISK-A-SHARE 20250201-20250228 MAXJOBS20
+```
+
+This phrase is operator friction, not security. It is not a token and does not
+replace the safety checks. It exists to make the human confirmation deliberate
+and tied to the exact scope, date range, and max-job guardrail.
+
+Use `mirror-execute-readiness` for a shorter summary over the same gate:
+
+```bash
+python3 -m tushare_mirror mirror-execute-readiness \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --bundle "$BUNDLE" \
+  --scope low-risk-a-share \
+  --start-date 20250201 \
+  --end-date 20250228 \
+  --max-jobs-per-api 20 \
+  --json
+```
+
+It reports `may_execute_after_user_confirmation`,
+`must_not_execute_automatically`, the final-gate status, bundle status, command
+safety status, rehearsal status, promotion status, backup status, token hygiene
+status, estimated request count, confirmation phrase, and the exact guarded
+command.
+
+To create a guarded shell preview without executing it:
+
+```bash
+python3 -m tushare_mirror mirror-execute-script \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --bundle "$BUNDLE" \
+  --scope low-risk-a-share \
+  --start-date 20250201 \
+  --end-date 20250228 \
+  --max-jobs-per-api 20 \
+  --output /tmp/tushare-mirror-execute-202502.sh \
+  --json
+```
+
+The generated script is not an automation entrypoint. Commands are commented,
+`USER_CONFIRMATION_REQUIRED` is present, and a human must edit or uncomment the
+intended command after reviewing the gate output. Do not run the generated
+script directly as a substitute for review.
+
+`mirror-batch-bundle --overwrite` now includes final gate artifacts in the
+February bundle when possible:
+
+- `final_gate.json`
+- `execute_script_preview.sh`
+- `final_operator_summary.md`
+
+These files are plan artifacts only. `bundle_manifest.json` records them and
+bundle verification checks them, but verification does not execute any command.
+
+Exact order before execution:
+
+1. Run `mirror-status`.
+2. Run `backup-status`.
+3. Regenerate `mirror-batch-bundle --overwrite` to `$BUNDLE`.
+4. Run `mirror-batch-bundle-verify`.
+5. Run `command-safety-check`.
+6. Run `mirror-batch-rehearse`.
+7. Run `monthly-promotion-checklist --bundle "$BUNDLE"`.
+8. Run `mirror-ops-report`.
+9. Run `mirror-final-gate`.
+10. Run `mirror-execute-readiness`.
+11. User manually confirms the exact bounded command and phrase.
+12. Only then run `mirror-run --execute`.
+
+If any report is blocked, stop. If the final gate is staged, February is not
+ready for immediate full daily-like execution until the `trade_cal` dependency
+is handled by the user-confirmed bounded orchestrator command. This final gate
+does not authorize full mirror automation, high-risk endpoint families, stock
+loops, object/intraday/PIT/financial execution, compaction, PostgreSQL loading,
+remote backup, restore-into, scheduling, or parallel execution.
