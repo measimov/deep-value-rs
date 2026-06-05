@@ -14,7 +14,10 @@ from tushare_mirror.mirror import (
     RequestEstimateReporter,
 )
 
-from .test_pre_backfill_operations import PreBackfillOperationsTestCase
+try:
+    from .test_pre_backfill_operations import PreBackfillOperationsTestCase
+except ImportError:
+    from test_pre_backfill_operations import PreBackfillOperationsTestCase
 
 
 class FebruaryBundleReadinessRegressionTests(PreBackfillOperationsTestCase):

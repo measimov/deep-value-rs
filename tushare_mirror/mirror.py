@@ -2739,10 +2739,6 @@ class MirrorBatchLedgerReporter:
         candidates: list[Path] = []
         if bundle is not None:
             candidates.append(_resolve_path(Path(bundle)))
-        elif recommended and recommended.get("start_date"):
-            default = Path("/tmp") / f"tushare-mirror-batch-bundle-{str(recommended['start_date'])[:6]}"
-            if default.exists():
-                candidates.append(default)
         planned: list[dict[str, Any]] = []
         for candidate in candidates:
             item = self._planned_batch_from_bundle(candidate, warnings)
