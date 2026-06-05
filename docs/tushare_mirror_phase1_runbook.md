@@ -2553,3 +2553,80 @@ is handled by the user-confirmed bounded orchestrator command. This final gate
 does not authorize full mirror automation, high-risk endpoint families, stock
 loops, object/intraday/PIT/financial execution, compaction, PostgreSQL loading,
 remote backup, restore-into, scheduling, or parallel execution.
+
+## A-share Low-risk Executable Scope
+
+`a-share-low-risk` is the expanded executable infrastructure scope for
+bounded A-share low-risk data. It is not all Tushare APIs and it is not full
+mirror automation.
+
+Inspect the scope:
+
+```bash
+python3 -m tushare_mirror mirror-scope --scope a-share-low-risk --json
+```
+
+Executable categories include:
+
+- Reference and metadata snapshots: `stock_basic`, `stock_company`,
+  `trade_cal`, `hs_const`, `concept`, `index_basic`, `ths_index`,
+  `index_classify`.
+- Date-bounded market data: `daily`, `adj_factor`, `daily_basic`,
+  `suspend_d`, `weekly`, `monthly`, `index_daily`, `index_weekly`,
+  `index_monthly`.
+- Bounded smoke-only stock-code probes: `namechange`, `stk_managers`,
+  `stk_rewards`.
+
+Plan-only or disabled inventory includes endpoints that require stock, concept,
+or index-code traversal before safe execution: `top10_holders`,
+`top10_floatholders`, `stk_holdernumber`, `stk_holdertrade`, `pledge_stat`,
+`pledge_detail`, `repurchase`, `concept_detail`, `index_weight`,
+`index_member`, and `ths_member`.
+
+Explicitly excluded families remain excluded: minute, tick, order book,
+realtime, financial PIT, object/PDF/news/research downloads, PostgreSQL
+loading, remote backup, restore-into, compaction execution, scheduler, and
+parallel execution.
+
+Prepare an opt-in real smoke command list without sending requests:
+
+```bash
+python3 scripts/tushare_real_smoke.py \
+  --a-share-low-risk-smoke \
+  --root /tmp/tushare-a-share-low-risk-smoke \
+  --print-commands
+```
+
+Only when intentionally running real smoke, omit `--print-commands` and provide
+`TUSHARE_TOKEN`. The smoke path is bounded to one request per selected snapshot
+or date endpoint and does not perform a full stock loop or full backfill.
+
+Before a user-confirmed monthly pull, review:
+
+```bash
+python3 -m tushare_mirror mirror-review --root "$MIRROR_ROOT" --backup "$MIRROR_BACKUP" --scope a-share-low-risk --json
+python3 -m tushare_mirror mirror-readiness --root "$MIRROR_ROOT" --backup "$MIRROR_BACKUP" --scope a-share-low-risk --json
+python3 -m tushare_mirror mirror-batch-plan --root "$MIRROR_ROOT" --scope a-share-low-risk --start-date 20250201 --end-date 20250228 --calendar-exchange SSE --max-jobs-per-api 20 --json
+python3 -m tushare_mirror request-estimate --scope a-share-low-risk --start-date 20250201 --end-date 20250228 --root "$MIRROR_ROOT" --json
+python3 -m tushare_mirror mirror-pull-command --scope a-share-low-risk --root "$MIRROR_ROOT" --backup "$MIRROR_BACKUP" --start-date 20250201 --end-date 20250228 --max-jobs-per-api 20 --json
+```
+
+Generate a guarded command bundle outside mirror and backup roots:
+
+```bash
+python3 -m tushare_mirror mirror-pull-command \
+  --scope a-share-low-risk \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --start-date 20250201 \
+  --end-date 20250228 \
+  --max-jobs-per-api 20 \
+  --output /tmp/tushare-a-share-low-risk-pull-202502 \
+  --json
+```
+
+`commands.sh` is guarded and commented. It contains a `mirror-run --execute`
+preview marked `USER_CONFIRMATION_REQUIRED`; it must not be run by automation.
+After every user-run batch, run validation with `--no-record`, inspect backup,
+run restore-check, and run post-batch review. If any stop condition appears,
+stop, preserve artifacts, and classify the failure before continuing.
