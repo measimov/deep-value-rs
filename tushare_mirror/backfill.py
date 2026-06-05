@@ -20,10 +20,13 @@ SUPPORTED_DATE_BACKFILL_APIS = {
     "daily_basic": "trade_date",
     "weekly": "trade_date",
     "monthly": "trade_date",
+    "index_daily": "trade_date",
+    "index_weekly": "trade_date",
+    "index_monthly": "trade_date",
     "suspend_d": "trade_date",
 }
 
-TRADING_DAY_BACKFILL_APIS = {"daily", "adj_factor", "daily_basic", "suspend_d"}
+TRADING_DAY_BACKFILL_APIS = {"daily", "adj_factor", "daily_basic", "suspend_d", "index_daily"}
 SUPPORTED_CALENDAR_EXCHANGES = {"SSE"}
 PHASE21_EXECUTE_MAX_JOBS = 20
 

@@ -9,7 +9,8 @@ from pathlib import Path
 
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.endpoints import load_bundled_endpoint_configs, load_into_catalog, load_inventory_configs
-from tushare_mirror.mirror import MirrorScopeReporter
+from tushare_mirror.mirror import A_SHARE_LOW_RISK_ENDPOINTS, MirrorPlanner, MirrorScopeReporter
+from tushare_mirror.planner import JobPlanner
 
 
 class AShareLowRiskScopeTests(unittest.TestCase):
@@ -162,6 +163,66 @@ class AShareLowRiskEndpointMetadataTests(unittest.TestCase):
         self.assertTrue(self.EXECUTABLE_ADDED <= executable)
         self.assertTrue(self.DISABLED_LOW_RISK.isdisjoint(executable))
         self.assertTrue(inventory.isdisjoint(executable))
+
+
+class AShareLowRiskPlannerTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "lake"
+        self.catalog = CatalogStore(self.root)
+        self.catalog.init()
+        load_into_catalog(self.root, self.catalog)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def counts(self):
+        import sqlite3
+
+        with sqlite3.connect(self.catalog.db_path) as conn:
+            return {
+                "runs": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+                "jobs": conn.execute("select count(*) from jobs").fetchone()[0],
+                "files": conn.execute("select count(*) from files").fetchone()[0],
+                "snapshots": conn.execute("select count(*) from snapshots").fetchone()[0],
+                "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
+            }
+
+    def test_planner_resolves_all_scope_endpoints_without_side_effects(self):
+        before = self.counts()
+        plan = MirrorPlanner(self.root, self.catalog).plan(
+            scope="a-share-low-risk",
+            mode="pilot",
+            start_date="20250101",
+            end_date="20250131",
+            max_jobs_per_api=20,
+        )
+        self.assertEqual(self.counts(), before)
+        by_endpoint = {item.endpoint: item for item in plan.items}
+        self.assertEqual(set(A_SHARE_LOW_RISK_ENDPOINTS), set(by_endpoint))
+        self.assertEqual(by_endpoint["index_daily"].plan_status, "blocked_until_trade_cal")
+        self.assertEqual(by_endpoint["concept"].planned_action, "fetch")
+        self.assertEqual(by_endpoint["index_weekly"].planned_action, "date_backfill")
+        self.assertEqual(by_endpoint["top10_holders"].plan_status, "plan_only_no_execution")
+        self.assertFalse(by_endpoint["top10_holders"].will_execute)
+
+    def test_partition_resolver_works_for_new_executable_endpoints(self):
+        planner = JobPlanner(self.root, self.catalog)
+        cases = {
+            "stock_company": ({"exchange": "SSE"}, "api=stock_company/snapshot_date="),
+            "concept": ({"src": "ts"}, "api=concept/snapshot_date="),
+            "index_basic": ({"market": "SSE"}, "domain=index/api=index_basic/snapshot_date="),
+            "index_daily": ({"trade_date": "20250102"}, "domain=index/api=index_daily/year=2025/month=01"),
+            "index_weekly": ({"trade_date": "20250103"}, "domain=index/api=index_weekly/year=2025/month=01"),
+            "index_monthly": ({"trade_date": "20250127"}, "domain=index/api=index_monthly/year=2025/month=01"),
+            "ths_index": ({"exchange": "A", "type": "N"}, "domain=index/api=ths_index/snapshot_date="),
+            "index_classify": ({"src": "SW2021", "level": "L1"}, "domain=index/api=index_classify/snapshot_date="),
+        }
+        for api_name, (params, path_part) in cases.items():
+            plan = planner.plan_single_fetch(api_name, params)
+            self.assertIn(path_part, plan.lake_path, api_name)
+            self.assertEqual(plan.planned_actions[0], "request_tushare", api_name)
+        self.assertEqual(self.counts()["jobs"], 0)
 
 
 if __name__ == "__main__":

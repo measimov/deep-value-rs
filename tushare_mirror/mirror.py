@@ -130,10 +130,33 @@ SMOKE_REFERENCE_FETCHES: dict[str, dict[str, Any]] = {
     "stk_rewards": {"ts_code": "000001.SZ"},
 }
 
+A_SHARE_LOW_RISK_REFERENCE_FETCHES: dict[str, dict[str, Any]] = {
+    "stock_basic": {"list_status": "L"},
+    "stock_company": {"exchange": "SSE"},
+    "trade_cal": {"exchange": "SSE", "start_date": "20250101", "end_date": "20250110"},
+    "hs_const": {"hs_type": "SH", "is_new": "1"},
+    "concept": {"src": "ts"},
+    "index_basic": {"market": "SSE"},
+    "ths_index": {"exchange": "A", "type": "N"},
+    "index_classify": {"src": "SW2021", "level": "L1"},
+}
+
+A_SHARE_LOW_RISK_STOCK_CODE_SMOKE_FETCHES: dict[str, dict[str, Any]] = {
+    "namechange": {"ts_code": "000001.SZ"},
+    "stk_managers": {"ts_code": "000001.SZ"},
+    "stk_rewards": {"ts_code": "000001.SZ"},
+}
+
 SMOKE_CALENDAR_BACKFILL_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d"]
+A_SHARE_LOW_RISK_CALENDAR_BACKFILL_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d", "index_daily"]
 SMOKE_EXPLICIT_DATE_APIS: dict[str, list[str]] = {
     "weekly": ["20250103", "20250110"],
     "monthly": ["20250127", "20250228"],
+}
+A_SHARE_LOW_RISK_EXPLICIT_DATE_APIS: dict[str, list[str]] = {
+    **SMOKE_EXPLICIT_DATE_APIS,
+    "index_weekly": ["20250103", "20250110"],
+    "index_monthly": ["20250127", "20250228"],
 }
 
 PILOT_JAN_2025_WEEKLY_DATES = ["20250103", "20250110", "20250117", "20250124", "20250127"]
@@ -141,6 +164,24 @@ PILOT_JAN_2025_MONTHLY_DATES = ["20250127"]
 
 PILOT_BACKFILL_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d", "weekly", "monthly"]
 DAILY_LIKE_MIRROR_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d"]
+A_SHARE_LOW_RISK_DAILY_LIKE_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d", "index_daily"]
+A_SHARE_LOW_RISK_EXPLICIT_PERIODIC_APIS = ["weekly", "monthly", "index_weekly", "index_monthly"]
+A_SHARE_LOW_RISK_PLAN_ONLY_APIS = [
+    "namechange",
+    "stk_managers",
+    "stk_rewards",
+    "top10_holders",
+    "top10_floatholders",
+    "stk_holdernumber",
+    "stk_holdertrade",
+    "pledge_stat",
+    "pledge_detail",
+    "repurchase",
+    "concept_detail",
+    "index_weight",
+    "index_member",
+    "ths_member",
+]
 MODE_MAX_JOBS = {"smoke": 3, "pilot": 20}
 
 
@@ -5980,7 +6021,10 @@ class MirrorPlanner:
             raise ValueError("--max-jobs-per-api must be positive")
         if max_jobs > MODE_MAX_JOBS[mode]:
             raise ValueError(f"{mode} mode max-jobs-per-api cannot exceed {MODE_MAX_JOBS[mode]}")
-        items = self._smoke_items(max_jobs) if mode == "smoke" else self._pilot_items(start_date, end_date, max_jobs)
+        if scope == "a-share-low-risk":
+            items = self._a_share_smoke_items(max_jobs) if mode == "smoke" else self._a_share_pilot_items(start_date, end_date, max_jobs)
+        else:
+            items = self._smoke_items(max_jobs) if mode == "smoke" else self._pilot_items(start_date, end_date, max_jobs)
         planned_endpoint_count = sum(1 for item in items if item.plan_status in {"planned", "skip_existing"})
         blocked_endpoint_count = sum(1 for item in items if item.plan_status.startswith("blocked"))
         return MirrorPlan(
@@ -6016,6 +6060,25 @@ class MirrorPlanner:
             items.append(self._fetch_item(endpoint, "event_snapshot", SMOKE_REFERENCE_FETCHES[endpoint], max_jobs=1))
         return items
 
+    def _a_share_smoke_items(self, max_jobs: int) -> list[MirrorPlanItem]:
+        items: list[MirrorPlanItem] = []
+        for endpoint, params in A_SHARE_LOW_RISK_REFERENCE_FETCHES.items():
+            items.append(self._fetch_item(endpoint, "snapshot_reference", params, max_jobs=1))
+        trade_cal_ready = bool(self.catalog.latest_snapshot("trade_cal"))
+        for endpoint in A_SHARE_LOW_RISK_CALENDAR_BACKFILL_APIS:
+            if not trade_cal_ready:
+                items.append(self._blocked_item(endpoint, "daily_like", True, max_jobs, "missing_trade_cal_snapshot"))
+            else:
+                items.append(self._calendar_backfill_item(endpoint, "20250101", "20250110", max_jobs))
+        for endpoint, dates in A_SHARE_LOW_RISK_EXPLICIT_DATE_APIS.items():
+            items.append(self._date_backfill_item(endpoint, dates, min(max_jobs, len(dates)), requires_trade_cal=False))
+        for endpoint, params in A_SHARE_LOW_RISK_STOCK_CODE_SMOKE_FETCHES.items():
+            items.append(self._fetch_item(endpoint, "bounded_stock_code_smoke", params, max_jobs=1))
+        for endpoint in A_SHARE_LOW_RISK_PLAN_ONLY_APIS:
+            if endpoint not in A_SHARE_LOW_RISK_STOCK_CODE_SMOKE_FETCHES:
+                items.append(self._plan_only_item(endpoint, "plan_only", "requires bounded code-loop or endpoint-specific enablement before execution"))
+        return items
+
     def _pilot_items(self, start_date: str | None, end_date: str | None, max_jobs: int) -> list[MirrorPlanItem]:
         if not start_date or not end_date:
             raise ValueError("pilot mode requires --start-date and --end-date")
@@ -6034,6 +6097,42 @@ class MirrorPlanner:
         items.append(self._date_backfill_item("monthly", self._pilot_monthly_dates(start_date, end_date), max_jobs, requires_trade_cal=False, notes="monthly does not use trading-days-only in Phase 3.1"))
         for endpoint in ["namechange", "stk_managers", "stk_rewards"]:
             items.append(self._excluded_item(endpoint, "event_snapshot", max_jobs, "excluded_from_pilot_execution", "pilot does not run stock loops; smoke mode only fetches 000001.SZ once"))
+        return items
+
+    def _a_share_pilot_items(self, start_date: str | None, end_date: str | None, max_jobs: int) -> list[MirrorPlanItem]:
+        if not start_date or not end_date:
+            raise ValueError("pilot mode requires --start-date and --end-date")
+        items = [
+            self._fetch_item("stock_basic", "snapshot_reference", {"list_status": "L"}, max_jobs=1),
+            self._fetch_item("stock_company", "snapshot_reference", {"exchange": "SSE"}, max_jobs=1),
+            self._fetch_item(
+                "trade_cal",
+                "calendar_dependency",
+                {"exchange": "SSE", "start_date": start_date, "end_date": end_date},
+                max_jobs=1,
+                planned_action="fetch_calendar",
+                required_by=A_SHARE_LOW_RISK_DAILY_LIKE_APIS,
+            ),
+            self._fetch_item("hs_const", "snapshot_reference", {"hs_type": "SH", "is_new": "1"}, max_jobs=1),
+            self._fetch_item("concept", "snapshot_reference", {"src": "ts"}, max_jobs=1),
+            self._fetch_item("index_basic", "snapshot_reference", {"market": "SSE"}, max_jobs=1),
+            self._fetch_item("ths_index", "snapshot_reference", {"exchange": "A", "type": "N"}, max_jobs=1),
+            self._fetch_item("index_classify", "snapshot_reference", {"src": "SW2021", "level": "L1"}, max_jobs=1),
+        ]
+        trade_cal_ready = bool(self.catalog.latest_snapshot("trade_cal"))
+        for endpoint in A_SHARE_LOW_RISK_DAILY_LIKE_APIS:
+            if not trade_cal_ready:
+                items.append(self._blocked_item(endpoint, "daily_like", True, max_jobs, "missing_trade_cal_snapshot", plan_status="blocked_until_trade_cal", notes="calendar-aware backfill waits for local trade_cal latest snapshot"))
+            else:
+                items.append(self._calendar_backfill_item(endpoint, start_date, end_date, max_jobs))
+        weekly_dates = self._pilot_weekly_dates(start_date, end_date)
+        monthly_dates = self._pilot_monthly_dates(start_date, end_date)
+        for endpoint in ["weekly", "index_weekly"]:
+            items.append(self._date_backfill_item(endpoint, weekly_dates, max_jobs, requires_trade_cal=False, notes="weekly uses bounded explicit date planning only"))
+        for endpoint in ["monthly", "index_monthly"]:
+            items.append(self._date_backfill_item(endpoint, monthly_dates, max_jobs, requires_trade_cal=False, notes="monthly uses bounded explicit date planning only"))
+        for endpoint in A_SHARE_LOW_RISK_PLAN_ONLY_APIS:
+            items.append(self._plan_only_item(endpoint, "plan_only", "excluded from pilot execution; no stock, concept, or index-code loop execution is allowed"))
         return items
 
     def _fetch_item(self, endpoint: str, category: str, params: dict[str, Any], max_jobs: int, *, planned_action: str = "fetch", required_by: list[str] | None = None) -> MirrorPlanItem:
@@ -6140,6 +6239,23 @@ class MirrorPlanner:
             notes=notes,
         )
 
+    def _plan_only_item(self, endpoint: str, category: str, reason: str) -> MirrorPlanItem:
+        return MirrorPlanItem(
+            endpoint=endpoint,
+            category=category,
+            requires_trade_cal=False,
+            plan_status="plan_only_no_execution",
+            planned_jobs=0,
+            max_jobs=0,
+            existing_coverage=None,
+            missing_jobs=0,
+            blocked_reason=reason,
+            will_execute=False,
+            permission_status=(self.catalog.latest_permission(endpoint) or {}).get("status"),
+            planned_action="plan_only",
+            notes="read-only planning only; direct execution remains blocked",
+        )
+
     def _pilot_weekly_dates(self, start_date: str, end_date: str) -> list[str]:
         return [date for date in PILOT_JAN_2025_WEEKLY_DATES if start_date <= date <= end_date]
 
@@ -6172,28 +6288,56 @@ class MirrorOrchestrator:
             raise ValueError(f"{mode} mode max-jobs-per-api cannot exceed {MODE_MAX_JOBS[mode]}")
         run_id = self.catalog.create_run("mirror")
         items: list[dict[str, Any]] = []
-        probe_statuses = self._probe_all()
+        probe_statuses = self._probe_all(scope)
         trade_cal_status = self._execute_fetch("trade_cal", self._trade_cal_params(mode, start_date, end_date), run_id, probe_statuses)
         items.append(trade_cal_status)
-        for endpoint in ["stock_basic", "hs_const"]:
-            items.append(self._execute_fetch(endpoint, SMOKE_REFERENCE_FETCHES[endpoint], run_id, probe_statuses))
+        if scope == "a-share-low-risk":
+            reference_fetches = {
+                key: value
+                for key, value in A_SHARE_LOW_RISK_REFERENCE_FETCHES.items()
+                if key != "trade_cal"
+            }
+        else:
+            reference_fetches = {endpoint: SMOKE_REFERENCE_FETCHES[endpoint] for endpoint in ["stock_basic", "hs_const"]}
+        for endpoint, params in reference_fetches.items():
+            items.append(self._execute_fetch(endpoint, params, run_id, probe_statuses))
         if self.catalog.latest_snapshot("trade_cal") and trade_cal_status["status"] not in {"failed", "blocked"}:
-            for endpoint in SMOKE_CALENDAR_BACKFILL_APIS if mode == "smoke" else ["daily", "adj_factor", "daily_basic", "suspend_d"]:
+            calendar_apis = A_SHARE_LOW_RISK_CALENDAR_BACKFILL_APIS if scope == "a-share-low-risk" else SMOKE_CALENDAR_BACKFILL_APIS
+            if mode != "smoke":
+                calendar_apis = A_SHARE_LOW_RISK_DAILY_LIKE_APIS if scope == "a-share-low-risk" else ["daily", "adj_factor", "daily_basic", "suspend_d"]
+            for endpoint in calendar_apis:
                 items.append(self._execute_calendar_backfill(endpoint, mode, max_jobs_per_api, start_date, end_date, probe_statuses))
         else:
-            for endpoint in SMOKE_CALENDAR_BACKFILL_APIS if mode == "smoke" else ["daily", "adj_factor", "daily_basic", "suspend_d"]:
+            calendar_apis = A_SHARE_LOW_RISK_CALENDAR_BACKFILL_APIS if scope == "a-share-low-risk" else SMOKE_CALENDAR_BACKFILL_APIS
+            if mode != "smoke":
+                calendar_apis = A_SHARE_LOW_RISK_DAILY_LIKE_APIS if scope == "a-share-low-risk" else ["daily", "adj_factor", "daily_basic", "suspend_d"]
+            for endpoint in calendar_apis:
                 items.append(self._blocked(endpoint, "daily_like", "missing_or_failed_trade_cal"))
         if mode == "smoke":
-            date_groups = SMOKE_EXPLICIT_DATE_APIS.items()
+            date_groups = A_SHARE_LOW_RISK_EXPLICIT_DATE_APIS.items() if scope == "a-share-low-risk" else SMOKE_EXPLICIT_DATE_APIS.items()
         else:
             if not start_date or not end_date:
                 raise ValueError("pilot mode requires --start-date and --end-date")
-            date_groups = [("weekly", self._pilot_weekly_dates(start_date, end_date)), ("monthly", self._pilot_monthly_dates(start_date, end_date))]
+            if scope == "a-share-low-risk":
+                date_groups = [
+                    ("weekly", self._pilot_weekly_dates(start_date, end_date)),
+                    ("monthly", self._pilot_monthly_dates(start_date, end_date)),
+                    ("index_weekly", self._pilot_weekly_dates(start_date, end_date)),
+                    ("index_monthly", self._pilot_monthly_dates(start_date, end_date)),
+                ]
+            else:
+                date_groups = [("weekly", self._pilot_weekly_dates(start_date, end_date)), ("monthly", self._pilot_monthly_dates(start_date, end_date))]
         for endpoint, dates in date_groups:
             items.append(self._execute_date_backfill(endpoint, list(dates), max_jobs_per_api, probe_statuses))
         if mode == "smoke":
-            for endpoint in ["namechange", "stk_managers", "stk_rewards"]:
-                items.append(self._execute_fetch(endpoint, SMOKE_REFERENCE_FETCHES[endpoint], run_id, probe_statuses))
+            stock_code_fetches = A_SHARE_LOW_RISK_STOCK_CODE_SMOKE_FETCHES if scope == "a-share-low-risk" else {endpoint: SMOKE_REFERENCE_FETCHES[endpoint] for endpoint in ["namechange", "stk_managers", "stk_rewards"]}
+            for endpoint, params in stock_code_fetches.items():
+                items.append(self._execute_fetch(endpoint, params, run_id, probe_statuses))
+        if scope == "a-share-low-risk":
+            for endpoint in A_SHARE_LOW_RISK_PLAN_ONLY_APIS:
+                if mode == "smoke" and endpoint in A_SHARE_LOW_RISK_STOCK_CODE_SMOKE_FETCHES:
+                    continue
+                items.append(self._excluded_summary(endpoint, "plan_only", "no stock, concept, or index-code loop execution is allowed"))
         validation_ok, validation_results = Validator(self.root, self.catalog).validate_latest_snapshots(record=True)
         validation = {
             "status": "succeeded" if validation_ok else "failed",
@@ -6225,11 +6369,19 @@ class MirrorOrchestrator:
     def _pilot_monthly_dates(self, start_date: str, end_date: str) -> list[str]:
         return [date for date in PILOT_JAN_2025_MONTHLY_DATES if start_date <= date <= end_date]
 
-    def _probe_all(self) -> dict[str, str]:
+    def _probe_all(self, scope: str) -> dict[str, str]:
         statuses: dict[str, str] = {}
         thash = token_hash(getattr(self.client, "token", "mirror-client"))
         planner = JobPlanner(self.root, self.catalog)
-        for endpoint in LOW_RISK_A_SHARE_ENDPOINTS:
+        endpoints = LOW_RISK_A_SHARE_ENDPOINTS
+        if scope == "a-share-low-risk":
+            endpoints = [
+                *A_SHARE_LOW_RISK_REFERENCE_FETCHES,
+                *A_SHARE_LOW_RISK_CALENDAR_BACKFILL_APIS,
+                *A_SHARE_LOW_RISK_EXPLICIT_DATE_APIS,
+                *A_SHARE_LOW_RISK_STOCK_CODE_SMOKE_FETCHES,
+            ]
+        for endpoint in dict.fromkeys(endpoints):
             probe = planner.plan_probe(endpoint)
             response, status, error = self._probe(endpoint, probe.params, probe.fields)
             row_count = len(((response.get("data") or {}).get("items")) or [])
@@ -6353,6 +6505,17 @@ class MirrorOrchestrator:
             "endpoint": endpoint,
             "category": category,
             "status": "blocked",
+            "planned_jobs": 0,
+            "executed_jobs": 0,
+            "skipped_jobs": 0,
+            "blocked_reason": reason,
+        }
+
+    def _excluded_summary(self, endpoint: str, category: str, reason: str) -> dict[str, Any]:
+        return {
+            "endpoint": endpoint,
+            "category": category,
+            "status": "excluded",
             "planned_jobs": 0,
             "executed_jobs": 0,
             "skipped_jobs": 0,
