@@ -350,5 +350,45 @@ class AShareLowRiskExecutableFixtureTests(unittest.TestCase):
                 JobPlanner(self.root, self.catalog).plan_single_fetch(api_name, {})
 
 
+class AShareLowRiskRealSmokeCommandTests(unittest.TestCase):
+    def run_script(self, *args):
+        return subprocess.run(
+            [sys.executable, "scripts/tushare_real_smoke.py", *args],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def test_help_lists_a_share_low_risk_smoke(self):
+        result = self.run_script("--help")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--a-share-low-risk-smoke", result.stdout)
+        self.assertIn("--print-commands", result.stdout)
+
+    def test_a_share_low_risk_command_list_generated_without_requests(self):
+        result = self.run_script(
+            "--a-share-low-risk-smoke",
+            "--root",
+            "/tmp/tushare-a-share-low-risk-smoke",
+            "--print-commands",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["real_requests_sent"])
+        self.assertIn("stock_company", payload["endpoints"])
+        self.assertIn("index_daily", payload["endpoints"])
+        self.assertGreater(payload["endpoint_count"], 12)
+        self.assertTrue(any("fetch --api index_daily" in command for command in payload["commands"]))
+        self.assertFalse(payload["safety_limits"]["stock_loop"])
+        self.assertFalse(payload["safety_limits"]["full_backfill"])
+
+    def test_no_default_real_request_is_selected(self):
+        result = self.run_script()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("No endpoints selected", result.stderr)
+        self.assertNotIn("TUSHARE_TOKEN is required", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

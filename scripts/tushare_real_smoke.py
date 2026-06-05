@@ -36,7 +36,20 @@ PHASE2_LOW_VOLUME_ENDPOINTS: dict[str, dict[str, Any]] = {
     "stk_rewards": {"ts_code": "000001.SZ"},
 }
 
-ENDPOINTS: dict[str, dict[str, Any]] = {**PHASE1_ENDPOINTS, **PHASE2_LOW_VOLUME_ENDPOINTS}
+A_SHARE_LOW_RISK_ENDPOINTS: dict[str, dict[str, Any]] = {
+    **PHASE1_ENDPOINTS,
+    **PHASE2_LOW_VOLUME_ENDPOINTS,
+    "stock_company": {"exchange": "SSE"},
+    "concept": {"src": "ts"},
+    "index_basic": {"market": "SSE"},
+    "index_daily": {"trade_date": "20250102"},
+    "index_weekly": {"trade_date": "20250103"},
+    "index_monthly": {"trade_date": "20250127"},
+    "ths_index": {"exchange": "A", "type": "N"},
+    "index_classify": {"src": "SW2021", "level": "L1"},
+}
+
+ENDPOINTS: dict[str, dict[str, Any]] = {**A_SHARE_LOW_RISK_ENDPOINTS}
 
 ACCESSIBLE = {"accessible", "empty_but_accessible"}
 PERMISSION_STATUSES = {"permission_denied", "rate_limited"}
@@ -80,6 +93,44 @@ def print_table(rows: list[dict[str, Any]]) -> None:
     print("  ".join("-" * widths[col] for col in columns))
     for row in rows:
         print("  ".join(str(row.get(col, "") or "")[:48].ljust(widths[col]) for col in columns))
+
+
+def smoke_command_preview(root: Path, endpoints: list[str]) -> list[list[str]]:
+    commands: list[list[str]] = [[sys.executable, "-m", "tushare_mirror", "--root", str(root), "init-catalog"]]
+    for endpoint in endpoints:
+        commands.append([sys.executable, "-m", "tushare_mirror", "--root", str(root), "probe", "--api", endpoint, "--json"])
+        commands.append([
+            sys.executable,
+            "-m",
+            "tushare_mirror",
+            "--root",
+            str(root),
+            "fetch",
+            "--api",
+            endpoint,
+            "--params",
+            json.dumps(ENDPOINTS[endpoint], separators=(",", ":")),
+            "--json",
+        ])
+        commands.append([sys.executable, "-m", "tushare_mirror", "--root", str(root), "validate", "--api", endpoint, "--snapshot", "latest", "--json"])
+    return commands
+
+
+def print_command_preview(root: Path, endpoints: list[str]) -> None:
+    payload = {
+        "root": str(root),
+        "endpoint_count": len(endpoints),
+        "endpoints": endpoints,
+        "commands": [" ".join(command) for command in smoke_command_preview(root, endpoints)],
+        "safety_limits": {
+            "snapshot_endpoint_requests": "max 1 request per selected endpoint",
+            "date_endpoint_requests": "max 1 selected date per selected endpoint",
+            "stock_loop": False,
+            "full_backfill": False,
+        },
+        "real_requests_sent": False,
+    }
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
 
 
 def run_smoke(root: Path, endpoints: list[str], reset_root: bool) -> int:
@@ -196,6 +247,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--endpoint", choices=sorted(ENDPOINTS), action="append")
     parser.add_argument("--all-phase-1", action="store_true", help="Run daily plus Phase 1.2 low-volume endpoints.")
     parser.add_argument("--phase-2-low-volume", action="store_true", help="Run Phase 2 low-risk endpoints only.")
+    parser.add_argument("--a-share-low-risk-smoke", action="store_true", help="Run the bounded A-share low-risk endpoint smoke set.")
+    parser.add_argument("--print-commands", action="store_true", help="Print selected smoke commands without sending real requests.")
     parser.add_argument("--calendar-backfill", action="store_true", help="Run the Phase 2.4 calendar-aware daily backfill smoke.")
     parser.add_argument("--reset-root", action="store_true", help="Remove the root before running.")
     return parser
@@ -208,14 +261,22 @@ def main(argv: list[str] | None = None) -> int:
         endpoints.extend(PHASE1_ENDPOINTS)
     if args.phase_2_low_volume:
         endpoints.extend(PHASE2_LOW_VOLUME_ENDPOINTS)
+    if args.a_share_low_risk_smoke:
+        endpoints.extend(A_SHARE_LOW_RISK_ENDPOINTS)
     if args.endpoint:
         endpoints.extend(args.endpoint)
     if args.calendar_backfill:
         return run_calendar_backfill_smoke(Path(args.root), args.reset_root)
     seen: set[str] = set()
     endpoints = [api for api in endpoints if not (api in seen or seen.add(api))]
+    if args.print_commands:
+        if not endpoints:
+            print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, or --endpoint.", file=sys.stderr)
+            return 2
+        print_command_preview(Path(args.root), endpoints)
+        return 0
     if not endpoints:
-        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --calendar-backfill, or --endpoint.", file=sys.stderr)
+        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --calendar-backfill, or --endpoint.", file=sys.stderr)
         return 2
     return run_smoke(Path(args.root), endpoints, args.reset_root)
 
