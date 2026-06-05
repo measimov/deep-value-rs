@@ -10,7 +10,16 @@ from pathlib import Path
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_bundled_endpoint_configs, load_into_catalog, load_inventory_configs
-from tushare_mirror.mirror import A_SHARE_LOW_RISK_ENDPOINTS, CommandSafetyAnalyzer, MirrorBatchPlanner, MirrorOrchestrator, MirrorPlanner, MirrorScopeReporter
+from tushare_mirror.mirror import (
+    A_SHARE_LOW_RISK_ENDPOINTS,
+    CommandSafetyAnalyzer,
+    MirrorBatchPlanner,
+    MirrorOrchestrator,
+    MirrorPlanner,
+    MirrorReadinessReporter,
+    MirrorReviewResult,
+    MirrorScopeReporter,
+)
 from tushare_mirror.planner import JobPlanner
 from tushare_mirror.reader import LakeReader
 from tushare_mirror.store import FileLakeStore
@@ -654,6 +663,51 @@ class AShareLowRiskReadinessIntegrationTests(unittest.TestCase):
         endpoints = {row["endpoint"] for row in payload["review"]["endpoint_summary"]}
         self.assertTrue({"stock_company", "index_daily", "top10_holders"} <= endpoints)
         self.assertEqual(self.counts(), before)
+
+    def test_expanded_scope_index_daily_pilot_gap_is_advisory_only(self):
+        root = self.root
+        backup = self.backup
+        coverage_rows = [
+            {"api_name": "daily", "total_dates": 18, "missing_dates": 0, "failed_dates": 0, "quarantined_dates": 0},
+            {"api_name": "adj_factor", "total_dates": 18, "missing_dates": 0, "failed_dates": 0, "quarantined_dates": 0},
+            {"api_name": "daily_basic", "total_dates": 18, "missing_dates": 0, "failed_dates": 0, "quarantined_dates": 0},
+            {"api_name": "suspend_d", "total_dates": 18, "missing_dates": 0, "failed_dates": 0, "quarantined_dates": 0},
+            {"api_name": "index_daily", "total_dates": 18, "missing_dates": 18, "failed_dates": 0, "quarantined_dates": 0},
+        ]
+        review = MirrorReviewResult(
+            root=str(root),
+            backup=str(backup),
+            scope="a-share-low-risk",
+            mode="pilot",
+            start_date="20250101",
+            end_date="20250131",
+            calendar_exchange="SSE",
+            root_status="existing_catalog",
+            backup_status="present",
+            catalog_status={"schema_version": 2},
+            latest_snapshots=[{"api_name": "daily"}],
+            endpoint_summary=[{"endpoint": "trade_cal", "status": "current"}],
+            coverage_summary=coverage_rows,
+            validation_status="succeeded",
+            validation_results=[],
+            backup_inspect={"status": "succeeded"},
+            backup_restore_check={"status": "succeeded"},
+            backup_catalog_checksum_status="matched",
+            backup_possible_mutation=False,
+            artifact_size={},
+            token_plaintext_found=False,
+            ready_for_next_batch=False,
+            warnings=[],
+            blocking_errors=[],
+        )
+        checks = MirrorReadinessReporter()._checks(review, root, backup, "a-share-low-risk")
+        self.assertTrue(checks["pilot_coverage_complete"]["passed"])
+
+        daily_missing = [dict(row) for row in coverage_rows]
+        daily_missing[0]["missing_dates"] = 1
+        review_with_daily_gap = MirrorReviewResult(**{**review.to_dict(), "coverage_summary": daily_missing})
+        checks = MirrorReadinessReporter()._checks(review_with_daily_gap, root, backup, "a-share-low-risk")
+        self.assertFalse(checks["pilot_coverage_complete"]["passed"])
 
 
 class AShareLowRiskPullCommandTests(unittest.TestCase):

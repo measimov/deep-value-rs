@@ -1651,7 +1651,7 @@ class MirrorReadinessReporter:
             end_date="20250131",
             calendar_exchange="SSE",
         )
-        checks = self._checks(review, Path(root), Path(backup))
+        checks = self._checks(review, Path(root), Path(backup), scope)
         blocking_errors = list(review.blocking_errors)
         for name, check in checks.items():
             if check.get("required") and not check.get("passed"):
@@ -1672,14 +1672,16 @@ class MirrorReadinessReporter:
             review=review.to_dict(),
         )
 
-    def _checks(self, review: MirrorReviewResult, root: Path, backup: Path) -> dict[str, Any]:
+    def _checks(self, review: MirrorReviewResult, root: Path, backup: Path, scope: str) -> dict[str, Any]:
         endpoint_status = {row["endpoint"]: row for row in review.endpoint_summary}
-        coverage_complete = bool(review.coverage_summary) and all(
+        required_coverage_apis = set(DAILY_LIKE_MIRROR_APIS) if scope == "a-share-low-risk" else set(daily_like_apis_for_scope(scope))
+        required_coverage_rows = [row for row in review.coverage_summary if row.get("api_name") in required_coverage_apis]
+        coverage_complete = bool(required_coverage_rows) and all(
             int(row.get("total_dates") or 0) > 0
             and int(row.get("missing_dates") or 0) == 0
             and int(row.get("failed_dates") or 0) == 0
             and int(row.get("quarantined_dates") or 0) == 0
-            for row in review.coverage_summary
+            for row in required_coverage_rows
         )
         relationship = MirrorPreflightChecker(token_available=True)._path_relationship(_resolve_path(root), _resolve_path(backup))
         schema_version = review.catalog_status.get("schema_version")
