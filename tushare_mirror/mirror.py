@@ -1171,6 +1171,27 @@ def mirror_scope_endpoints(scope: str) -> list[str]:
     return list(LOW_RISK_A_SHARE_ENDPOINTS)
 
 
+def daily_like_apis_for_scope(scope: str) -> list[str]:
+    ensure_mirror_scope(scope)
+    if scope == "a-share-low-risk":
+        return list(A_SHARE_LOW_RISK_DAILY_LIKE_APIS)
+    return list(DAILY_LIKE_MIRROR_APIS)
+
+
+def coverage_matrix_apis_for_scope(scope: str) -> list[str]:
+    ensure_mirror_scope(scope)
+    if scope == "a-share-low-risk":
+        return [*A_SHARE_LOW_RISK_DAILY_LIKE_APIS, *A_SHARE_LOW_RISK_EXPLICIT_PERIODIC_APIS]
+    return [*DAILY_LIKE_MIRROR_APIS, "weekly", "monthly"]
+
+
+def reference_refresh_apis_for_scope(scope: str) -> list[str]:
+    ensure_mirror_scope(scope)
+    if scope == "a-share-low-risk":
+        return ["stock_basic", "stock_company", "hs_const", "concept", "index_basic", "ths_index", "index_classify"]
+    return ["stock_basic", "hs_const"]
+
+
 class MirrorScopeReporter:
     REPORT_VERSION = "mirror-scope/v1"
 
@@ -1454,12 +1475,12 @@ class MirrorReviewer:
             try:
                 catalog_status = catalog.inspect_summary()
                 latest_snapshots = catalog.list_snapshots(latest=True, limit=100)
-                endpoint_summary = self._endpoint_summary(catalog)
+                endpoint_summary = self._endpoint_summary(catalog, scope)
                 ok, validation_results = Validator(mirror_root, catalog).validate_latest_snapshots(record=False)
                 validation_status = "succeeded" if ok else "failed"
                 if not ok:
                     blocking_errors.append("validate --snapshot latest --no-record failed")
-                coverage_summary = self._coverage_summary(mirror_root, catalog, start_date, end_date, calendar_exchange, warnings, blocking_errors)
+                coverage_summary = self._coverage_summary(mirror_root, catalog, scope, start_date, end_date, calendar_exchange, warnings, blocking_errors)
             except Exception as exc:
                 blocking_errors.append(f"catalog review failed: {exc}")
 
@@ -1517,9 +1538,9 @@ class MirrorReviewer:
             blocking_errors=blocking_errors,
         )
 
-    def _endpoint_summary(self, catalog: CatalogStore) -> list[dict[str, Any]]:
+    def _endpoint_summary(self, catalog: CatalogStore, scope: str) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        for endpoint in LOW_RISK_A_SHARE_ENDPOINTS:
+        for endpoint in mirror_scope_endpoints(scope):
             snapshot = catalog.latest_snapshot(endpoint)
             if not snapshot:
                 rows.append({
@@ -1548,6 +1569,7 @@ class MirrorReviewer:
         self,
         root: Path,
         catalog: CatalogStore,
+        scope: str,
         start_date: str,
         end_date: str,
         calendar_exchange: str,
@@ -1555,7 +1577,7 @@ class MirrorReviewer:
         blocking_errors: list[str],
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        for api in DAILY_LIKE_MIRROR_APIS:
+        for api in daily_like_apis_for_scope(scope):
             try:
                 report = CoverageReporter(root, catalog).report(
                     api,
@@ -1983,7 +2005,7 @@ class MirrorNextBatchReporter:
         incomplete: dict[str, Any] | None = None
         try:
             for _ in range(self.MAX_MONTHS_TO_SCAN):
-                status = self._month_status(mirror_root, catalog, month)
+                status = self._month_status(mirror_root, catalog, scope, month)
                 if status["complete"]:
                     completed.append(month)
                     month = self._next_month(month)
@@ -2059,7 +2081,7 @@ class MirrorNextBatchReporter:
             blocking_errors=_dedupe_messages(blocking_errors),
         )
 
-    def _month_status(self, root: Path, catalog: CatalogStore, month: str) -> dict[str, Any]:
+    def _month_status(self, root: Path, catalog: CatalogStore, scope: str, month: str) -> dict[str, Any]:
         start, end = self._month_range(month)
         planner = MirrorBatchPlanner(root, catalog)
         calendar = planner._calendar_range(start, end, "SSE")
@@ -2074,7 +2096,7 @@ class MirrorNextBatchReporter:
         if calendar.get("status") != "covered":
             return {"month": month, "complete": False, "reason": "missing_trade_cal_range", "calendar": calendar_summary}
         coverage = []
-        for api_name in DAILY_LIKE_MIRROR_APIS:
+        for api_name in daily_like_apis_for_scope(scope):
             report = CoverageReporter(root, catalog).report(
                 api_name,
                 start_date=start,
@@ -3246,7 +3268,8 @@ class MirrorBatchLedgerReporter:
     def _inferred_month_batch(self, month: str, root: Path, scope: str) -> dict[str, Any]:
         start_date, end_date = self._month_range(month)
         coverage = MirrorCoverageMatrixReporter().report(root=root, scope=scope, start_date=start_date, end_date=end_date)
-        complete = all(item.get("status") == "complete" for item in coverage.items if item.get("api") in DAILY_LIKE_MIRROR_APIS)
+        scoped_daily_like = set(daily_like_apis_for_scope(scope))
+        complete = all(item.get("status") == "complete" for item in coverage.items if item.get("api") in scoped_daily_like)
         return {
             "batch_id": f"inferred_{month}",
             "source": "coverage_matrix",
@@ -5308,7 +5331,6 @@ class BackupStatusReporter:
 
 class MirrorCoverageMatrixReporter:
     REPORT_VERSION = "mirror-coverage-matrix/v1"
-    APIS = ["daily", "adj_factor", "daily_basic", "suspend_d", "weekly", "monthly"]
 
     def report(
         self,
@@ -5327,7 +5349,7 @@ class MirrorCoverageMatrixReporter:
             blocking_errors.append(f"catalog not found: {catalog.db_path}; run init-catalog first")
             return self._result(mirror_root, scope, start_date, end_date, [], warnings, blocking_errors)
         items = []
-        for api_name in self.APIS:
+        for api_name in coverage_matrix_apis_for_scope(scope):
             items.append(self._api_row(mirror_root, catalog, api_name, start_date, end_date, warnings))
         return self._result(mirror_root, scope, start_date, end_date, items, warnings, blocking_errors)
 
@@ -5353,9 +5375,10 @@ class MirrorCoverageMatrixReporter:
         )
 
     def _api_row(self, root: Path, catalog: CatalogStore, api_name: str, start_date: str, end_date: str, warnings: list[str]) -> dict[str, Any]:
-        coverage_class = "daily_like" if api_name in DAILY_LIKE_MIRROR_APIS else "weekly_monthly"
+        daily_like = set(DAILY_LIKE_MIRROR_APIS) | set(A_SHARE_LOW_RISK_DAILY_LIKE_APIS)
+        coverage_class = "daily_like" if api_name in daily_like else "weekly_monthly"
         try:
-            if api_name in DAILY_LIKE_MIRROR_APIS:
+            if api_name in daily_like:
                 report = CoverageReporter(root, catalog).report(
                     api_name,
                     start_date=start_date,
@@ -5367,7 +5390,7 @@ class MirrorCoverageMatrixReporter:
                 dates = self._weekly_monthly_dates(api_name, start_date, end_date)
                 report = CoverageReporter(root, catalog).report(api_name, dates=dates)
         except Exception as exc:
-            if api_name in DAILY_LIKE_MIRROR_APIS:
+            if api_name in daily_like:
                 warnings.append(f"{api_name} coverage unavailable: {exc}")
                 return self._empty_row(api_name, coverage_class, "blocked_missing_trade_cal", str(exc))
             warnings.append(f"{api_name} coverage unavailable: {exc}")
@@ -5410,7 +5433,7 @@ class MirrorCoverageMatrixReporter:
         return MirrorBatchPlanner(Path("."), CatalogStore(Path("."), read_only=True))._monthly_dates(start_date, end_date)
 
     def _weekly_monthly_dates(self, api_name: str, start_date: str, end_date: str) -> list[str]:
-        if api_name == "weekly":
+        if api_name in {"weekly", "index_weekly"}:
             fallback_dates = self._weekly_dates(start_date, end_date)
             pilot_dates = PILOT_JAN_2025_WEEKLY_DATES
         else:
@@ -5452,9 +5475,12 @@ class RequestEstimateReporter:
             blocking_errors.append(f"request estimate failed: {exc}")
             return self._result(mirror_root, scope, start_date, end_date, {}, 0, 0, 0, 0, 0, 0, 0, 0, "unknown", None, {}, "unknown", False, "unknown", warnings, blocking_errors)
         by_api = {item.endpoint: int(item.missing_jobs) for item in plan.endpoint_plans}
-        daily_like = sum(by_api.get(api_name, 0) for api_name in DAILY_LIKE_MIRROR_APIS)
-        weekly_monthly = by_api.get("weekly", 0) + by_api.get("monthly", 0)
-        reference_refresh = by_api.get("stock_basic", 0) + by_api.get("hs_const", 0)
+        daily_like = sum(by_api.get(api_name, 0) for api_name in daily_like_apis_for_scope(scope))
+        periodic = ["weekly", "monthly"]
+        if scope == "a-share-low-risk":
+            periodic.extend(["index_weekly", "index_monthly"])
+        weekly_monthly = sum(by_api.get(api_name, 0) for api_name in periodic)
+        reference_refresh = sum(by_api.get(api_name, 0) for api_name in reference_refresh_apis_for_scope(scope))
         trade_cal_requests = by_api.get("trade_cal", 0)
         if plan.trade_cal_dependency_status != "covered":
             warnings.append(f"local trade_cal range is {plan.trade_cal_dependency_status}; daily-like estimates may be deferred until calendar is present")
@@ -5580,13 +5606,19 @@ class MirrorBatchPlanner:
         calendar = self._calendar_range(start, end, calendar_exchange)
         endpoint_plans: list[MirrorBatchEndpointPlan] = []
         endpoint_plans.append(self._trade_cal_plan(start, end, calendar_exchange, calendar))
-        for endpoint in self.REFERENCE_APIS:
+        for endpoint in reference_refresh_apis_for_scope(scope):
             endpoint_plans.append(self._reference_plan(endpoint))
-        for endpoint in DAILY_LIKE_MIRROR_APIS:
+        for endpoint in daily_like_apis_for_scope(scope):
             endpoint_plans.append(self._daily_like_plan(endpoint, start, end, calendar_exchange, max_jobs_per_api, calendar))
         endpoint_plans.append(self._explicit_date_plan("weekly", self._weekly_dates(start, end), max_jobs_per_api, "weekly uses bounded explicit date planning only"))
         endpoint_plans.append(self._explicit_date_plan("monthly", self._monthly_dates(start, end), max_jobs_per_api, "monthly uses bounded explicit date planning only"))
-        for endpoint in self.EVENT_APIS:
+        if scope == "a-share-low-risk":
+            endpoint_plans.append(self._explicit_date_plan("index_weekly", self._weekly_dates(start, end), max_jobs_per_api, "index_weekly uses bounded explicit date planning only"))
+            endpoint_plans.append(self._explicit_date_plan("index_monthly", self._monthly_dates(start, end), max_jobs_per_api, "index_monthly uses bounded explicit date planning only"))
+            excluded = A_SHARE_LOW_RISK_PLAN_ONLY_APIS
+        else:
+            excluded = self.EVENT_APIS
+        for endpoint in excluded:
             endpoint_plans.append(self._excluded_plan(endpoint))
         total_candidate = sum(item.total_candidate_jobs for item in endpoint_plans)
         total_planned = sum(item.planned_jobs for item in endpoint_plans)

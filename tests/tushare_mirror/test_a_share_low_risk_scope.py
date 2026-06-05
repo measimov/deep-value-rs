@@ -504,6 +504,127 @@ class AShareLowRiskMirrorOrchestrationTests(unittest.TestCase):
         self.assertFalse({"namechange", "stk_managers", "stk_rewards", "top10_holders"} & called)
 
 
+class AShareLowRiskReadinessIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "lake"
+        self.backup = Path(self.tmp.name) / "backup"
+        self.catalog = CatalogStore(self.root)
+        self.catalog.init()
+        load_into_catalog(self.root, self.catalog)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *args, check=False):
+        return subprocess.run(
+            [sys.executable, "-m", "tushare_mirror", *args],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=check,
+        )
+
+    def counts(self):
+        import sqlite3
+
+        with sqlite3.connect(self.catalog.db_path) as conn:
+            return {
+                "runs": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+                "jobs": conn.execute("select count(*) from jobs").fetchone()[0],
+                "files": conn.execute("select count(*) from files").fetchone()[0],
+                "snapshots": conn.execute("select count(*) from snapshots").fetchone()[0],
+                "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
+            }
+
+    def test_batch_plan_for_202502_distinguishes_new_scope_endpoint_classes(self):
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-batch-plan",
+            "--root",
+            str(self.root),
+            "--scope",
+            "a-share-low-risk",
+            "--start-date",
+            "20250201",
+            "--end-date",
+            "20250228",
+            "--calendar-exchange",
+            "SSE",
+            "--max-jobs-per-api",
+            "20",
+            "--json",
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        by_endpoint = {item["endpoint"]: item for item in payload["endpoint_plans"]}
+        self.assertEqual(payload["scope"], "a-share-low-risk")
+        self.assertEqual(by_endpoint["stock_company"]["category"], "reference")
+        self.assertEqual(by_endpoint["index_daily"]["plan_status"], "blocked_until_trade_cal")
+        self.assertEqual(by_endpoint["index_weekly"]["planned_action"], "bounded_explicit_date_plan")
+        self.assertEqual(by_endpoint["top10_holders"]["plan_status"], "excluded_no_stock_loop")
+        self.assertEqual(self.counts(), before)
+
+    def test_request_estimate_and_coverage_matrix_include_index_endpoints(self):
+        before = self.counts()
+        estimate = json.loads(self.run_cli(
+            "request-estimate",
+            "--root",
+            str(self.root),
+            "--scope",
+            "a-share-low-risk",
+            "--start-date",
+            "20250201",
+            "--end-date",
+            "20250228",
+            "--json",
+            check=True,
+        ).stdout)
+        self.assertEqual(estimate["report_version"], "request-estimate/v1")
+        self.assertIn("index_daily", estimate["estimated_requests_by_api"])
+        self.assertIn("stock_company", estimate["estimated_requests_by_api"])
+        self.assertEqual(estimate["daily_like_status"], "blocked_until_trade_cal")
+
+        coverage = json.loads(self.run_cli(
+            "mirror-coverage-matrix",
+            "--root",
+            str(self.root),
+            "--scope",
+            "a-share-low-risk",
+            "--start-date",
+            "20250101",
+            "--end-date",
+            "20250131",
+            "--json",
+            check=True,
+        ).stdout)
+        self.assertEqual(coverage["report_version"], "mirror-coverage-matrix/v1")
+        apis = {item["api"] for item in coverage["items"]}
+        self.assertTrue({"index_daily", "index_weekly", "index_monthly"} <= apis)
+        self.assertEqual(self.counts(), before)
+
+    def test_readiness_json_contains_new_scope_endpoint_summary_without_side_effects(self):
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-readiness",
+            "--root",
+            str(self.root),
+            "--backup",
+            str(self.backup),
+            "--scope",
+            "a-share-low-risk",
+            "--json",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["scope"], "a-share-low-risk")
+        self.assertEqual(payload["review"]["scope"], "a-share-low-risk")
+        endpoints = {row["endpoint"] for row in payload["review"]["endpoint_summary"]}
+        self.assertTrue({"stock_company", "index_daily", "top10_holders"} <= endpoints)
+        self.assertEqual(self.counts(), before)
+
+
 class AShareLowRiskRealSmokeCommandTests(unittest.TestCase):
     def run_script(self, *args):
         return subprocess.run(
