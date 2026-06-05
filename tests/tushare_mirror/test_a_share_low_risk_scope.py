@@ -10,7 +10,7 @@ from pathlib import Path
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_bundled_endpoint_configs, load_into_catalog, load_inventory_configs
-from tushare_mirror.mirror import A_SHARE_LOW_RISK_ENDPOINTS, MirrorPlanner, MirrorScopeReporter
+from tushare_mirror.mirror import A_SHARE_LOW_RISK_ENDPOINTS, MirrorOrchestrator, MirrorPlanner, MirrorScopeReporter
 from tushare_mirror.planner import JobPlanner
 from tushare_mirror.reader import LakeReader
 from tushare_mirror.store import FileLakeStore
@@ -76,6 +76,63 @@ class ApiFakeClient:
             "_request_params": dict(params),
         }
         return QueryResult(events=[event], fields=self.fields, items=self.items)
+
+
+class MirrorRunFakeClient:
+    token = "fake-token-for-hash-only"
+
+    def __init__(self):
+        self.request_calls: list[str] = []
+        self.query_calls: list[tuple[str, dict]] = []
+
+    def request(self, api_name, params, fields=None):
+        self.request_calls.append(api_name)
+        fields_list = list(fields or [])
+        return {"code": 0, "msg": None, "data": {"fields": fields_list, "items": [self._row(params, fields_list)]}}
+
+    def query_paginated(self, api_name, params, fields, page_size=None):
+        self.query_calls.append((api_name, dict(params)))
+        fields_list = list(fields or [])
+        if api_name == "trade_cal":
+            fields_list = ["exchange", "cal_date", "is_open", "pretrade_date"]
+            items = [
+                ["SSE", "20250101", 0, "20241231"],
+                ["SSE", "20250102", 1, "20241231"],
+                ["SSE", "20250103", 1, "20250102"],
+                ["SSE", "20250106", 1, "20250103"],
+                ["SSE", "20250107", 1, "20250106"],
+                ["SSE", "20250108", 1, "20250107"],
+                ["SSE", "20250109", 1, "20250108"],
+                ["SSE", "20250110", 1, "20250109"],
+            ]
+        else:
+            items = [self._row(params, fields_list)]
+        event = {
+            "code": 0,
+            "msg": None,
+            "data": {"fields": fields_list, "items": items, "has_more": False},
+            "_http_status": 200,
+            "_page_index": 0,
+            "_request_params": dict(params),
+        }
+        return QueryResult(events=[event], fields=fields_list, items=items)
+
+    def _row(self, params, fields):
+        values = []
+        for field in fields:
+            if field in {"ts_code", "index_code", "code"}:
+                values.append("000001.SH")
+            elif field in {"trade_date", "ann_date", "end_date", "start_date", "cal_date", "in_date", "out_date", "list_date", "setup_date", "base_date", "exp_date"}:
+                values.append(params.get(field) or params.get("trade_date") or params.get("end_date") or "20250102")
+            elif field == "exchange":
+                values.append(params.get("exchange") or "SSE")
+            elif field in {"is_open", "is_new", "is_pub"}:
+                values.append("1")
+            elif field in {"name", "symbol", "area", "industry", "market", "title", "gender", "lev", "edu", "national", "birthday", "begin_date", "resume", "change_reason", "suspend_timing", "suspend_type", "chairman", "manager", "secretary", "province", "city", "introduction", "website", "email", "office", "main_business", "business_scope", "fullname", "publisher", "index_type", "category", "weight_rule", "desc", "src", "level", "industry_name", "industry_code", "parent_code", "type"}:
+                values.append("x")
+            else:
+                values.append(1.0)
+        return values
 
 
 class AShareLowRiskScopeTests(unittest.TestCase):
@@ -348,6 +405,103 @@ class AShareLowRiskExecutableFixtureTests(unittest.TestCase):
             self.assertFalse(by_endpoint[api_name].will_execute)
             with self.assertRaisesRegex(KeyError, "endpoint not found"):
                 JobPlanner(self.root, self.catalog).plan_single_fetch(api_name, {})
+
+
+class AShareLowRiskMirrorOrchestrationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "lake"
+        self.catalog = CatalogStore(self.root)
+        self.catalog.init()
+        load_into_catalog(self.root, self.catalog)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def counts(self):
+        import sqlite3
+
+        with sqlite3.connect(self.catalog.db_path) as conn:
+            return {
+                "runs": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+                "snapshots": conn.execute("select count(*) from snapshots").fetchone()[0],
+            }
+
+    def run_cli(self, *args, check=True):
+        return subprocess.run(
+            [sys.executable, "-m", "tushare_mirror", "--root", str(self.root), *args],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=check,
+        )
+
+    def test_mirror_plan_a_share_low_risk_json_is_stable(self):
+        result = self.run_cli(
+            "mirror-plan",
+            "--scope",
+            "a-share-low-risk",
+            "--mode",
+            "pilot",
+            "--start-date",
+            "20250101",
+            "--end-date",
+            "20250131",
+            "--max-jobs-per-api",
+            "20",
+            "--json",
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["scope"], "a-share-low-risk")
+        self.assertEqual(payload["endpoint_count"], len(A_SHARE_LOW_RISK_ENDPOINTS))
+        by_endpoint = {item["endpoint"]: item for item in payload["items"]}
+        self.assertEqual(by_endpoint["index_daily"]["plan_status"], "blocked_until_trade_cal")
+        self.assertEqual(by_endpoint["top10_holders"]["plan_status"], "plan_only_no_execution")
+        self.assertFalse(by_endpoint["top10_holders"]["will_execute"])
+
+    def test_mirror_run_without_execute_is_dry_run_only_for_new_scope(self):
+        before = self.counts()
+        result = self.run_cli("mirror-run", "--scope", "a-share-low-risk", "--mode", "smoke", "--max-jobs-per-api", "3")
+        self.assertIn("dry-run only", result.stdout)
+        after = self.counts()
+        self.assertEqual(before["runs"], after["runs"])
+        self.assertEqual(before["snapshots"], after["snapshots"])
+
+    def test_fake_smoke_executes_safe_subset_and_excludes_code_loops(self):
+        client = MirrorRunFakeClient()
+        result = MirrorOrchestrator(self.root, self.catalog, client, sleep=lambda _: None).run(
+            scope="a-share-low-risk",
+            mode="smoke",
+            max_jobs_per_api=3,
+        )
+        self.assertEqual(result.status, "succeeded")
+        endpoints = {item["endpoint"]: item for item in result.summary["items"]}
+        self.assertEqual(len(endpoints), len(A_SHARE_LOW_RISK_ENDPOINTS))
+        self.assertEqual(endpoints["index_daily"]["status"], "succeeded")
+        self.assertEqual(endpoints["top10_holders"]["status"], "excluded")
+        self.assertEqual(endpoints["concept_detail"]["status"], "excluded")
+        called = set(client.request_calls) | {api for api, _ in client.query_calls}
+        self.assertFalse({"top10_holders", "concept_detail", "index_weight", "ths_member"} & called)
+        self.assertNotIn("fake-token-for-hash-only", json.dumps(result.to_dict()))
+
+    def test_fake_pilot_excludes_stock_code_smoke_endpoints_and_code_loops(self):
+        client = MirrorRunFakeClient()
+        result = MirrorOrchestrator(self.root, self.catalog, client, sleep=lambda _: None).run(
+            scope="a-share-low-risk",
+            mode="pilot",
+            start_date="20250101",
+            end_date="20250131",
+            max_jobs_per_api=20,
+        )
+        self.assertEqual(result.status, "succeeded")
+        endpoints = {item["endpoint"]: item for item in result.summary["items"]}
+        self.assertEqual(endpoints["namechange"]["status"], "excluded")
+        self.assertEqual(endpoints["stk_managers"]["status"], "excluded")
+        self.assertEqual(endpoints["stk_rewards"]["status"], "excluded")
+        self.assertEqual(endpoints["index_daily"]["executed_jobs"], 7)
+        called = set(client.request_calls) | {api for api, _ in client.query_calls}
+        self.assertFalse({"namechange", "stk_managers", "stk_rewards", "top10_holders"} & called)
 
 
 class AShareLowRiskRealSmokeCommandTests(unittest.TestCase):

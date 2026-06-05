@@ -6288,7 +6288,7 @@ class MirrorOrchestrator:
             raise ValueError(f"{mode} mode max-jobs-per-api cannot exceed {MODE_MAX_JOBS[mode]}")
         run_id = self.catalog.create_run("mirror")
         items: list[dict[str, Any]] = []
-        probe_statuses = self._probe_all(scope)
+        probe_statuses = self._probe_all(scope, mode)
         trade_cal_status = self._execute_fetch("trade_cal", self._trade_cal_params(mode, start_date, end_date), run_id, probe_statuses)
         items.append(trade_cal_status)
         if scope == "a-share-low-risk":
@@ -6369,7 +6369,7 @@ class MirrorOrchestrator:
     def _pilot_monthly_dates(self, start_date: str, end_date: str) -> list[str]:
         return [date for date in PILOT_JAN_2025_MONTHLY_DATES if start_date <= date <= end_date]
 
-    def _probe_all(self, scope: str) -> dict[str, str]:
+    def _probe_all(self, scope: str, mode: str) -> dict[str, str]:
         statuses: dict[str, str] = {}
         thash = token_hash(getattr(self.client, "token", "mirror-client"))
         planner = JobPlanner(self.root, self.catalog)
@@ -6379,8 +6379,9 @@ class MirrorOrchestrator:
                 *A_SHARE_LOW_RISK_REFERENCE_FETCHES,
                 *A_SHARE_LOW_RISK_CALENDAR_BACKFILL_APIS,
                 *A_SHARE_LOW_RISK_EXPLICIT_DATE_APIS,
-                *A_SHARE_LOW_RISK_STOCK_CODE_SMOKE_FETCHES,
             ]
+            if mode == "smoke":
+                endpoints.extend(A_SHARE_LOW_RISK_STOCK_CODE_SMOKE_FETCHES)
         for endpoint in dict.fromkeys(endpoints):
             probe = planner.plan_probe(endpoint)
             response, status, error = self._probe(endpoint, probe.params, probe.fields)
