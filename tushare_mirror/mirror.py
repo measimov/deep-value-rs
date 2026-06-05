@@ -1874,6 +1874,9 @@ class MirrorBatchBundleReporter:
         "audit.json",
         "stop_policy.json",
         "operator_checklist.json",
+        "final_gate.json",
+        "execute_script_preview.sh",
+        "final_operator_summary.md",
         "command_safety.json",
         "commands.sh",
     ]
@@ -1929,7 +1932,7 @@ class MirrorBatchBundleReporter:
             else:
                 output_root.unlink()
         output_root.mkdir(parents=True, exist_ok=False)
-        payloads = {
+        payloads: dict[str, Any] = {
             "batch_plan.json": batch_plan.to_dict(),
             "readiness.json": readiness.to_dict(),
             "review.json": review.to_dict(),
@@ -1950,6 +1953,40 @@ class MirrorBatchBundleReporter:
         command_safety = CommandSafetyAnalyzer().analyze(file=commands).to_dict()
         payloads["command_safety.json"] = command_safety
         (output_root / "command_safety.json").write_text(json.dumps(command_safety, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        base_report_files = [relative_path for relative_path in self.REPORT_FILES if relative_path not in {"final_gate.json", "execute_script_preview.sh", "final_operator_summary.md"}]
+        base_manifest = self._manifest(
+            output_root=output_root,
+            mirror_root=mirror_root,
+            backup_root=backup_root,
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            max_jobs_per_api=max_jobs_per_api,
+            input_reports=payloads,
+            report_files=base_report_files,
+        )
+        (output_root / self.MANIFEST_FILE).write_text(json.dumps(base_manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        final_gate = FinalGateReporter().report(
+            root=mirror_root,
+            backup=backup_root,
+            bundle=output_root,
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            max_jobs_per_api=max_jobs_per_api,
+        ).to_dict()
+        payloads["final_gate.json"] = final_gate
+        (output_root / "final_gate.json").write_text(json.dumps(final_gate, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        script_preview = output_root / "execute_script_preview.sh"
+        script_preview.write_text(
+            ExecuteScriptReporter()._script(mirror_root, backup_root, output_root, scope, start_date, end_date, max_jobs_per_api, confirmation_phrase(scope, start_date, end_date, max_jobs_per_api)),
+            encoding="utf-8",
+        )
+        script_preview.chmod(0o644)
+        (output_root / "final_operator_summary.md").write_text(
+            self._final_operator_summary(final_gate),
+            encoding="utf-8",
+        )
         manifest = self._manifest(
             output_root=output_root,
             mirror_root=mirror_root,
@@ -2090,10 +2127,12 @@ class MirrorBatchBundleReporter:
         end_date: str,
         max_jobs_per_api: int,
         input_reports: dict[str, Any],
+        report_files: list[str] | None = None,
     ) -> dict[str, Any]:
         commands_path = output_root / "commands.sh"
         command_text = commands_path.read_text(encoding="utf-8")
         commands = self._command_manifest_items(command_text)
+        relative_paths = report_files or self.REPORT_FILES
         return {
             "manifest_version": self.MANIFEST_VERSION,
             "bundle_id": f"{scope}_{start_date}_{end_date}_{max_jobs_per_api}",
@@ -2112,7 +2151,7 @@ class MirrorBatchBundleReporter:
                 }
                 for filename, payload in sorted(input_reports.items())
             ],
-            "files": [self._manifest_file_item(output_root, relative_path) for relative_path in self.REPORT_FILES],
+            "files": [self._manifest_file_item(output_root, relative_path) for relative_path in relative_paths],
             "commands": commands,
             "safety_boundaries": [
                 "bundle generation is read-only except for the requested output directory",
@@ -2123,8 +2162,28 @@ class MirrorBatchBundleReporter:
             "requires_user_confirmation": any(item["requires_user_confirmation"] for item in commands),
             "execute_command_present": any(item["would_execute_real_requests"] for item in commands),
             "commands_guarded": all((not item["would_execute_real_requests"]) or item["guarded"] for item in commands),
-            "token_plaintext_found": self._token_plaintext_found(output_root, self.REPORT_FILES),
+            "token_plaintext_found": self._token_plaintext_found(output_root, relative_paths),
         }
+
+    def _final_operator_summary(self, final_gate: dict[str, Any]) -> str:
+        return "\n".join(
+            [
+                "# Final Operator Summary",
+                "",
+                f"Gate status: {final_gate.get('gate_status')}",
+                f"Ready for user-confirmed execute: {final_gate.get('ready_for_user_confirmed_execute')}",
+                f"Ready for dependency stage: {final_gate.get('ready_for_dependency_stage')}",
+                f"Ready for full batch after dependency: {final_gate.get('ready_for_full_batch_after_dependency')}",
+                f"Estimated requests: {final_gate.get('estimated_request_count')}",
+                f"Confirmation phrase: {final_gate.get('confirmation_phrase')}",
+                "",
+                "This summary is generated from local read-only reports. It does not execute February.",
+                "Do not run commands.sh or execute_script_preview.sh automatically.",
+                "Any mirror-run --execute command requires explicit user confirmation.",
+                "The confirmation phrase is operator friction, not security.",
+                "",
+            ]
+        )
 
     def _manifest_file_item(self, output_root: Path, relative_path: str) -> dict[str, Any]:
         path = output_root / relative_path
@@ -2231,6 +2290,7 @@ class MirrorBatchBundleVerifier:
         "audit.json",
         "stop_policy.json",
         "operator_checklist.json",
+        "final_gate.json",
         "command_safety.json",
     ]
 
@@ -2307,6 +2367,12 @@ class MirrorBatchBundleVerifier:
 
         commands_path = bundle_root / "commands.sh"
         command_guard_status = self._command_guard_status(commands_path, warnings, blocking_errors)
+        execute_script = bundle_root / "execute_script_preview.sh"
+        if execute_script.exists():
+            script_safety = CommandSafetyAnalyzer().analyze(file=execute_script)
+            if script_safety.status == "blocked":
+                blocking_errors.extend(script_safety.blocking_errors)
+                blocking_errors.append("execute_script_preview.sh failed command safety check")
         token_plaintext_found = self._token_plaintext_found(bundle_root)
         if token_plaintext_found:
             blocking_errors.append("token-like plaintext found in bundle")
