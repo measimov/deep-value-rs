@@ -4062,12 +4062,14 @@ class MirrorOpsReportReporter:
         self._add_section(sections, warnings, blocking_errors, "token_hygiene", token_section)
         bundle_status = self._bundle_status(next_start_date)
         sections["bundle_status"] = bundle_status
+        promotion_bundle = bundle_status.get("bundle") if bundle_status.get("status") in {"passed", "warning", "blocked"} else None
         promotion = MonthlyPromotionChecklistReporter(token_available=self._token_available_override).report(
             root=mirror_root,
             backup=backup_root,
             scope=scope,
             from_month=start_date[:6],
             to_month=next_start_date[:6],
+            bundle=promotion_bundle,
         )
         promotion_payload = promotion.to_dict()
         self._add_section(sections, warnings, blocking_errors, "promotion_checklist", promotion_payload)
