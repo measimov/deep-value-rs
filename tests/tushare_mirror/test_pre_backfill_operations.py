@@ -572,6 +572,10 @@ class RequestEstimateReportTests(PreBackfillOperationsTestCase):
         self.assertEqual(self.counts(), before)
         self.assertEqual(report.report_version, "request-estimate/v1")
         self.assertEqual(report.planned_trade_cal_requests, 0)
+        self.assertEqual(report.dependency_requests, 0)
+        self.assertEqual(report.dependency_status, "covered")
+        self.assertEqual(report.daily_like_status, "ready")
+        self.assertFalse(report.natural_day_fallback)
         self.assertGreater(report.daily_like_requests, 0)
         self.assertGreater(report.weekly_monthly_requests, 0)
         self.assertTrue(report.not_a_quota_guarantee)
@@ -581,8 +585,17 @@ class RequestEstimateReportTests(PreBackfillOperationsTestCase):
         self.build_pilot()
         report = RequestEstimateReporter().report(root=self.root, scope="low-risk-a-share", start_date="20250201", end_date="20250228")
         self.assertEqual(report.planned_trade_cal_requests, 1)
+        self.assertEqual(report.dependency_requests, 1)
+        self.assertEqual(report.dependency_status, "missing")
+        self.assertEqual(report.dependency_action, "fetch_trade_cal_first")
+        self.assertEqual(report.trade_cal_params, {"exchange": "SSE", "start_date": "20250201", "end_date": "20250228"})
+        self.assertEqual(report.daily_like_status, "blocked_until_trade_cal")
+        self.assertFalse(report.natural_day_fallback)
         self.assertEqual(report.daily_like_requests, 0)
+        self.assertEqual(report.executable_after_dependency_requests, 0)
+        self.assertGreater(report.currently_unblocked_requests, 0)
         self.assertTrue(any("trade_cal range" in warning for warning in report.warnings))
+        self.assertTrue(any("natural day fallback is disabled" in warning for warning in report.warnings))
         self.assertTrue(report.not_a_quota_guarantee)
 
     def test_cli_json_contract_and_no_side_effects_for_request_estimate(self):
@@ -606,6 +619,14 @@ class RequestEstimateReportTests(PreBackfillOperationsTestCase):
             "daily_like_requests",
             "weekly_monthly_requests",
             "reference_refresh_requests",
+            "dependency_requests",
+            "executable_after_dependency_requests",
+            "currently_unblocked_requests",
+            "dependency_status",
+            "dependency_action",
+            "trade_cal_params",
+            "daily_like_status",
+            "natural_day_fallback",
             "risk_level",
             "assumptions",
             "warnings",

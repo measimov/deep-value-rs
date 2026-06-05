@@ -337,6 +337,14 @@ class FullMirrorBatchPlanTests(FullMirrorReadinessReviewTests):
         )
         self.assertEqual(self.counts(), before)
         self.assertEqual(plan.trade_cal_dependency_status, "missing_range")
+        self.assertEqual(plan.dependency_status, "missing")
+        self.assertEqual(plan.dependency_action, "fetch_trade_cal_first")
+        self.assertEqual(plan.trade_cal_params, {"exchange": "SSE", "start_date": "20250201", "end_date": "20250228"})
+        self.assertEqual(plan.daily_like_status, "blocked_until_trade_cal")
+        self.assertFalse(plan.natural_day_fallback)
+        self.assertEqual(plan.dependency_requests, 1)
+        self.assertEqual(plan.executable_after_dependency_requests, 0)
+        self.assertEqual(plan.currently_unblocked_requests, 5)
         by_endpoint = {item.endpoint: item for item in plan.endpoint_plans}
         self.assertEqual(by_endpoint["trade_cal"].planned_action, "fetch_calendar_range")
         for endpoint in ["daily", "adj_factor", "daily_basic", "suspend_d"]:
@@ -354,6 +362,11 @@ class FullMirrorBatchPlanTests(FullMirrorReadinessReviewTests):
             max_jobs_per_api=20,
         )
         self.assertEqual(plan.trade_cal_dependency_status, "covered")
+        self.assertEqual(plan.dependency_status, "covered")
+        self.assertIsNone(plan.dependency_action)
+        self.assertEqual(plan.daily_like_status, "ready")
+        self.assertFalse(plan.natural_day_fallback)
+        self.assertEqual(plan.dependency_requests, 0)
         by_endpoint = {item.endpoint: item for item in plan.endpoint_plans}
         self.assertEqual(by_endpoint["trade_cal"].planned_jobs, 0)
         self.assertEqual(by_endpoint["daily"].total_candidate_jobs, 20)
@@ -392,6 +405,15 @@ class FullMirrorBatchPlanTests(FullMirrorReadinessReviewTests):
             "warnings",
             "estimated_request_count",
             "requires_execute_confirmation",
+            "trade_cal_dependency_status",
+            "dependency_status",
+            "dependency_action",
+            "trade_cal_params",
+            "daily_like_status",
+            "natural_day_fallback",
+            "dependency_requests",
+            "executable_after_dependency_requests",
+            "currently_unblocked_requests",
         ]:
             self.assertIn(key, payload)
         daily = next(item for item in payload["endpoint_plans"] if item["endpoint"] == "daily")

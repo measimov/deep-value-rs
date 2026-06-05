@@ -740,6 +740,14 @@ class RequestEstimateResult:
     daily_like_requests: int
     weekly_monthly_requests: int
     reference_refresh_requests: int
+    dependency_requests: int
+    executable_after_dependency_requests: int
+    currently_unblocked_requests: int
+    dependency_status: str
+    dependency_action: str | None
+    trade_cal_params: dict[str, str]
+    daily_like_status: str
+    natural_day_fallback: bool
     risk_level: str
     assumptions: list[str]
     warnings: list[str]
@@ -793,6 +801,14 @@ class MirrorBatchPlan:
     estimated_request_count: int
     requires_execute_confirmation: bool
     trade_cal_dependency_status: str
+    dependency_status: str
+    dependency_action: str | None
+    trade_cal_params: dict[str, str]
+    daily_like_status: str
+    natural_day_fallback: bool
+    dependency_requests: int
+    executable_after_dependency_requests: int
+    currently_unblocked_requests: int
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -814,6 +830,14 @@ class MirrorBatchPlan:
             "estimated_request_count": self.estimated_request_count,
             "requires_execute_confirmation": self.requires_execute_confirmation,
             "trade_cal_dependency_status": self.trade_cal_dependency_status,
+            "dependency_status": self.dependency_status,
+            "dependency_action": self.dependency_action,
+            "trade_cal_params": self.trade_cal_params,
+            "daily_like_status": self.daily_like_status,
+            "natural_day_fallback": self.natural_day_fallback,
+            "dependency_requests": self.dependency_requests,
+            "executable_after_dependency_requests": self.executable_after_dependency_requests,
+            "currently_unblocked_requests": self.currently_unblocked_requests,
             "warnings": self.warnings,
         }
 
@@ -4177,7 +4201,7 @@ class RequestEstimateReporter:
         catalog = CatalogStore(mirror_root, read_only=True)
         if not catalog.db_path.exists():
             blocking_errors.append(f"catalog not found: {catalog.db_path}; run init-catalog first")
-            return self._result(mirror_root, scope, start_date, end_date, {}, 0, 0, 0, 0, 0, "unknown", warnings, blocking_errors)
+            return self._result(mirror_root, scope, start_date, end_date, {}, 0, 0, 0, 0, 0, 0, 0, 0, "unknown", None, {}, "unknown", False, "unknown", warnings, blocking_errors)
         try:
             plan = MirrorBatchPlanner(mirror_root, catalog).plan(
                 scope=scope,
@@ -4188,7 +4212,7 @@ class RequestEstimateReporter:
             )
         except Exception as exc:
             blocking_errors.append(f"request estimate failed: {exc}")
-            return self._result(mirror_root, scope, start_date, end_date, {}, 0, 0, 0, 0, 0, "unknown", warnings, blocking_errors)
+            return self._result(mirror_root, scope, start_date, end_date, {}, 0, 0, 0, 0, 0, 0, 0, 0, "unknown", None, {}, "unknown", False, "unknown", warnings, blocking_errors)
         by_api = {item.endpoint: int(item.missing_jobs) for item in plan.endpoint_plans}
         daily_like = sum(by_api.get(api_name, 0) for api_name in DAILY_LIKE_MIRROR_APIS)
         weekly_monthly = by_api.get("weekly", 0) + by_api.get("monthly", 0)
@@ -4196,6 +4220,7 @@ class RequestEstimateReporter:
         trade_cal_requests = by_api.get("trade_cal", 0)
         if plan.trade_cal_dependency_status != "covered":
             warnings.append(f"local trade_cal range is {plan.trade_cal_dependency_status}; daily-like estimates may be deferred until calendar is present")
+            warnings.append("daily-like request counts are deferred until trade_cal is local; natural day fallback is disabled")
         total = sum(by_api.values())
         return self._result(
             mirror_root,
@@ -4208,6 +4233,14 @@ class RequestEstimateReporter:
             daily_like,
             weekly_monthly,
             reference_refresh,
+            plan.dependency_requests,
+            plan.executable_after_dependency_requests,
+            plan.currently_unblocked_requests,
+            plan.dependency_status,
+            plan.dependency_action,
+            plan.trade_cal_params,
+            plan.daily_like_status,
+            plan.natural_day_fallback,
             self._risk_level(total),
             warnings,
             blocking_errors,
@@ -4225,6 +4258,14 @@ class RequestEstimateReporter:
         daily_like_requests: int,
         weekly_monthly_requests: int,
         reference_refresh_requests: int,
+        dependency_requests: int,
+        executable_after_dependency_requests: int,
+        currently_unblocked_requests: int,
+        dependency_status: str,
+        dependency_action: str | None,
+        trade_cal_params: dict[str, str],
+        daily_like_status: str,
+        natural_day_fallback: bool,
         risk_level: str,
         warnings: list[str],
         blocking_errors: list[str],
@@ -4241,10 +4282,20 @@ class RequestEstimateReporter:
             daily_like_requests=daily_like_requests,
             weekly_monthly_requests=weekly_monthly_requests,
             reference_refresh_requests=reference_refresh_requests,
+            dependency_requests=dependency_requests,
+            executable_after_dependency_requests=executable_after_dependency_requests,
+            currently_unblocked_requests=currently_unblocked_requests,
+            dependency_status=dependency_status,
+            dependency_action=dependency_action,
+            trade_cal_params=trade_cal_params,
+            daily_like_status=daily_like_status,
+            natural_day_fallback=natural_day_fallback,
             risk_level=risk_level,
             assumptions=[
                 "one planned missing job maps to one estimated request",
                 "daily-like requests use local trade_cal when the requested range is covered",
+                "daily-like requests are blocked until trade_cal is local when dependency_status is missing",
+                "natural day fallback is disabled for daily-like endpoints",
                 "weekly/monthly requests use bounded date lists only",
                 "stock loop, financial, object/text, intraday, and compaction execution remain excluded",
             ],
@@ -4303,6 +4354,17 @@ class MirrorBatchPlanner:
         total_planned = sum(item.planned_jobs for item in endpoint_plans)
         blocked = sum(1 for item in endpoint_plans if item.plan_status.startswith("blocked"))
         estimated = sum(item.missing_jobs for item in endpoint_plans if item.plan_status not in {"excluded_no_stock_loop"})
+        dependency_missing = calendar["status"] != "covered"
+        dependency_requests = sum(item.missing_jobs for item in endpoint_plans if item.endpoint == "trade_cal")
+        currently_unblocked_requests = sum(
+            item.missing_jobs
+            for item in endpoint_plans
+            if item.endpoint != "trade_cal"
+            and item.category != "daily_like"
+            and item.plan_status not in {"excluded_no_stock_loop"}
+        )
+        if not dependency_missing:
+            currently_unblocked_requests += sum(item.missing_jobs for item in endpoint_plans if item.category == "daily_like")
         return MirrorBatchPlan(
             batch_id=f"batch_{start}_{end}",
             scope=scope,
@@ -4319,6 +4381,14 @@ class MirrorBatchPlanner:
             estimated_request_count=estimated,
             requires_execute_confirmation=True,
             trade_cal_dependency_status=calendar["status"],
+            dependency_status="missing" if dependency_missing else "covered",
+            dependency_action="fetch_trade_cal_first" if dependency_missing else None,
+            trade_cal_params={"exchange": calendar_exchange.upper(), "start_date": start, "end_date": end},
+            daily_like_status="blocked_until_trade_cal" if dependency_missing else "ready",
+            natural_day_fallback=False,
+            dependency_requests=dependency_requests,
+            executable_after_dependency_requests=0,
+            currently_unblocked_requests=currently_unblocked_requests,
         )
 
     def _calendar_range(self, start: str, end: str, exchange: str) -> dict[str, Any]:
