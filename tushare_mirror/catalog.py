@@ -367,7 +367,9 @@ class CatalogStore:
     def get_endpoint_config(self, api_name: str) -> dict[str, Any]:
         row = self.get_endpoint(api_name)
         if not row:
-            raise KeyError(f"endpoint not found: {api_name}")
+            from .endpoints import bundled_endpoint_config
+
+            return bundled_endpoint_config(api_name)
         cfg = loads(row["config_json"])
         cfg["table_id"] = row["table_id"]
         cfg["partition_spec_id"] = row["partition_spec_id"]

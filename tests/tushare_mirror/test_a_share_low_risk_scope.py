@@ -10,7 +10,7 @@ from pathlib import Path
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_bundled_endpoint_configs, load_into_catalog, load_inventory_configs
-from tushare_mirror.mirror import A_SHARE_LOW_RISK_ENDPOINTS, CommandSafetyAnalyzer, MirrorOrchestrator, MirrorPlanner, MirrorScopeReporter
+from tushare_mirror.mirror import A_SHARE_LOW_RISK_ENDPOINTS, CommandSafetyAnalyzer, MirrorBatchPlanner, MirrorOrchestrator, MirrorPlanner, MirrorScopeReporter
 from tushare_mirror.planner import JobPlanner
 from tushare_mirror.reader import LakeReader
 from tushare_mirror.store import FileLakeStore
@@ -345,6 +345,37 @@ class AShareLowRiskPlannerTests(unittest.TestCase):
             self.assertIn(path_part, plan.lake_path, api_name)
             self.assertEqual(plan.planned_actions[0], "request_tushare", api_name)
         self.assertEqual(self.counts()["jobs"], 0)
+
+    def test_bundled_endpoint_metadata_fallback_is_read_only_for_older_catalogs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "older-catalog"
+            catalog = CatalogStore(root)
+            catalog.init()
+            planner = JobPlanner(root, catalog)
+            plan = planner.plan_single_fetch("index_weekly", {"trade_date": "20250207"})
+            self.assertIn("domain=index/api=index_weekly/year=2025/month=02", plan.lake_path)
+            self.assertIsNone(catalog.get_endpoint("index_weekly"))
+            with self.assertRaises(KeyError):
+                catalog.get_endpoint_config("not_a_tushare_api")
+
+    def test_batch_plan_uses_bundled_metadata_fallback_without_catalog_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "older-catalog"
+            catalog = CatalogStore(root)
+            catalog.init()
+            plan = MirrorBatchPlanner(root, catalog).plan(
+                scope="a-share-low-risk",
+                start_date="20250201",
+                end_date="20250228",
+                calendar_exchange="SSE",
+                max_jobs_per_api=20,
+            )
+            by_endpoint = {item.endpoint: item for item in plan.endpoint_plans}
+            self.assertEqual(by_endpoint["index_weekly"].category, "date_based")
+            self.assertEqual(by_endpoint["index_weekly"].plan_status, "planned")
+            self.assertEqual(by_endpoint["index_monthly"].category, "date_based")
+            self.assertEqual(by_endpoint["index_monthly"].plan_status, "planned")
+            self.assertIsNone(catalog.get_endpoint("index_weekly"))
 
 
 class AShareLowRiskExecutableFixtureTests(unittest.TestCase):

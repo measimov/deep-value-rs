@@ -76,6 +76,16 @@ def load_bundled_endpoint_configs() -> list[dict[str, Any]]:
     return configs
 
 
+def bundled_endpoint_config(api_name: str) -> dict[str, Any]:
+    for cfg in load_bundled_endpoint_configs():
+        if cfg.get("api_name") == api_name:
+            enriched, tid, psid = enrich_endpoint_config(dict(cfg))
+            enriched["table_id"] = tid
+            enriched["partition_spec_id"] = psid
+            return enriched
+    raise KeyError(f"endpoint not found: {api_name}")
+
+
 def validate_inventory_config(cfg: dict[str, Any], source: str = "<inventory>") -> dict[str, Any]:
     missing = sorted(field for field in INVENTORY_REQUIRED_FIELDS if field not in cfg)
     if missing:
