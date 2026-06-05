@@ -671,6 +671,81 @@ class MirrorOpsReportResult:
 
 
 @dataclass(frozen=True)
+class FinalGateCheck:
+    name: str
+    status: str
+    passed: bool
+    details: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class FinalGateCommandPreview:
+    command: str
+    confirmation: str
+    would_execute_real_requests: bool
+    requires_user_confirmation: bool
+    do_not_run_automatically: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class FinalGateResult:
+    report_version: str
+    gate_status: str
+    ready_for_user_confirmed_execute: bool
+    ready_for_dependency_stage: bool
+    ready_for_full_batch_after_dependency: bool | str
+    root: str
+    backup: str
+    bundle: str
+    scope: str
+    requested_range: dict[str, str]
+    max_jobs_per_api: int
+    estimated_request_count: int
+    dependency_stage: dict[str, Any]
+    checks: list[dict[str, Any]]
+    sections: dict[str, Any]
+    command_preview: dict[str, Any]
+    final_command_preview: dict[str, Any]
+    confirmation_phrase: str
+    blocking_errors: list[str]
+    warnings: list[str]
+    safety_boundaries: list[str]
+    do_not_run_automatically: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "report_version": self.report_version,
+            "gate_status": self.gate_status,
+            "ready_for_user_confirmed_execute": self.ready_for_user_confirmed_execute,
+            "ready_for_dependency_stage": self.ready_for_dependency_stage,
+            "ready_for_full_batch_after_dependency": self.ready_for_full_batch_after_dependency,
+            "root": self.root,
+            "backup": self.backup,
+            "bundle": self.bundle,
+            "scope": self.scope,
+            "requested_range": self.requested_range,
+            "max_jobs_per_api": self.max_jobs_per_api,
+            "estimated_request_count": self.estimated_request_count,
+            "dependency_stage": self.dependency_stage,
+            "confirmation_phrase": self.confirmation_phrase,
+            "command_preview": self.command_preview,
+            "safety_boundaries": self.safety_boundaries,
+            "warnings": self.warnings,
+            "blocking_errors": self.blocking_errors,
+            "do_not_run_automatically": self.do_not_run_automatically,
+        }
+
+
+@dataclass(frozen=True)
 class SchemaStatusResult:
     report_version: str
     root: str
@@ -4013,6 +4088,7 @@ class MirrorOpsReportReporter:
         end_date: str,
         next_start_date: str,
         next_end_date: str,
+        bundle: Path | str | None = None,
     ) -> MirrorOpsReportResult:
         ensure_mirror_scope(scope)
         mirror_root = _resolve_path(Path(root))
@@ -4056,7 +4132,7 @@ class MirrorOpsReportReporter:
             "warnings": [*token_root.warnings, *token_backup.warnings],
         }
         self._add_section(sections, warnings, blocking_errors, "token_hygiene", token_section)
-        bundle_status = self._bundle_status(next_start_date)
+        bundle_status = self._bundle_status(next_start_date, bundle)
         sections["bundle_status"] = bundle_status
         promotion_bundle = bundle_status.get("bundle") if bundle_status.get("status") in {"passed", "warning", "blocked"} else None
         promotion = MonthlyPromotionChecklistReporter(token_available=self._token_available_override).report(
@@ -4120,19 +4196,19 @@ class MirrorOpsReportReporter:
         for error in payload.get("blocking_errors") or []:
             blocking_errors.append(f"{name}: {error}")
 
-    def _bundle_status(self, next_start_date: str) -> dict[str, Any]:
-        bundle = Path("/tmp") / f"tushare-mirror-batch-bundle-{next_start_date[:6]}"
-        if not bundle.exists():
+    def _bundle_status(self, next_start_date: str, bundle: Path | str | None = None) -> dict[str, Any]:
+        bundle_path = _resolve_path(Path(bundle)) if bundle is not None else Path("/tmp") / f"tushare-mirror-batch-bundle-{next_start_date[:6]}"
+        if not bundle_path.exists():
             return {
                 "status": "not_provided",
-                "bundle": str(bundle),
+                "bundle": str(bundle_path),
                 "verified": False,
                 "report": None,
             }
-        report = MirrorBatchBundleVerifier().verify(bundle=bundle).to_dict()
+        report = MirrorBatchBundleVerifier().verify(bundle=bundle_path).to_dict()
         return {
             "status": report.get("status"),
-            "bundle": str(bundle),
+            "bundle": str(bundle_path),
             "verified": report.get("status") == "passed",
             "report": report,
         }
@@ -4141,6 +4217,301 @@ class MirrorOpsReportReporter:
         if not ready:
             return "resolve blocking errors, regenerate or verify the February bundle, and rerun mirror-ops-report before seeking user confirmation"
         return "review bundle verification, command safety, rehearsal, and operator checklist; only then request explicit user confirmation for mirror-run --execute"
+
+
+class FinalGateReporter:
+    REPORT_VERSION = "mirror-final-gate/v1"
+    MAX_JOBS_PER_API = 20
+
+    def __init__(self, *, token_available: bool | None = None):
+        self._token_available_override = token_available
+
+    def report(
+        self,
+        *,
+        root: Path | str,
+        backup: Path | str,
+        bundle: Path | str,
+        scope: str,
+        start_date: str,
+        end_date: str,
+        max_jobs_per_api: int,
+    ) -> FinalGateResult:
+        ensure_mirror_scope(scope)
+        mirror_root = _resolve_path(Path(root))
+        backup_root = _resolve_path(Path(backup))
+        bundle_root = _resolve_path(Path(bundle))
+        warnings: list[str] = ["mirror-final-gate is read-only and does not execute mirror-run, commands.sh, fetch, or backfill"]
+        blocking_errors: list[str] = []
+        checks: list[FinalGateCheck] = []
+        sections: dict[str, Any] = {}
+
+        from_start, from_end = self._previous_month_range(start_date)
+        bundle_verify = MirrorBatchBundleVerifier().verify(bundle=bundle_root)
+        sections["bundle_verification"] = bundle_verify.to_dict()
+        self._add_check(
+            checks,
+            "bundle_exists",
+            bundle_root.exists() and bundle_root.is_dir(),
+            {"bundle": str(bundle_root)},
+            blocking_errors,
+            "bundle not found",
+        )
+        self._add_check(
+            checks,
+            "bundle_verified",
+            bundle_verify.status == "passed",
+            bundle_verify.to_dict(),
+            blocking_errors,
+            "bundle verification is blocked",
+        )
+        warnings.extend(bundle_verify.warnings)
+        blocking_errors.extend(bundle_verify.blocking_errors)
+
+        command_safety = CommandSafetyAnalyzer().analyze(file=bundle_root / "commands.sh")
+        sections["command_safety"] = command_safety.to_dict()
+        command_safety_ok = command_safety.status in {"passed", "warning"} and not command_safety.blocking_errors
+        self._add_check(
+            checks,
+            "command_safety_warning_only",
+            command_safety_ok,
+            command_safety.to_dict(),
+            blocking_errors,
+            "command safety is blocked",
+            status="warning" if command_safety.status == "warning" and command_safety_ok else None,
+        )
+        warnings.extend(command_safety.warnings)
+        blocking_errors.extend(command_safety.blocking_errors)
+
+        rehearsal = MirrorBatchRehearsalReporter().rehearse(root=mirror_root, backup=backup_root, bundle=bundle_root)
+        sections["rehearsal"] = rehearsal.to_dict()
+        self._add_check(
+            checks,
+            "rehearsal_passed",
+            rehearsal.rehearsal_status == "passed",
+            rehearsal.to_dict(),
+            blocking_errors,
+            "rehearsal is blocked",
+        )
+        warnings.extend(rehearsal.warnings)
+        blocking_errors.extend(rehearsal.blocked_by)
+
+        promotion = MonthlyPromotionChecklistReporter(token_available=self._token_available_override).report(
+            root=mirror_root,
+            backup=backup_root,
+            scope=scope,
+            from_month=from_start[:6],
+            to_month=start_date[:6],
+            bundle=bundle_root,
+        )
+        sections["promotion_checklist"] = promotion.to_dict()
+        self._add_check(
+            checks,
+            "promotion_no_hard_blockers",
+            not promotion.hard_blockers,
+            promotion.to_dict(),
+            blocking_errors,
+            "promotion checklist has hard blockers",
+            status="warning" if promotion.ready_for_dependency_stage else None,
+        )
+        warnings.extend(promotion.warnings)
+        blocking_errors.extend(promotion.hard_blockers)
+
+        ops = MirrorOpsReportReporter(token_available=self._token_available_override).report(
+            root=mirror_root,
+            backup=backup_root,
+            scope=scope,
+            start_date=from_start,
+            end_date=from_end,
+            next_start_date=start_date,
+            next_end_date=end_date,
+            bundle=bundle_root,
+        )
+        sections["ops_report"] = ops.to_dict()
+        self._add_check(
+            checks,
+            "ops_report_no_hard_blockers",
+            not ops.hard_blockers,
+            ops.to_dict(),
+            blocking_errors,
+            "ops report has hard blockers",
+            status="warning" if ops.overall_status == "staged" else None,
+        )
+        warnings.extend(ops.warnings)
+        blocking_errors.extend(ops.hard_blockers)
+
+        backup_status = BackupStatusReporter().report(backup=backup_root)
+        sections["backup_status"] = backup_status.to_dict()
+        self._add_check(checks, "backup_restore_check_passed", backup_status.restore_check_status == "succeeded", backup_status.to_dict(), blocking_errors, "backup restore-check did not pass")
+        self._add_check(checks, "backup_not_mutated", not backup_status.possible_mutation, backup_status.to_dict(), blocking_errors, "backup possible_mutation is true")
+        warnings.extend(backup_status.warnings)
+        blocking_errors.extend(backup_status.blocking_errors)
+
+        schema_status = SchemaStatusReporter().report(root=mirror_root)
+        sections["schema_status"] = schema_status.to_dict()
+        schema_clear = not schema_status.blocking_errors and schema_status.incompatible_schema_count == 0 and schema_status.quarantine_count == 0
+        self._add_check(checks, "schema_status_clear", schema_clear, schema_status.to_dict(), blocking_errors, "schema or quarantine blockers are present")
+        warnings.extend(schema_status.warnings)
+        blocking_errors.extend(schema_status.blocking_errors)
+
+        path_diagnostics = PathDiagnosticsReporter().report(root=mirror_root, backup=backup_root)
+        sections["path_diagnostics"] = path_diagnostics.to_dict()
+        self._add_check(checks, "paths_safe", not path_diagnostics.blocking_errors, path_diagnostics.to_dict(), blocking_errors, "path diagnostics are blocked")
+        warnings.extend(path_diagnostics.warnings)
+        blocking_errors.extend(path_diagnostics.blocking_errors)
+
+        token_root = TokenHygieneScanner().scan(path=mirror_root)
+        token_backup = TokenHygieneScanner().scan(path=backup_root)
+        token_hygiene = {
+            "root": token_root.to_dict(),
+            "backup": token_backup.to_dict(),
+            "token_plaintext_found": token_root.token_plaintext_found or token_backup.token_plaintext_found,
+            "blocking_errors": [*token_root.blocking_errors, *token_backup.blocking_errors],
+            "warnings": [*token_root.warnings, *token_backup.warnings],
+        }
+        sections["token_hygiene"] = token_hygiene
+        self._add_check(checks, "token_hygiene_clear", not token_hygiene["token_plaintext_found"] and not token_hygiene["blocking_errors"], token_hygiene, blocking_errors, "token plaintext found")
+        warnings.extend(token_hygiene["warnings"])
+        blocking_errors.extend(token_hygiene["blocking_errors"])
+
+        operator = MirrorOperatorChecklistReporter(token_available=self._token_available_override).report(
+            root=mirror_root,
+            backup=backup_root,
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        sections["operator_checklist"] = operator.to_dict()
+        self._add_check(checks, "token_available", operator.token_available, {"token_available": operator.token_available}, blocking_errors, "TUSHARE_TOKEN is not available")
+        warnings.extend(operator.warnings)
+        blocking_errors.extend(operator.blocking_errors)
+
+        stop_policy = StopPolicyReporter().report(scope=scope)
+        sections["stop_policy"] = stop_policy.to_dict()
+        self._add_check(checks, "stop_policy_allows_low_risk", not stop_policy.execution_blocked, stop_policy.to_dict(), blocking_errors, "stop policy blocks this category")
+        warnings.extend(stop_policy.warnings)
+        blocking_errors.extend(stop_policy.blocking_errors)
+
+        request_bounds_ok = self._valid_bounded_range(start_date, end_date)
+        self._add_check(checks, "requested_date_range_bounded", request_bounds_ok, {"start_date": start_date, "end_date": end_date}, blocking_errors, "requested date range is not a valid bounded range")
+        max_jobs_ok = max_jobs_per_api <= self.MAX_JOBS_PER_API
+        self._add_check(checks, "max_jobs_per_api_guardrail", max_jobs_ok, {"max_jobs_per_api": max_jobs_per_api, "max_allowed": self.MAX_JOBS_PER_API}, blocking_errors, "max_jobs_per_api exceeds 20")
+        scope_ok = scope == "low-risk-a-share"
+        self._add_check(checks, "scope_low_risk_a_share", scope_ok, {"scope": scope}, blocking_errors, "scope is not low-risk-a-share")
+        self._add_check(checks, "no_full_mirror", True, {"mode": "pilot", "full_mirror": False}, blocking_errors, "full mirror execution is not allowed")
+        self._add_check(checks, "no_stock_loop", True, {"stock_loop": False}, blocking_errors, "stock loops are not allowed")
+        prohibited_clear = self._prohibited_categories_clear(sections.get("promotion_checklist") or {})
+        self._add_check(checks, "no_prohibited_api_category", prohibited_clear, {"prohibited_categories": ["financial", "pit", "object", "intraday", "compaction"]}, blocking_errors, "prohibited API category is present")
+        self._add_check(checks, "no_commands_executed_by_gate", True, {"final_gate_read_only": True}, blocking_errors, "final gate executed commands")
+
+        dependency_stage = dict(promotion.dependency_stage or {})
+        ready_for_dependency_stage = bool(promotion.ready_for_dependency_stage and not blocking_errors)
+        ready_for_full_batch_after_dependency = promotion.ready_for_batch_after_dependency
+        ready_for_user_confirmed_execute = bool((promotion.ready_to_promote or promotion.ready_for_dependency_stage) and not blocking_errors)
+        if blocking_errors:
+            gate_status = "blocked"
+        elif ready_for_dependency_stage:
+            gate_status = "warning"
+            warnings.append("February is staged: user-confirmed execution may first fetch trade_cal before daily-like endpoints proceed")
+        elif warnings:
+            gate_status = "warning"
+        else:
+            gate_status = "passed"
+
+        command_preview = self._command_preview(mirror_root, backup_root, scope, start_date, end_date, max_jobs_per_api)
+        return FinalGateResult(
+            report_version=self.REPORT_VERSION,
+            gate_status=gate_status,
+            ready_for_user_confirmed_execute=ready_for_user_confirmed_execute,
+            ready_for_dependency_stage=ready_for_dependency_stage,
+            ready_for_full_batch_after_dependency=ready_for_full_batch_after_dependency,
+            root=str(mirror_root),
+            backup=str(backup_root),
+            bundle=str(bundle_root),
+            scope=scope,
+            requested_range={"start_date": start_date, "end_date": end_date},
+            max_jobs_per_api=max_jobs_per_api,
+            estimated_request_count=int((sections.get("promotion_checklist") or {}).get("checks", {}).get("request_estimate_low_or_moderate", {}).get("report", {}).get("estimated_total_requests") or rehearsal.estimated_request_count or 0),
+            dependency_stage=dependency_stage,
+            checks=[check.to_dict() for check in checks],
+            sections=sections,
+            command_preview=command_preview.to_dict(),
+            final_command_preview=command_preview.to_dict(),
+            confirmation_phrase=confirmation_phrase(scope, start_date, end_date, max_jobs_per_api),
+            blocking_errors=_dedupe_messages(blocking_errors),
+            warnings=_dedupe_messages(warnings),
+            safety_boundaries=self._safety_boundaries(),
+            do_not_run_automatically=True,
+        )
+
+    def _add_check(
+        self,
+        checks: list[FinalGateCheck],
+        name: str,
+        passed: bool,
+        details: dict[str, Any],
+        blocking_errors: list[str],
+        blocking_message: str,
+        *,
+        status: str | None = None,
+    ) -> None:
+        check_status = status or ("passed" if passed else "blocked")
+        checks.append(FinalGateCheck(name=name, status=check_status, passed=passed, details=details))
+        if not passed:
+            blocking_errors.append(blocking_message)
+
+    def _previous_month_range(self, start_date: str) -> tuple[str, str]:
+        start = datetime.strptime(start_date, "%Y%m%d")
+        first = start.replace(day=1)
+        previous_end = first - timedelta(days=1)
+        previous_start = previous_end.replace(day=1)
+        return previous_start.strftime("%Y%m%d"), previous_end.strftime("%Y%m%d")
+
+    def _valid_bounded_range(self, start_date: str, end_date: str) -> bool:
+        try:
+            start = datetime.strptime(start_date, "%Y%m%d")
+            end = datetime.strptime(end_date, "%Y%m%d")
+        except ValueError:
+            return False
+        return start <= end and (end - start).days <= 31
+
+    def _prohibited_categories_clear(self, promotion: dict[str, Any]) -> bool:
+        plan = ((promotion.get("checks") or {}).get("next_batch_plan_available") or {}).get("report") or {}
+        prohibited = {"financial", "pit", "object", "object-text", "intraday", "compaction"}
+        for endpoint_plan in plan.get("endpoint_plans") or []:
+            if str(endpoint_plan.get("category") or "").lower() in prohibited:
+                return False
+        return True
+
+    def _command_preview(self, root: Path, backup: Path, scope: str, start_date: str, end_date: str, max_jobs_per_api: int) -> FinalGateCommandPreview:
+        command = (
+            f"python3 -m tushare_mirror mirror-run --root {root} --scope {scope} --mode pilot "
+            f"--start-date {start_date} --end-date {end_date} --max-jobs-per-api {max_jobs_per_api} "
+            f"--backup-target {backup} --execute"
+        )
+        return FinalGateCommandPreview(
+            command=command,
+            confirmation="USER_CONFIRMATION_REQUIRED",
+            would_execute_real_requests=True,
+            requires_user_confirmation=True,
+            do_not_run_automatically=True,
+        )
+
+    def _safety_boundaries(self) -> list[str]:
+        return [
+            "mirror-final-gate is read-only",
+            "does not execute mirror-run",
+            "does not run commands.sh",
+            "does not fetch real Tushare data",
+            "does not backfill dates",
+            "does not write catalog or validation_runs",
+            "does not write backup data",
+            "do_not_run_automatically=true",
+        ]
+
+
+def confirmation_phrase(scope: str, start_date: str, end_date: str, max_jobs_per_api: int) -> str:
+    return f"CONFIRM {scope.upper()} {start_date}-{end_date} MAXJOBS{max_jobs_per_api}"
 
 
 class SchemaStatusReporter:
