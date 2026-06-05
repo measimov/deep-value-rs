@@ -1817,7 +1817,11 @@ class MirrorBatchBundleReporter:
         if output_root == backup_root or _is_relative_to(output_root, backup_root):
             blocking_errors.append("output path must not be inside backup root")
         if output_root.exists() and not overwrite:
-            blocking_errors.append("output path already exists; pass --overwrite to replace it")
+            manifest_path = output_root / self.MANIFEST_FILE
+            if output_root.is_dir() and not manifest_path.exists():
+                blocking_errors.append("existing bundle output is not a valid manifest-bearing bundle; rerun with --overwrite or choose another output path")
+            else:
+                blocking_errors.append("output path already exists; pass --overwrite to replace it")
         return blocking_errors
 
     def _result(

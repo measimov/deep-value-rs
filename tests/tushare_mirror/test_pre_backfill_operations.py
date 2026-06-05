@@ -663,16 +663,45 @@ class MirrorBatchBundleTests(PreBackfillOperationsTestCase):
         self.assertTrue(by_command["mirror-run"]["allowed_in_bundle"])
         self.assertNotIn("secret-token-should-not-appear", json.dumps(manifest))
 
-    def test_existing_output_refused_without_overwrite(self):
+    def test_existing_pre_manifest_bundle_refused_without_overwrite(self):
         self.build_pilot()
         output = self.base / "existing-bundle"
         output.mkdir()
+        (output / "README.md").write_text("old bundle\n", encoding="utf-8")
+        (output / "commands.sh").write_text("# USER_CONFIRMATION_REQUIRED\n", encoding="utf-8")
+        before = self.counts()
+        result = self.create_bundle(output)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(result.status, "blocked")
+        self.assertTrue(any("not a valid manifest-bearing bundle" in error for error in result.blocking_errors))
+        self.assertFalse((output / "bundle_manifest.json").exists())
+        self.assertTrue((output / "README.md").exists())
+
+    def test_existing_pre_manifest_bundle_replaced_with_overwrite(self):
+        self.build_pilot()
+        output = self.base / "existing-pre-manifest-bundle"
+        output.mkdir()
+        (output / "README.md").write_text("old bundle\n", encoding="utf-8")
+        (output / "stale.txt").write_text("stale\n", encoding="utf-8")
+        before = self.counts()
+        result = self.create_bundle(output, overwrite=True)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(result.status, "created")
+        self.assertTrue(result.overwritten)
+        self.assertTrue((output / "bundle_manifest.json").exists())
+        self.assertFalse((output / "stale.txt").exists())
+
+    def test_valid_existing_bundle_refused_without_overwrite(self):
+        self.build_pilot()
+        output = self.base / "valid-existing-bundle"
+        created = self.create_bundle(output)
+        self.assertEqual(created.status, "created")
         before = self.counts()
         result = self.create_bundle(output)
         self.assertEqual(self.counts(), before)
         self.assertEqual(result.status, "blocked")
         self.assertTrue(any("already exists" in error for error in result.blocking_errors))
-        self.assertEqual(list(output.iterdir()), [])
+        self.assertTrue((output / "bundle_manifest.json").exists())
 
     def test_output_inside_mirror_root_blocked(self):
         output = self.root / "bundle"
