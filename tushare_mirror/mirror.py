@@ -1756,6 +1756,8 @@ class MirrorBatchBundleReporter:
         "status.json",
         "audit.json",
         "stop_policy.json",
+        "operator_checklist.json",
+        "command_safety.json",
         "commands.sh",
     ]
     BUNDLE_FILES = [*REPORT_FILES, MANIFEST_FILE]
@@ -1794,6 +1796,13 @@ class MirrorBatchBundleReporter:
             review = MirrorReviewer().review(root=mirror_root, backup=backup_root, scope=scope, mode="pilot", start_date="20250101", end_date="20250131")
             status = MirrorStatusReporter().report(root=mirror_root, backup=backup_root, scope=scope)
             audit = MirrorAuditReporter().report(root=mirror_root, backup=backup_root, scope=scope)
+            operator_checklist = MirrorOperatorChecklistReporter().report(
+                root=mirror_root,
+                backup=backup_root,
+                scope=scope,
+                start_date=start_date,
+                end_date=end_date,
+            )
         except Exception as exc:
             return self._result(mirror_root, backup_root, output_root, scope, start_date, end_date, max_jobs_per_api, "blocked", overwrite, [], warnings, [f"bundle source report failed: {exc}"])
 
@@ -1810,6 +1819,7 @@ class MirrorBatchBundleReporter:
             "status.json": status.to_dict(),
             "audit.json": audit.to_dict(),
             "stop_policy.json": StopPolicyReporter().report(scope=scope).to_dict(),
+            "operator_checklist.json": operator_checklist.to_dict(),
         }
         for filename, payload in payloads.items():
             (output_root / filename).write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
@@ -1820,6 +1830,9 @@ class MirrorBatchBundleReporter:
             encoding="utf-8",
         )
         commands.chmod(0o644)
+        command_safety = CommandSafetyAnalyzer().analyze(file=commands).to_dict()
+        payloads["command_safety.json"] = command_safety
+        (output_root / "command_safety.json").write_text(json.dumps(command_safety, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         manifest = self._manifest(
             output_root=output_root,
             mirror_root=mirror_root,
@@ -1893,8 +1906,9 @@ class MirrorBatchBundleReporter:
                 f"Window: {start_date}-{end_date}",
                 "",
                 "This bundle is generated from local read-only reports. It does not execute mirror-run, fetch data, backfill dates, or write catalog state.",
+                "No command has been executed, the February batch has not started, and this bundle is only a plan artifact.",
                 "Review every JSON report before using any command preview.",
-                "commands.sh contains an execute command only as a commented preview marked USER_CONFIRMATION_REQUIRED.",
+                "commands.sh contains staged previews only; any mirror-run --execute line is commented and marked USER_CONFIRMATION_REQUIRED.",
                 "",
             ]
         )
@@ -1909,15 +1923,41 @@ class MirrorBatchBundleReporter:
             f"--start-date {start_date} --end-date {end_date} --max-jobs-per-api {max_jobs_per_api} "
             f"--backup-target {backup} --execute --json"
         )
+        validate = f"python3 -m tushare_mirror --root {root} validate --latest-all --no-record --json"
+        backup_command = f"python3 -m tushare_mirror --root {root} backup --target {backup} --json"
+        restore_check = f"python3 -m tushare_mirror restore-check --backup {backup} --json"
+        review = (
+            f"python3 -m tushare_mirror mirror-review --root {root} --backup {backup} --scope {scope} "
+            f"--start-date {start_date} --end-date {end_date} --json"
+        )
         return "\n".join(
             [
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
-                'echo "This bundle is a dry-run artifact. Review JSON files before taking action."',
+                'echo "This bundle is a dry-run artifact. No command in it has been executed."',
+                "",
+                "# Stage 1: trade_cal dependency staging",
                 plan,
                 "",
-                "# USER_CONFIRMATION_REQUIRED: uncomment only after explicit operator approval.",
+                "# USER_CONFIRMATION_REQUIRED: Run the single monthly mirror-run only after user confirms.",
+                "# The orchestrator will fetch trade_cal before daily-like endpoints; there is no natural-day fallback.",
+                "# If the current system cannot execute trade_cal separately, do not invent a separate command.",
                 f"# {execute}",
+                "",
+                "# Stage 2: post-dependency and post-execution checks",
+                "# Rerun mirror-batch-plan after trade_cal is local and before interpreting daily-like readiness.",
+                f"# {plan}",
+                "# validate --no-record would run only after a successful user-confirmed execution.",
+                f"# {validate}",
+                "# backup would run only after successful validation/review of the user-confirmed execution.",
+                f"# {backup_command}",
+                "# restore-check would run only after backup completes.",
+                f"# {restore_check}",
+                "# post-batch review would run after backup and restore-check.",
+                f"# {review}",
+                "",
+                "# February batch has not started; this file is documentation, not an automation script.",
+                "# Do not run commands.sh directly.",
                 "",
             ]
         )
@@ -2005,14 +2045,19 @@ class MirrorBatchBundleReporter:
             guarded = stripped.startswith("#") or marker_present
             command_text = stripped.lstrip("#").strip()
             parts = command_text.split()
-            try:
-                command_name = parts[parts.index("tushare_mirror") + 1]
-            except (ValueError, IndexError):
-                command_name = "unknown"
+            command_name = self._mirror_command_name(parts)
             would_execute = (
                 (command_name == "mirror-run" and "--execute" in parts)
                 or (command_name in {"backfill", "backfill-missing"} and "--execute" in parts)
             )
+            allowed_commands = {
+                "mirror-batch-plan",
+                "mirror-run",
+                "validate",
+                "backup",
+                "restore-check",
+                "mirror-review",
+            }
             items.append(
                 {
                     "command_name": command_name,
@@ -2020,10 +2065,27 @@ class MirrorBatchBundleReporter:
                     "would_execute_real_requests": would_execute,
                     "requires_user_confirmation": would_execute,
                     "guarded": guarded,
-                    "allowed_in_bundle": command_name in {"mirror-batch-plan", "mirror-run"} and ((not would_execute) or guarded),
+                    "allowed_in_bundle": command_name in allowed_commands and ((not would_execute) or guarded),
                 }
             )
         return items
+
+    def _mirror_command_name(self, parts: list[str]) -> str:
+        try:
+            index = parts.index("tushare_mirror") + 1
+        except (ValueError, IndexError):
+            return "unknown"
+        options_with_values = {"--root"}
+        while index < len(parts):
+            token = parts[index]
+            if token in options_with_values:
+                index += 2
+                continue
+            if token.startswith("-"):
+                index += 1
+                continue
+            return token
+        return "unknown"
 
     def _token_plaintext_found(self, output_root: Path, relative_paths: list[str]) -> bool:
         token = os.environ.get("TUSHARE_TOKEN")
@@ -2044,7 +2106,16 @@ class MirrorBatchBundleReporter:
 class MirrorBatchBundleVerifier:
     REPORT_VERSION = "mirror-batch-bundle-verify/v1"
     TOKEN_PATTERN = re.compile(r"(?i)(?:TUSHARE_TOKEN|token)\s*[:=]\s*['\"]?[A-Za-z0-9][A-Za-z0-9_\-]{10,}")
-    JSON_REPORTS = ["batch_plan.json", "readiness.json", "review.json", "status.json", "audit.json", "stop_policy.json"]
+    JSON_REPORTS = [
+        "batch_plan.json",
+        "readiness.json",
+        "review.json",
+        "status.json",
+        "audit.json",
+        "stop_policy.json",
+        "operator_checklist.json",
+        "command_safety.json",
+    ]
 
     def verify(self, *, bundle: Path | str) -> MirrorBatchBundleVerifyResult:
         bundle_root = _resolve_path(Path(bundle))

@@ -667,6 +667,8 @@ class MirrorBatchBundleTests(PreBackfillOperationsTestCase):
             "status.json",
             "audit.json",
             "stop_policy.json",
+            "operator_checklist.json",
+            "command_safety.json",
             "commands.sh",
             "bundle_manifest.json",
         }
@@ -677,6 +679,14 @@ class MirrorBatchBundleTests(PreBackfillOperationsTestCase):
         commands = (output / "commands.sh").read_text()
         self.assertIn("USER_CONFIRMATION_REQUIRED", commands)
         self.assertIn("# python3 -m tushare_mirror mirror-run", commands)
+        self.assertIn("Stage 1: trade_cal dependency staging", commands)
+        self.assertIn("Stage 2: post-dependency and post-execution checks", commands)
+        self.assertIn("February batch has not started", commands)
+        self.assertIn("Do not run commands.sh directly", commands)
+        self.assertNotIn("\npython3 -m tushare_mirror mirror-run", commands)
+        command_safety = json.loads((output / "command_safety.json").read_text())
+        self.assertEqual(command_safety["status"], "warning")
+        self.assertTrue(command_safety["guarded_execute_commands"])
         manifest = json.loads((output / "bundle_manifest.json").read_text())
         self.assertEqual(manifest["manifest_version"], "mirror-batch-bundle-manifest/v1")
         self.assertEqual(manifest["source_root"], str(self.root.resolve()))
@@ -698,6 +708,10 @@ class MirrorBatchBundleTests(PreBackfillOperationsTestCase):
         self.assertTrue(by_command["mirror-run"]["requires_user_confirmation"])
         self.assertTrue(by_command["mirror-run"]["guarded"])
         self.assertTrue(by_command["mirror-run"]["allowed_in_bundle"])
+        self.assertTrue(by_command["validate"]["allowed_in_bundle"])
+        self.assertTrue(by_command["backup"]["allowed_in_bundle"])
+        self.assertTrue(by_command["restore-check"]["allowed_in_bundle"])
+        self.assertTrue(by_command["mirror-review"]["allowed_in_bundle"])
         self.assertNotIn("secret-token-should-not-appear", json.dumps(manifest))
 
     def test_existing_pre_manifest_bundle_refused_without_overwrite(self):
@@ -821,8 +835,8 @@ class MirrorBatchBundleVerifyTests(PreBackfillOperationsTestCase):
         self.assertTrue(result.manifest_valid)
         self.assertFalse(result.pre_manifest_bundle_detected)
         self.assertIsNone(result.recommended_action)
-        self.assertEqual(result.file_count, 9)
-        self.assertEqual(result.checked_file_count, 8)
+        self.assertEqual(result.file_count, 11)
+        self.assertEqual(result.checked_file_count, 10)
         self.assertEqual(result.missing_file_count, 0)
         self.assertEqual(result.checksum_failure_count, 0)
         self.assertEqual(result.command_guard_status, "passed")
