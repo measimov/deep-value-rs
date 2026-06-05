@@ -747,6 +747,31 @@ class FinalGateResult:
 
 
 @dataclass(frozen=True)
+class ExecuteScriptResult:
+    report_version: str
+    status: str
+    output: str
+    root: str
+    backup: str
+    bundle: str
+    scope: str
+    start_date: str
+    end_date: str
+    max_jobs_per_api: int
+    overwritten: bool
+    confirmation_phrase: str
+    command_safety_status: str | None
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class SchemaStatusResult:
     report_version: str
     root: str
@@ -4514,6 +4539,180 @@ class FinalGateReporter:
 
 def confirmation_phrase(scope: str, start_date: str, end_date: str, max_jobs_per_api: int) -> str:
     return f"CONFIRM {scope.upper()} {start_date}-{end_date} MAXJOBS{max_jobs_per_api}"
+
+
+class ExecuteScriptReporter:
+    REPORT_VERSION = "mirror-execute-script/v1"
+
+    def __init__(self, *, token_available: bool | None = None):
+        self._token_available_override = token_available
+
+    def create(
+        self,
+        *,
+        root: Path | str,
+        backup: Path | str,
+        bundle: Path | str,
+        scope: str,
+        start_date: str,
+        end_date: str,
+        max_jobs_per_api: int,
+        output: Path | str,
+        overwrite: bool = False,
+    ) -> ExecuteScriptResult:
+        ensure_mirror_scope(scope)
+        mirror_root = _resolve_path(Path(root))
+        backup_root = _resolve_path(Path(backup))
+        bundle_root = _resolve_path(Path(bundle))
+        output_path = _resolve_path(Path(output))
+        warnings = ["mirror-execute-script writes only the requested output file and does not execute it"]
+        blocking_errors = self._preflight(mirror_root, backup_root, output_path, overwrite)
+        phrase = confirmation_phrase(scope, start_date, end_date, max_jobs_per_api)
+        if blocking_errors:
+            return self._result(mirror_root, backup_root, bundle_root, output_path, scope, start_date, end_date, max_jobs_per_api, overwrite, phrase, None, warnings, blocking_errors)
+
+        final_gate = FinalGateReporter(token_available=self._token_available_override).report(
+            root=mirror_root,
+            backup=backup_root,
+            bundle=bundle_root,
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            max_jobs_per_api=max_jobs_per_api,
+        )
+        if final_gate.gate_status == "blocked":
+            blocking_errors.extend(final_gate.blocking_errors)
+            blocking_errors.append("final gate is blocked; regenerate or verify inputs before creating an execute script")
+            return self._result(mirror_root, backup_root, bundle_root, output_path, scope, start_date, end_date, max_jobs_per_api, overwrite, phrase, None, warnings, blocking_errors)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.exists() and overwrite:
+            output_path.unlink()
+        output_path.write_text(
+            self._script(mirror_root, backup_root, bundle_root, scope, start_date, end_date, max_jobs_per_api, phrase),
+            encoding="utf-8",
+        )
+        output_path.chmod(0o644)
+        command_safety = CommandSafetyAnalyzer().analyze(file=output_path)
+        warnings.extend(command_safety.warnings)
+        blocking_errors.extend(command_safety.blocking_errors)
+        if command_safety.status == "blocked":
+            blocking_errors.append("generated execute script failed command safety check")
+        return self._result(
+            mirror_root,
+            backup_root,
+            bundle_root,
+            output_path,
+            scope,
+            start_date,
+            end_date,
+            max_jobs_per_api,
+            overwrite,
+            phrase,
+            command_safety.status,
+            warnings,
+            blocking_errors,
+            status="created" if not blocking_errors else "blocked",
+        )
+
+    def _preflight(self, mirror_root: Path, backup_root: Path, output_path: Path, overwrite: bool) -> list[str]:
+        blocking_errors: list[str] = []
+        if output_path == mirror_root or _is_relative_to(output_path, mirror_root):
+            blocking_errors.append("output path must not be inside mirror root")
+        if output_path == backup_root or _is_relative_to(output_path, backup_root):
+            blocking_errors.append("output path must not be inside backup root")
+        if output_path.exists() and output_path.is_dir():
+            blocking_errors.append("output path exists as a directory")
+        elif output_path.exists() and not overwrite:
+            blocking_errors.append("output path already exists; pass --overwrite to replace it")
+        return blocking_errors
+
+    def _result(
+        self,
+        root: Path,
+        backup: Path,
+        bundle: Path,
+        output: Path,
+        scope: str,
+        start_date: str,
+        end_date: str,
+        max_jobs_per_api: int,
+        overwritten: bool,
+        phrase: str,
+        command_safety_status: str | None,
+        warnings: list[str],
+        blocking_errors: list[str],
+        *,
+        status: str | None = None,
+    ) -> ExecuteScriptResult:
+        return ExecuteScriptResult(
+            report_version=self.REPORT_VERSION,
+            status=status or ("blocked" if blocking_errors else "created"),
+            output=str(output),
+            root=str(root),
+            backup=str(backup),
+            bundle=str(bundle),
+            scope=scope,
+            start_date=start_date,
+            end_date=end_date,
+            max_jobs_per_api=max_jobs_per_api,
+            overwritten=overwritten,
+            confirmation_phrase=phrase,
+            command_safety_status=command_safety_status,
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _script(self, root: Path, backup: Path, bundle: Path, scope: str, start_date: str, end_date: str, max_jobs_per_api: int, phrase: str) -> str:
+        final_gate = (
+            f"python3 -m tushare_mirror mirror-final-gate --root {root} --backup {backup} --bundle {bundle} "
+            f"--scope {scope} --start-date {start_date} --end-date {end_date} --max-jobs-per-api {max_jobs_per_api} --json"
+        )
+        execute = (
+            f"python3 -m tushare_mirror mirror-run --root {root} --scope {scope} --mode pilot "
+            f"--start-date {start_date} --end-date {end_date} --max-jobs-per-api {max_jobs_per_api} "
+            f"--backup-target {backup} --execute --json"
+        )
+        validate = f"python3 -m tushare_mirror --root {root} validate --latest-all --no-record --json"
+        backup_inspect = f"python3 -m tushare_mirror backup-inspect --backup {backup} --json"
+        restore_check = f"python3 -m tushare_mirror restore-check --backup {backup} --json"
+        review = (
+            f"python3 -m tushare_mirror mirror-review --root {root} --backup {backup} --scope {scope} "
+            f"--start-date {start_date} --end-date {end_date} --json"
+        )
+        next_batch = f"python3 -m tushare_mirror mirror-next-batch --root {root} --scope {scope} --json"
+        return "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                'echo "This is a guarded preview script. It has not executed the February batch."',
+                "",
+                "# USER_CONFIRMATION_REQUIRED",
+                f"# Confirmation phrase: {phrase}",
+                "# The phrase is operator friction, not a secret or security token.",
+                "# Do not run this file directly until a human has reviewed the final gate output.",
+                "# Commands are commented. A human must explicitly edit/uncomment the intended command.",
+                "",
+                "# Pre-run final gate",
+                f"# {final_gate}",
+                "",
+                "# User-confirmed February execution command",
+                f"# {execute}",
+                "",
+                "# Post-run read-only validation and review commands",
+                f"# {validate}",
+                f"# {backup_inspect}",
+                f"# {restore_check}",
+                f"# {review}",
+                f"# {next_batch}",
+                "",
+                "# Safety boundaries:",
+                "# - do not run commands.sh from the bundle",
+                "# - do not execute mirror-run without explicit user confirmation",
+                "# - do not paste or print TUSHARE_TOKEN",
+                "",
+            ]
+        )
 
 
 class SchemaStatusReporter:

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
-from tushare_mirror.mirror import FinalGateReporter, MirrorBatchBundleReporter, confirmation_phrase
+from tushare_mirror.mirror import CommandSafetyAnalyzer, ExecuteScriptReporter, FinalGateReporter, MirrorBatchBundleReporter, confirmation_phrase
 from tushare_mirror.validation import Validator
 
 try:
@@ -272,3 +272,114 @@ class FinalGateCliTests(PreBackfillOperationsTestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["gate_status"], "blocked")
         self.assertTrue(any("bundle" in error for error in payload["blocking_errors"]))
+
+
+class ExecuteScriptGeneratorTests(PreBackfillOperationsTestCase):
+    def prepare_bundle(self) -> tuple[Path, Path]:
+        self.build_pilot()
+        self.cover_january_matrix()
+        backup = self.base / "execute-script-backup"
+        plan = BackupPlanner(self.root, self.catalog).plan(backup)
+        BackupExecutor(self.root, self.catalog).backup(plan)
+        bundle = self.base / "execute-script-bundle"
+        result = MirrorBatchBundleReporter().create(
+            root=self.root,
+            backup=backup,
+            scope="low-risk-a-share",
+            start_date="20250201",
+            end_date="20250228",
+            max_jobs_per_api=20,
+            output=bundle,
+        )
+        self.assertEqual(result.status, "created")
+        return backup, bundle
+
+    def create_script(self, backup: Path, bundle: Path, output: Path, *, overwrite: bool = False):
+        return ExecuteScriptReporter(token_available=True).create(
+            root=self.root,
+            backup=backup,
+            bundle=bundle,
+            scope="low-risk-a-share",
+            start_date="20250201",
+            end_date="20250228",
+            max_jobs_per_api=20,
+            output=output,
+            overwrite=overwrite,
+        )
+
+    def test_script_generated_outside_roots_and_not_executed(self):
+        backup, bundle = self.prepare_bundle()
+        output = self.base / "execute-202502.sh"
+        before = self.counts()
+        result = self.create_script(backup, bundle, output)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(result.report_version, "mirror-execute-script/v1")
+        self.assertEqual(result.status, "created")
+        self.assertEqual(result.command_safety_status, "warning")
+        self.assertTrue(output.exists())
+        content = output.read_text(encoding="utf-8")
+        self.assertIn("CONFIRM LOW-RISK-A-SHARE 20250201-20250228 MAXJOBS20", content)
+        self.assertIn("USER_CONFIRMATION_REQUIRED", content)
+        self.assertIn("mirror-final-gate", content)
+        self.assertIn("mirror-run", content)
+        self.assertIn("--execute", content)
+        self.assertIn("validate --latest-all --no-record", content)
+        self.assertIn("backup-inspect", content)
+        self.assertIn("restore-check", content)
+        self.assertIn("mirror-review", content)
+        self.assertIn("mirror-next-batch", content)
+        self.assertNotIn("\npython3 -m tushare_mirror mirror-run", content)
+        safety = CommandSafetyAnalyzer().analyze(file=output)
+        self.assertEqual(safety.status, "warning")
+        self.assertFalse(safety.blocking_errors)
+
+    def test_output_inside_root_blocked(self):
+        backup, bundle = self.prepare_bundle()
+        output = self.root / "execute.sh"
+        result = self.create_script(backup, bundle, output)
+        self.assertEqual(result.status, "blocked")
+        self.assertTrue(any("inside mirror root" in error for error in result.blocking_errors))
+        self.assertFalse(output.exists())
+
+    def test_output_inside_backup_blocked(self):
+        backup, bundle = self.prepare_bundle()
+        output = backup / "execute.sh"
+        result = self.create_script(backup, bundle, output)
+        self.assertEqual(result.status, "blocked")
+        self.assertTrue(any("inside backup root" in error for error in result.blocking_errors))
+        self.assertFalse(output.exists())
+
+    def test_overwrite_behavior(self):
+        backup, bundle = self.prepare_bundle()
+        output = self.base / "overwrite-execute.sh"
+        output.write_text("old\n", encoding="utf-8")
+        refused = self.create_script(backup, bundle, output)
+        self.assertEqual(refused.status, "blocked")
+        self.assertEqual(output.read_text(encoding="utf-8"), "old\n")
+        replaced = self.create_script(backup, bundle, output, overwrite=True)
+        self.assertEqual(replaced.status, "created")
+        self.assertTrue(replaced.overwritten)
+        self.assertIn("mirror-final-gate", output.read_text(encoding="utf-8"))
+
+    def test_cli_json_contract_and_no_side_effects(self):
+        backup, bundle = self.prepare_bundle()
+        output = self.base / "cli-execute.sh"
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-execute-script",
+            "--root", str(self.root),
+            "--backup", str(backup),
+            "--bundle", str(bundle),
+            "--scope", "low-risk-a-share",
+            "--start-date", "20250201",
+            "--end-date", "20250228",
+            "--max-jobs-per-api", "20",
+            "--output", str(output),
+            "--json",
+        )
+        self.assertEqual(self.counts(), before)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["report_version"], "mirror-execute-script/v1")
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(payload["command_safety_status"], "warning")
+        self.assertTrue(output.exists())
