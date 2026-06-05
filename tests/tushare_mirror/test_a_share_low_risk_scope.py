@@ -8,9 +8,74 @@ import unittest
 from pathlib import Path
 
 from tushare_mirror.catalog import CatalogStore
+from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_bundled_endpoint_configs, load_into_catalog, load_inventory_configs
 from tushare_mirror.mirror import A_SHARE_LOW_RISK_ENDPOINTS, MirrorPlanner, MirrorScopeReporter
 from tushare_mirror.planner import JobPlanner
+from tushare_mirror.reader import LakeReader
+from tushare_mirror.store import FileLakeStore
+from tushare_mirror.validation import Validator
+
+
+NEW_EXECUTABLE_FIXTURES = {
+    "stock_company": (
+        ["ts_code", "exchange", "chairman", "manager", "secretary", "reg_capital", "setup_date", "province", "city", "introduction", "website", "email", "office", "employees", "main_business", "business_scope"],
+        [["600000.SH", "SSE", "Alice", "Bob", "Carol", 1000.0, "19990101", "Shanghai", "Shanghai", "intro", "https://example.invalid", "ir@example.invalid", "office", 100, "banking", "scope"]],
+        {"exchange": "SSE"},
+    ),
+    "concept": (
+        ["code", "name", "src"],
+        [["TS1", "concept one", "ts"]],
+        {"src": "ts"},
+    ),
+    "index_basic": (
+        ["ts_code", "name", "fullname", "market", "publisher", "index_type", "category", "base_date", "base_point", "list_date", "weight_rule", "desc", "exp_date"],
+        [["000001.SH", "index", "index full", "SSE", "SSE", "composite", "scale", "19901219", 100.0, "19910715", "rule", "desc", None]],
+        {"market": "SSE"},
+    ),
+    "index_daily": (
+        ["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "vol", "amount"],
+        [["000001.SH", "20250102", 3000.0, 3010.0, 2990.0, 3005.0, 3001.0, 4.0, 0.13, 100000.0, 1000000.0]],
+        {"trade_date": "20250102"},
+    ),
+    "index_weekly": (
+        ["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "vol", "amount"],
+        [["000001.SH", "20250103", 3000.0, 3020.0, 2980.0, 3015.0, 2990.0, 25.0, 0.84, 500000.0, 5000000.0]],
+        {"trade_date": "20250103"},
+    ),
+    "index_monthly": (
+        ["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "vol", "amount"],
+        [["000001.SH", "20250127", 3000.0, 3050.0, 2950.0, 3030.0, 2990.0, 40.0, 1.34, 800000.0, 8000000.0]],
+        {"trade_date": "20250127"},
+    ),
+    "ths_index": (
+        ["ts_code", "name", "count", "exchange", "list_date", "type"],
+        [["885001.TI", "ths industry", 100, "A", "20200101", "N"]],
+        {"exchange": "A", "type": "N"},
+    ),
+    "index_classify": (
+        ["index_code", "industry_name", "level", "industry_code", "is_pub", "parent_code", "src"],
+        [["801010.SI", "agriculture", "L1", "801010", "1", None, "SW2021"]],
+        {"src": "SW2021", "level": "L1"},
+    ),
+}
+
+
+class ApiFakeClient:
+    def __init__(self, fields, items):
+        self.fields = fields
+        self.items = items
+
+    def query_paginated(self, api_name, params, fields, page_size=None):
+        event = {
+            "code": 0,
+            "msg": None,
+            "data": {"fields": self.fields, "items": self.items, "has_more": False},
+            "_http_status": 200,
+            "_page_index": 0,
+            "_request_params": dict(params),
+        }
+        return QueryResult(events=[event], fields=self.fields, items=self.items)
 
 
 class AShareLowRiskScopeTests(unittest.TestCase):
@@ -223,6 +288,66 @@ class AShareLowRiskPlannerTests(unittest.TestCase):
             self.assertIn(path_part, plan.lake_path, api_name)
             self.assertEqual(plan.planned_actions[0], "request_tushare", api_name)
         self.assertEqual(self.counts()["jobs"], 0)
+
+
+class AShareLowRiskExecutableFixtureTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "lake"
+        self.catalog = CatalogStore(self.root)
+        self.catalog.init()
+        load_into_catalog(self.root, self.catalog)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "tushare_mirror", "--root", str(self.root), *args],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+
+    def test_new_executable_endpoints_fetch_validate_reader_and_list_files(self):
+        store = FileLakeStore(self.root, self.catalog)
+        planner = JobPlanner(self.root, self.catalog)
+        for api_name, (fields, items, params) in NEW_EXECUTABLE_FIXTURES.items():
+            probe = planner.plan_probe(api_name)
+            self.assertTrue(probe.fields, api_name)
+            result = store.fetch(api_name, params, ApiFakeClient(fields, items))
+            self.assertIsNotNone(result.snapshot_id, api_name)
+            self.assertEqual(result.record_count, len(items), api_name)
+            ok, _ = Validator(self.root, self.catalog).validate_snapshot(result.snapshot_id, api_name)
+            self.assertTrue(ok, api_name)
+            table = LakeReader(self.root, self.catalog).scan_api(api_name)
+            self.assertEqual(table.num_rows, len(items), api_name)
+            files = self.catalog.files_for_snapshot(result.snapshot_id)
+            self.assertEqual(len([row for row in files if row["content_type"] == "raw"]), 1, api_name)
+            self.assertEqual(len([row for row in files if row["content_type"] == "lake"]), 1, api_name)
+            lake_file = next(row for row in files if row["content_type"] == "lake")
+            self.assertTrue(lake_file["schema_id"], api_name)
+            listed = json.loads(self.run_cli("list-files", "--api", api_name, "--snapshot", "latest", "--json").stdout)
+            self.assertEqual(len(listed), 1, api_name)
+            self.assertEqual(listed[0]["api_name"], api_name)
+
+    def test_plan_only_inventory_endpoints_do_not_fetch_or_enter_mirror_run_plan(self):
+        planner = MirrorPlanner(self.root, self.catalog)
+        plan = planner.plan(
+            scope="a-share-low-risk",
+            mode="pilot",
+            start_date="20250101",
+            end_date="20250131",
+            max_jobs_per_api=20,
+        )
+        by_endpoint = {item.endpoint: item for item in plan.items}
+        for api_name in ["top10_holders", "concept_detail", "index_weight", "ths_member"]:
+            self.assertEqual(by_endpoint[api_name].plan_status, "plan_only_no_execution")
+            self.assertFalse(by_endpoint[api_name].will_execute)
+            with self.assertRaisesRegex(KeyError, "endpoint not found"):
+                JobPlanner(self.root, self.catalog).plan_single_fetch(api_name, {})
 
 
 if __name__ == "__main__":
