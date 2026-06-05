@@ -33,7 +33,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, ExecuteReadinessReporter, ExecuteScriptReporter, FinalGateReporter, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOpsReportReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorStatusReporter, MonthlyPromotionChecklistReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, TokenHygieneScanner, init_catalog_if_requested
+from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, ExecuteReadinessReporter, ExecuteScriptReporter, FinalGateReporter, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOpsReportReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorScopeReporter, MirrorStatusReporter, MonthlyPromotionChecklistReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, TokenHygieneScanner, init_catalog_if_requested
 from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
@@ -568,6 +568,33 @@ def cmd_mirror_preflight(args) -> int:
     else:
         _print_key_values(result.summary())
     return 1 if result.status == 'blocked' else 0
+
+
+def cmd_mirror_scope(args) -> int:
+    try:
+        result = MirrorScopeReporter().report(scope=args.scope)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+        _print_table(
+            [
+                {"status": "executable_now", "endpoint": endpoint}
+                for endpoint in result.executable_now
+            ]
+            + [
+                {"status": "plan_only", "endpoint": endpoint}
+                for endpoint in result.plan_only
+            ]
+            + [
+                {"status": "disabled", "endpoint": endpoint}
+                for endpoint in result.disabled
+            ],
+            ["status", "endpoint"],
+        )
+    return 0
 
 
 def cmd_mirror_review(args) -> int:
@@ -1690,6 +1717,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--max-jobs-per-api', type=int)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_preflight)
+
+    p = sub.add_parser('mirror-scope', description='Read-only mirror scope report; classifies executable, plan-only, and disabled endpoints without fetching or writing catalog state.')
+    p.add_argument('--scope', required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_scope)
 
     p = sub.add_parser('mirror-review')
     p.add_argument('--root', dest='mirror_root_arg', required=True)

@@ -18,7 +18,7 @@ from .backfill import BackfillExecutor, BackfillPlanner, DatePlanner
 from .catalog import CatalogStore, loads
 from .coverage import CoverageReporter
 from .client import classify_probe_response
-from .endpoints import load_into_catalog
+from .endpoints import load_bundled_endpoint_configs, load_inventory_configs, load_into_catalog
 from .errors import classify_exception, retry_delay_seconds, should_retry
 from .hashing import token_hash
 from .io_utils import now_utc
@@ -40,6 +40,85 @@ LOW_RISK_A_SHARE_ENDPOINTS = [
     "namechange",
     "stk_managers",
     "stk_rewards",
+]
+
+A_SHARE_LOW_RISK_ENDPOINTS = [
+    "stock_basic",
+    "stock_company",
+    "trade_cal",
+    "namechange",
+    "hs_const",
+    "daily",
+    "weekly",
+    "monthly",
+    "adj_factor",
+    "daily_basic",
+    "suspend_d",
+    "stk_managers",
+    "stk_rewards",
+    "top10_holders",
+    "top10_floatholders",
+    "stk_holdernumber",
+    "stk_holdertrade",
+    "pledge_stat",
+    "pledge_detail",
+    "repurchase",
+    "concept",
+    "concept_detail",
+    "index_basic",
+    "index_daily",
+    "index_weekly",
+    "index_monthly",
+    "index_weight",
+    "index_member",
+    "ths_index",
+    "ths_member",
+    "index_classify",
+]
+
+A_SHARE_LOW_RISK_CATEGORIES = {
+    "reference_snapshot": ["stock_basic", "stock_company", "trade_cal", "namechange", "hs_const"],
+    "daily_periodic_market_data": ["daily", "weekly", "monthly", "adj_factor", "daily_basic", "suspend_d"],
+    "event_governance": [
+        "stk_managers",
+        "stk_rewards",
+        "top10_holders",
+        "top10_floatholders",
+        "stk_holdernumber",
+        "stk_holdertrade",
+        "pledge_stat",
+        "pledge_detail",
+        "repurchase",
+    ],
+    "concept_industry_index_metadata": [
+        "concept",
+        "concept_detail",
+        "index_basic",
+        "index_daily",
+        "index_weekly",
+        "index_monthly",
+        "index_weight",
+        "index_member",
+        "ths_index",
+        "ths_member",
+        "index_classify",
+    ],
+}
+
+PROHIBITED_SCOPE_ENDPOINT_PATTERNS = [
+    "minute",
+    "tick",
+    "order",
+    "realtime",
+    "income",
+    "balancesheet",
+    "cashflow",
+    "fina_indicator",
+    "express",
+    "forecast",
+    "anns",
+    "news",
+    "report",
 ]
 
 SMOKE_REFERENCE_FETCHES: dict[str, dict[str, Any]] = {
@@ -1003,14 +1082,127 @@ class MirrorBatchPlan:
         }
 
 
+@dataclass(frozen=True)
+class MirrorScopeReportResult:
+    report_version: str
+    scope: str
+    endpoints_in_scope: list[str]
+    executable_now: list[str]
+    plan_only: list[str]
+    disabled: list[str]
+    blocked_reason: dict[str, str]
+    missing_metadata: list[str]
+    next_enablement_step: dict[str, str]
+    categories: dict[str, list[str]]
+    excluded_high_risk_patterns: list[str]
+    warnings: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "report_version": self.report_version,
+            "scope": self.scope,
+            "endpoints_in_scope": len(self.endpoints_in_scope),
+            "executable_now": len(self.executable_now),
+            "plan_only": len(self.plan_only),
+            "disabled": len(self.disabled),
+            "missing_metadata": len(self.missing_metadata),
+            "warnings": self.warnings,
+        }
+
+
 def ensure_mirror_scope(scope: str) -> None:
-    if scope != "low-risk-a-share":
-        raise ValueError("unknown mirror scope: %s; supported: low-risk-a-share" % scope)
+    if scope not in {"low-risk-a-share", "a-share-low-risk"}:
+        raise ValueError("unknown mirror scope: %s; supported: low-risk-a-share, a-share-low-risk" % scope)
 
 
 def ensure_mirror_mode(mode: str) -> None:
     if mode not in MODE_MAX_JOBS:
         raise ValueError("unknown mirror mode: %s; supported: smoke, pilot" % mode)
+
+
+def mirror_scope_endpoints(scope: str) -> list[str]:
+    ensure_mirror_scope(scope)
+    if scope == "a-share-low-risk":
+        return list(A_SHARE_LOW_RISK_ENDPOINTS)
+    return list(LOW_RISK_A_SHARE_ENDPOINTS)
+
+
+class MirrorScopeReporter:
+    REPORT_VERSION = "mirror-scope/v1"
+
+    def report(self, *, scope: str) -> MirrorScopeReportResult:
+        ensure_mirror_scope(scope)
+        if scope == "low-risk-a-share":
+            return self._legacy_low_risk_report(scope)
+        return self._a_share_low_risk_report(scope)
+
+    def _legacy_low_risk_report(self, scope: str) -> MirrorScopeReportResult:
+        endpoints = mirror_scope_endpoints(scope)
+        return MirrorScopeReportResult(
+            report_version=self.REPORT_VERSION,
+            scope=scope,
+            endpoints_in_scope=endpoints,
+            executable_now=endpoints,
+            plan_only=[],
+            disabled=[],
+            blocked_reason={},
+            missing_metadata=[],
+            next_enablement_step={},
+            categories={"legacy_low_risk_a_share": endpoints},
+            excluded_high_risk_patterns=PROHIBITED_SCOPE_ENDPOINT_PATTERNS,
+            warnings=["mirror-scope is read-only and does not fetch, backfill, or write catalog state"],
+        )
+
+    def _a_share_low_risk_report(self, scope: str) -> MirrorScopeReportResult:
+        executable_configs = {cfg["api_name"]: cfg for cfg in load_bundled_endpoint_configs()}
+        inventory_configs = {cfg["api_name"]: cfg for cfg in load_inventory_configs()}
+        executable_now: list[str] = []
+        plan_only: list[str] = []
+        disabled: list[str] = []
+        missing_metadata: list[str] = []
+        blocked_reason: dict[str, str] = {}
+        next_enablement_step: dict[str, str] = {}
+
+        for api_name in A_SHARE_LOW_RISK_ENDPOINTS:
+            cfg = executable_configs.get(api_name)
+            if cfg and cfg.get("execution_status", "enabled") != "disabled":
+                executable_now.append(api_name)
+                continue
+            inventory = inventory_configs.get(api_name)
+            if inventory:
+                disabled.append(api_name)
+                reason = str(inventory.get("reason_disabled") or "disabled inventory endpoint")
+                blocked_reason[api_name] = reason
+                next_enablement_step[api_name] = self._next_step(inventory)
+                continue
+            plan_only.append(api_name)
+            missing_metadata.append(api_name)
+            blocked_reason[api_name] = "metadata is not yet declared in executable configs or disabled inventory"
+            next_enablement_step[api_name] = "add endpoint config or disabled inventory entry with explicit planner, fields, risk, and guardrail metadata"
+
+        return MirrorScopeReportResult(
+            report_version=self.REPORT_VERSION,
+            scope=scope,
+            endpoints_in_scope=list(A_SHARE_LOW_RISK_ENDPOINTS),
+            executable_now=executable_now,
+            plan_only=plan_only,
+            disabled=disabled,
+            blocked_reason=blocked_reason,
+            missing_metadata=missing_metadata,
+            next_enablement_step=next_enablement_step,
+            categories={key: list(value) for key, value in A_SHARE_LOW_RISK_CATEGORIES.items()},
+            excluded_high_risk_patterns=PROHIBITED_SCOPE_ENDPOINT_PATTERNS,
+            warnings=["mirror-scope is read-only and does not fetch, backfill, or write catalog state"],
+        )
+
+    def _next_step(self, cfg: Mapping[str, Any]) -> str:
+        required = cfg.get("required_infra") or []
+        if required:
+            return "; ".join(str(item) for item in required)
+        return "complete endpoint contract, fake fixture, planner, and guardrail review before enabling"
 
 
 @dataclass(frozen=True)
