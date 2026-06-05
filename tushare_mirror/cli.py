@@ -33,7 +33,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, ExecuteReadinessReporter, ExecuteScriptReporter, FinalGateReporter, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOpsReportReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorReadinessReporter, MirrorReviewer, MirrorScopeReporter, MirrorStatusReporter, MonthlyPromotionChecklistReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, TokenHygieneScanner, init_catalog_if_requested
+from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, ExecuteReadinessReporter, ExecuteScriptReporter, FinalGateReporter, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOpsReportReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorPullCommandReporter, MirrorReadinessReporter, MirrorReviewer, MirrorScopeReporter, MirrorStatusReporter, MonthlyPromotionChecklistReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, TokenHygieneScanner, init_catalog_if_requested
 from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
@@ -951,6 +951,27 @@ def cmd_mirror_execute_readiness(args) -> int:
     else:
         _print_key_values(result.summary())
     return 1 if result.execute_readiness_status == "blocked" else 0
+
+
+def cmd_mirror_pull_command(args) -> int:
+    try:
+        result = MirrorPullCommandReporter().create(
+            scope=args.scope,
+            root=args.mirror_root_arg,
+            backup=args.backup,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            max_jobs_per_api=args.max_jobs_per_api,
+            output=args.output,
+            overwrite=args.overwrite,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+    return 1 if result.status == "blocked" else 0
 
 
 def cmd_schema_status(args) -> int:
@@ -1897,6 +1918,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--max-jobs-per-api', type=int, required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_execute_readiness)
+
+    p = sub.add_parser('mirror-pull-command', description='Read-only/file-output guarded pull command generator; writes only --output outside mirror and backup roots and does not execute commands.')
+    p.add_argument('--root', dest='mirror_root_arg', required=True)
+    p.add_argument('--backup', required=True)
+    p.add_argument('--scope', required=True)
+    p.add_argument('--start-date', required=True)
+    p.add_argument('--end-date', required=True)
+    p.add_argument('--max-jobs-per-api', type=int, required=True)
+    p.add_argument('--output')
+    p.add_argument('--overwrite', action='store_true')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_pull_command)
 
     p = sub.add_parser('schema-status', description='Read-only schema drift and quarantine status report; does not make real requests or write catalog state.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)

@@ -957,6 +957,31 @@ class SchemaStatusResult:
 
 
 @dataclass(frozen=True)
+class MirrorPullCommandResult:
+    report_version: str
+    status: str
+    scope: str
+    root: str
+    backup: str
+    date_range: dict[str, str]
+    max_jobs_per_api: int
+    commands: list[dict[str, Any]]
+    user_confirmation_required: bool
+    estimated_requests: dict[str, Any]
+    warnings: list[str]
+    stop_conditions: dict[str, Any]
+    output: str | None
+    files: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
 class BackupStatusResult:
     report_version: str
     backup: str
@@ -3604,6 +3629,7 @@ class StopPolicyReporter:
     REPORT_VERSION = "stop-policy/v1"
     CATEGORIES = {
         "low-risk-a-share",
+        "a-share-low-risk",
         "code-loop",
         "financial",
         "object-text",
@@ -5137,6 +5163,146 @@ class ExecuteReadinessReporter:
             warnings=final_gate.warnings,
             blocking_errors=final_gate.blocking_errors,
         )
+
+
+class MirrorPullCommandReporter:
+    REPORT_VERSION = "mirror-pull-command/v1"
+
+    def create(
+        self,
+        *,
+        scope: str,
+        root: Path | str,
+        backup: Path | str,
+        start_date: str,
+        end_date: str,
+        max_jobs_per_api: int,
+        output: Path | str | None = None,
+        overwrite: bool = False,
+    ) -> MirrorPullCommandResult:
+        ensure_mirror_scope(scope)
+        mirror_root = _resolve_path(Path(root))
+        backup_root = _resolve_path(Path(backup))
+        warnings = ["mirror-pull-command is read-only unless --output is provided; it does not execute generated commands"]
+        blocking_errors: list[str] = []
+        commands = self._commands(mirror_root, backup_root, scope, start_date, end_date, max_jobs_per_api)
+        estimate = RequestEstimateReporter().report(root=mirror_root, scope=scope, start_date=start_date, end_date=end_date).to_dict()
+        stop_policy = StopPolicyReporter().report(scope=scope).to_dict()
+        output_path: Path | None = None
+        files: list[str] = []
+        if output is not None:
+            output_path = _resolve_path(Path(output))
+            blocking_errors.extend(self._preflight_output(mirror_root, backup_root, output_path, overwrite))
+            if not blocking_errors:
+                if output_path.exists() and overwrite:
+                    shutil.rmtree(output_path)
+                output_path.mkdir(parents=True, exist_ok=False)
+                plan = {
+                    "report_version": self.REPORT_VERSION,
+                    "scope": scope,
+                    "root": str(mirror_root),
+                    "backup": str(backup_root),
+                    "date_range": {"start_date": start_date, "end_date": end_date},
+                    "max_jobs_per_api": max_jobs_per_api,
+                    "commands": commands,
+                    "estimated_requests": estimate,
+                    "stop_conditions": stop_policy,
+                    "user_confirmation_required": True,
+                    "real_requests_sent": False,
+                }
+                (output_path / "README.md").write_text(self._readme(scope, start_date, end_date), encoding="utf-8")
+                (output_path / "commands.sh").write_text(self._commands_sh(commands), encoding="utf-8")
+                (output_path / "commands.sh").chmod(0o644)
+                (output_path / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+                files = ["README.md", "commands.sh", "plan.json"]
+                safety = CommandSafetyAnalyzer().analyze(file=output_path / "commands.sh")
+                warnings.extend(safety.warnings)
+                blocking_errors.extend(safety.blocking_errors)
+                if safety.status == "blocked":
+                    blocking_errors.append("generated commands.sh failed command safety check")
+        return MirrorPullCommandResult(
+            report_version=self.REPORT_VERSION,
+            status="blocked" if blocking_errors else ("created" if output_path else "planned"),
+            scope=scope,
+            root=str(mirror_root),
+            backup=str(backup_root),
+            date_range={"start_date": start_date, "end_date": end_date},
+            max_jobs_per_api=max_jobs_per_api,
+            commands=commands,
+            user_confirmation_required=True,
+            estimated_requests=estimate,
+            warnings=_dedupe_messages(warnings),
+            stop_conditions=stop_policy,
+            output=str(output_path) if output_path else None,
+            files=files,
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _preflight_output(self, root: Path, backup: Path, output: Path, overwrite: bool) -> list[str]:
+        blocking_errors: list[str] = []
+        if output == root or _is_relative_to(output, root):
+            blocking_errors.append("output path must not be inside mirror root")
+        if output == backup or _is_relative_to(output, backup):
+            blocking_errors.append("output path must not be inside backup root")
+        if output.exists() and not output.is_dir():
+            blocking_errors.append("output path exists and is not a directory")
+        elif output.exists() and not overwrite:
+            blocking_errors.append("output path already exists; pass --overwrite to replace it")
+        return blocking_errors
+
+    def _commands(self, root: Path, backup: Path, scope: str, start_date: str, end_date: str, max_jobs: int) -> list[dict[str, Any]]:
+        rows = [
+            ("mirror-review-before", f"python3 -m tushare_mirror mirror-review --root {root} --backup {backup} --scope {scope} --start-date {start_date} --end-date {end_date} --json", False),
+            ("mirror-readiness", f"python3 -m tushare_mirror mirror-readiness --root {root} --backup {backup} --scope {scope} --json", False),
+            ("mirror-batch-plan", f"python3 -m tushare_mirror mirror-batch-plan --root {root} --scope {scope} --start-date {start_date} --end-date {end_date} --calendar-exchange SSE --max-jobs-per-api {max_jobs} --json", False),
+            ("mirror-run-execute", f"python3 -m tushare_mirror mirror-run --root {root} --scope {scope} --mode pilot --start-date {start_date} --end-date {end_date} --max-jobs-per-api {max_jobs} --backup-target {backup} --execute --json", True),
+            ("validate-no-record", f"python3 -m tushare_mirror --root {root} validate --latest-all --no-record --json", False),
+            ("backup-inspect", f"python3 -m tushare_mirror backup-inspect --backup {backup} --json", False),
+            ("restore-check", f"python3 -m tushare_mirror restore-check --backup {backup} --json", False),
+            ("mirror-review-after", f"python3 -m tushare_mirror mirror-review --root {root} --backup {backup} --scope {scope} --start-date {start_date} --end-date {end_date} --json", False),
+        ]
+        return [
+            {
+                "command_name": name,
+                "command_text": text,
+                "would_execute_real_requests": would_execute,
+                "user_confirmation_required": would_execute,
+                "guarded": would_execute,
+            }
+            for name, text, would_execute in rows
+        ]
+
+    def _commands_sh(self, commands: list[dict[str, Any]]) -> str:
+        lines = [
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            "",
+            "# Generated by mirror-pull-command.",
+            "# This file is a guarded plan artifact. It has not been executed.",
+            "# Do not run automatically. Review every command first.",
+            "",
+        ]
+        for command in commands:
+            lines.append(f"# {command['command_name']}")
+            if command["would_execute_real_requests"]:
+                lines.append("# USER_CONFIRMATION_REQUIRED: uncomment manually only after reviewing readiness and stop conditions.")
+            lines.append(f"# {command['command_text']}")
+            lines.append("")
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _readme(self, scope: str, start_date: str, end_date: str) -> str:
+        return "\n".join(
+            [
+                "# A-share Low-risk Pull Command Bundle",
+                "",
+                f"Scope: {scope}",
+                f"Date range: {start_date}-{end_date}",
+                "",
+                "This bundle is a command preview only. It does not execute mirror-run, fetch real Tushare data, backfill dates, or write mirror catalog state.",
+                "commands.sh comments every command and marks the mirror-run --execute step with USER_CONFIRMATION_REQUIRED.",
+                "The operator must review readiness, stop conditions, and backups before manually running any command.",
+            ]
+        ) + "\n"
 
 
 class SchemaStatusReporter:

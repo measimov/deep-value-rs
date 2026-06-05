@@ -10,7 +10,7 @@ from pathlib import Path
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_bundled_endpoint_configs, load_into_catalog, load_inventory_configs
-from tushare_mirror.mirror import A_SHARE_LOW_RISK_ENDPOINTS, MirrorOrchestrator, MirrorPlanner, MirrorScopeReporter
+from tushare_mirror.mirror import A_SHARE_LOW_RISK_ENDPOINTS, CommandSafetyAnalyzer, MirrorOrchestrator, MirrorPlanner, MirrorScopeReporter
 from tushare_mirror.planner import JobPlanner
 from tushare_mirror.reader import LakeReader
 from tushare_mirror.store import FileLakeStore
@@ -623,6 +623,148 @@ class AShareLowRiskReadinessIntegrationTests(unittest.TestCase):
         endpoints = {row["endpoint"] for row in payload["review"]["endpoint_summary"]}
         self.assertTrue({"stock_company", "index_daily", "top10_holders"} <= endpoints)
         self.assertEqual(self.counts(), before)
+
+
+class AShareLowRiskPullCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+        self.root = self.base / "lake"
+        self.backup = self.base / "backup"
+        self.catalog = CatalogStore(self.root)
+        self.catalog.init()
+        load_into_catalog(self.root, self.catalog)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *args, check=False):
+        return subprocess.run(
+            [sys.executable, "-m", "tushare_mirror", *args],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=check,
+        )
+
+    def counts(self):
+        import sqlite3
+
+        with sqlite3.connect(self.catalog.db_path) as conn:
+            return {
+                "runs": conn.execute("select count(*) from ingestion_runs").fetchone()[0],
+                "jobs": conn.execute("select count(*) from jobs").fetchone()[0],
+                "files": conn.execute("select count(*) from files").fetchone()[0],
+                "snapshots": conn.execute("select count(*) from snapshots").fetchone()[0],
+                "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
+            }
+
+    def test_pull_command_json_generation_is_read_only(self):
+        before = self.counts()
+        result = self.run_cli(
+            "mirror-pull-command",
+            "--scope",
+            "a-share-low-risk",
+            "--root",
+            str(self.root),
+            "--backup",
+            str(self.backup),
+            "--start-date",
+            "20250201",
+            "--end-date",
+            "20250228",
+            "--max-jobs-per-api",
+            "20",
+            "--json",
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["report_version"], "mirror-pull-command/v1")
+        self.assertEqual(payload["scope"], "a-share-low-risk")
+        self.assertTrue(payload["user_confirmation_required"])
+        self.assertTrue(any(command["command_name"] == "mirror-run-execute" for command in payload["commands"]))
+        execute = next(command for command in payload["commands"] if command["command_name"] == "mirror-run-execute")
+        self.assertTrue(execute["would_execute_real_requests"])
+        self.assertIn("--scope a-share-low-risk", execute["command_text"])
+        self.assertIn("estimated_requests", payload)
+        self.assertEqual(self.counts(), before)
+
+    def test_pull_command_output_bundle_is_guarded_and_safe(self):
+        output = self.base / "pull-bundle"
+        result = self.run_cli(
+            "mirror-pull-command",
+            "--scope",
+            "a-share-low-risk",
+            "--root",
+            str(self.root),
+            "--backup",
+            str(self.backup),
+            "--start-date",
+            "20250201",
+            "--end-date",
+            "20250228",
+            "--max-jobs-per-api",
+            "20",
+            "--output",
+            str(output),
+            "--json",
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(set(payload["files"]), {"README.md", "commands.sh", "plan.json"})
+        commands = (output / "commands.sh").read_text()
+        self.assertIn("USER_CONFIRMATION_REQUIRED", commands)
+        self.assertNotIn("\npython3 -m tushare_mirror mirror-run", commands)
+        safety = CommandSafetyAnalyzer().analyze(file=output / "commands.sh")
+        self.assertIn(safety.status, {"passed", "warning"})
+        self.assertFalse(safety.blocking_errors)
+
+    def test_pull_command_blocks_output_inside_roots(self):
+        inside_root = self.root / "pull"
+        result = self.run_cli(
+            "mirror-pull-command",
+            "--scope",
+            "a-share-low-risk",
+            "--root",
+            str(self.root),
+            "--backup",
+            str(self.backup),
+            "--start-date",
+            "20250201",
+            "--end-date",
+            "20250228",
+            "--max-jobs-per-api",
+            "20",
+            "--output",
+            str(inside_root),
+            "--json",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("output path must not be inside mirror root", result.stdout)
+
+        inside_backup = self.backup / "pull"
+        result = self.run_cli(
+            "mirror-pull-command",
+            "--scope",
+            "a-share-low-risk",
+            "--root",
+            str(self.root),
+            "--backup",
+            str(self.backup),
+            "--start-date",
+            "20250201",
+            "--end-date",
+            "20250228",
+            "--max-jobs-per-api",
+            "20",
+            "--output",
+            str(inside_backup),
+            "--json",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("output path must not be inside backup root", result.stdout)
 
 
 class AShareLowRiskRealSmokeCommandTests(unittest.TestCase):
