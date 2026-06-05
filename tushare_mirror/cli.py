@@ -738,7 +738,7 @@ def cmd_mirror_batch_rehearse(args) -> int:
 
 
 def cmd_mirror_batch_ledger(args) -> int:
-    result = MirrorBatchLedgerReporter().report(root=args.mirror_root_arg, scope=args.scope)
+    result = MirrorBatchLedgerReporter().report(root=args.mirror_root_arg, scope=args.scope, bundle=args.bundle)
     if args.json:
         _print_json(result.to_dict())
     else:
@@ -1699,6 +1699,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser('mirror-batch-ledger', description='Read-only mirror batch ledger report inferred from local catalog runs and coverage.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
     p.add_argument('--scope', default='low-risk-a-share')
+    p.add_argument('--bundle')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_batch_ledger)
 

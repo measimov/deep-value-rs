@@ -1121,8 +1121,35 @@ class MirrorBatchLedgerTests(PreBackfillOperationsTestCase):
         self.assertEqual(result.batches[0]["mode"], "pilot")
         self.assertEqual(result.inferred_batches[0]["month"], "202501")
         self.assertEqual(result.inferred_batches[0]["coverage_status"], "complete")
+        self.assertEqual(result.planned_batches, [])
         self.assertEqual(result.latest_completed_batch["month"], "202501")
         self.assertEqual(result.next_recommended_batch["start_date"], "20250201")
+
+    def test_ledger_shows_planned_february_bundle_not_executed(self):
+        self.build_pilot()
+        self.cover_january_matrix()
+        backup = self.base / "ledger-bundle-backup"
+        plan = BackupPlanner(self.root, self.catalog).plan(backup)
+        BackupExecutor(self.root, self.catalog).backup(plan)
+        bundle = self.base / "ledger-bundle-202502"
+        created = MirrorBatchBundleReporter().create(
+            root=self.root,
+            backup=backup,
+            scope="low-risk-a-share",
+            start_date="20250201",
+            end_date="20250228",
+            max_jobs_per_api=20,
+            output=bundle,
+        )
+        self.assertEqual(created.status, "created")
+        result = MirrorBatchLedgerReporter().report(root=self.root, scope="low-risk-a-share", bundle=bundle)
+        self.assertEqual(result.ledger_status, "passed")
+        self.assertEqual(len(result.planned_batches), 1)
+        planned = result.planned_batches[0]
+        self.assertEqual(planned["date_range"], {"start_date": "20250201", "end_date": "20250228"})
+        self.assertEqual(planned["batch_state"], "dependency_stage_planned")
+        self.assertEqual(planned["execution_state"], "not_executed")
+        self.assertEqual(planned["dependency_status"], "missing")
 
     def test_incomplete_month_is_detected_without_completed_batch(self):
         self.cover_daily_like_range("20250101", "20250131", apis=["daily"])
@@ -1139,6 +1166,7 @@ class MirrorBatchLedgerTests(PreBackfillOperationsTestCase):
         self.assertEqual(result.ledger_status, "empty")
         self.assertEqual(result.batches, [])
         self.assertEqual(result.inferred_batches, [])
+        self.assertEqual(result.planned_batches, [])
         self.assertIsNone(result.latest_completed_batch)
 
     def test_cli_json_contract_and_no_side_effects_for_ledger(self):
@@ -1158,6 +1186,7 @@ class MirrorBatchLedgerTests(PreBackfillOperationsTestCase):
             "ledger_status",
             "batches",
             "inferred_batches",
+            "planned_batches",
             "latest_completed_batch",
             "next_recommended_batch",
             "warnings",
@@ -1195,6 +1224,8 @@ class MirrorBatchCertificateTests(PreBackfillOperationsTestCase):
         self.assertTrue((output / "certificate.md").exists())
         certificate = json.loads((output / "certificate.json").read_text())
         self.assertEqual(certificate["certificate_version"], "mirror-batch-certificate/v1")
+        self.assertEqual(certificate["certificate_type"], "completion")
+        self.assertEqual(certificate["completion_status"], "completed")
         self.assertEqual(certificate["scope"], "low-risk-a-share")
         self.assertEqual(certificate["date_range"], {"start_date": "20250101", "end_date": "20250131"})
         self.assertEqual(certificate["backup_status"], "valid")
@@ -1229,6 +1260,22 @@ class MirrorBatchCertificateTests(PreBackfillOperationsTestCase):
         self.assertEqual(result.status, "blocked")
         self.assertTrue(any("backup not found" in error for error in result.blocking_errors))
         self.assertFalse(output.exists())
+
+    def test_february_completion_certificate_blocks_before_execution(self):
+        backup = self.prepare_completed_january()
+        output = self.base / "cert-202502"
+        result = MirrorBatchCertificateReporter().create(
+            root=self.root,
+            backup=backup,
+            scope="low-risk-a-share",
+            start_date="20250201",
+            end_date="20250228",
+            output=output,
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertFalse(output.exists())
+        self.assertTrue(any("not completed" in error for error in result.blocking_errors))
+        self.assertTrue(any("mirror-batch-bundle" in warning for warning in result.warnings))
 
     def test_cli_json_contract_and_no_side_effects_for_certificate(self):
         backup = self.prepare_completed_january()

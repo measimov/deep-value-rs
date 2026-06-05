@@ -456,6 +456,7 @@ class MirrorBatchLedgerResult:
     ledger_status: str
     batches: list[dict[str, Any]]
     inferred_batches: list[dict[str, Any]]
+    planned_batches: list[dict[str, Any]]
     latest_completed_batch: dict[str, Any] | None
     next_recommended_batch: dict[str, Any] | None
     warnings: list[str]
@@ -2646,7 +2647,7 @@ class MirrorBatchRehearsalReporter:
 class MirrorBatchLedgerReporter:
     REPORT_VERSION = "mirror-batch-ledger/v1"
 
-    def report(self, *, root: Path | str, scope: str) -> MirrorBatchLedgerResult:
+    def report(self, *, root: Path | str, scope: str, bundle: Path | str | None = None) -> MirrorBatchLedgerResult:
         ensure_mirror_scope(scope)
         mirror_root = _resolve_path(Path(root))
         warnings = ["mirror-batch-ledger is read-only and infers history; no explicit batch ledger table is written"]
@@ -2654,7 +2655,7 @@ class MirrorBatchLedgerReporter:
         catalog = CatalogStore(mirror_root, read_only=True)
         if not catalog.db_path.exists():
             blocking_errors.append(f"catalog not found: {catalog.db_path}; run init-catalog first")
-            return self._result(mirror_root, scope, "blocked", [], [], None, None, warnings, blocking_errors)
+            return self._result(mirror_root, scope, "blocked", [], [], [], None, None, warnings, blocking_errors)
 
         batches = self._mirror_run_batches(catalog)
         next_batch = MirrorNextBatchReporter().report(root=mirror_root, scope=scope)
@@ -2672,12 +2673,13 @@ class MirrorBatchLedgerReporter:
                 "estimated_request_count": next_batch.estimated_request_count,
                 "required_trade_cal_range": next_batch.required_trade_cal_range,
             }
+        planned = self._planned_batches(bundle=bundle, recommended=recommended, warnings=warnings)
         if not batches and not inferred:
             warnings.append("no completed batch history could be inferred")
         elif not inferred:
             warnings.append("no complete month coverage inferred from daily-like endpoints")
-        ledger_status = "blocked" if blocking_errors else ("empty" if not batches and not inferred else ("warning" if not inferred else "passed"))
-        return self._result(mirror_root, scope, ledger_status, batches, inferred, latest_completed, recommended, warnings, blocking_errors)
+        ledger_status = "blocked" if blocking_errors else ("empty" if not batches and not inferred and not planned else ("warning" if not inferred else "passed"))
+        return self._result(mirror_root, scope, ledger_status, batches, inferred, planned, latest_completed, recommended, warnings, blocking_errors)
 
     def _result(
         self,
@@ -2686,6 +2688,7 @@ class MirrorBatchLedgerReporter:
         status: str,
         batches: list[dict[str, Any]],
         inferred: list[dict[str, Any]],
+        planned: list[dict[str, Any]],
         latest_completed: dict[str, Any] | None,
         recommended: dict[str, Any] | None,
         warnings: list[str],
@@ -2698,6 +2701,7 @@ class MirrorBatchLedgerReporter:
             ledger_status=status,
             batches=batches,
             inferred_batches=inferred,
+            planned_batches=planned,
             latest_completed_batch=latest_completed,
             next_recommended_batch=recommended,
             warnings=_dedupe_messages(warnings),
@@ -2730,6 +2734,58 @@ class MirrorBatchLedgerReporter:
                 }
             )
         return batches
+
+    def _planned_batches(self, *, bundle: Path | str | None, recommended: dict[str, Any] | None, warnings: list[str]) -> list[dict[str, Any]]:
+        candidates: list[Path] = []
+        if bundle is not None:
+            candidates.append(_resolve_path(Path(bundle)))
+        elif recommended and recommended.get("start_date"):
+            default = Path("/tmp") / f"tushare-mirror-batch-bundle-{str(recommended['start_date'])[:6]}"
+            if default.exists():
+                candidates.append(default)
+        planned: list[dict[str, Any]] = []
+        for candidate in candidates:
+            item = self._planned_batch_from_bundle(candidate, warnings)
+            if item:
+                planned.append(item)
+        return planned
+
+    def _planned_batch_from_bundle(self, bundle: Path, warnings: list[str]) -> dict[str, Any] | None:
+        verification = MirrorBatchBundleVerifier().verify(bundle=bundle)
+        manifest_path = bundle / MirrorBatchBundleReporter.MANIFEST_FILE
+        if not manifest_path.exists():
+            warnings.append(f"planned bundle is not manifest-bearing: {bundle}")
+            return None
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            warnings.append(f"planned bundle manifest is invalid: {exc}")
+            return None
+        batch_plan: dict[str, Any] = {}
+        plan_path = bundle / "batch_plan.json"
+        if plan_path.exists():
+            try:
+                batch_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                warnings.append(f"planned bundle batch_plan.json is invalid: {exc}")
+        dependency_status = batch_plan.get("dependency_status") or "unknown"
+        if dependency_status == "missing":
+            batch_state = "dependency_stage_planned"
+        else:
+            batch_state = "planned_future_batch"
+        return {
+            "batch_id": manifest.get("bundle_id"),
+            "source": "bundle_manifest",
+            "bundle": str(bundle),
+            "batch_state": batch_state,
+            "execution_state": "not_executed",
+            "scope": manifest.get("scope"),
+            "date_range": {"start_date": manifest.get("start_date"), "end_date": manifest.get("end_date")},
+            "dependency_status": dependency_status,
+            "dependency_action": batch_plan.get("dependency_action"),
+            "daily_like_status": batch_plan.get("daily_like_status"),
+            "verification_status": verification.status,
+        }
 
     def _date_range_from_jobs(self, jobs: list[dict[str, Any]]) -> tuple[str | None, str | None]:
         dates: list[str] = []
@@ -2801,6 +2857,10 @@ class MirrorBatchCertificateReporter:
             certificate = self._certificate(mirror_root, backup_root, scope, start_date, end_date)
         except Exception as exc:
             return self._result(output_root, "blocked", [], warnings, [f"certificate source report failed: {exc}"])
+        completion_blockers = self._completion_blockers(certificate)
+        if completion_blockers:
+            warnings.append("completion certificates are only generated for completed ranges; use mirror-batch-bundle for planned future batches")
+            return self._result(output_root, "blocked", [], warnings, completion_blockers)
 
         if output_root.exists() and overwrite:
             if output_root.is_dir():
@@ -2846,6 +2906,8 @@ class MirrorBatchCertificateReporter:
         status = MirrorStatusReporter().report(root=root, backup=backup, scope=scope)
         return {
             "certificate_version": self.CERTIFICATE_VERSION,
+            "certificate_type": "completion",
+            "completion_status": "completed",
             "root": str(root),
             "backup": str(backup),
             "scope": scope,
@@ -2864,6 +2926,17 @@ class MirrorBatchCertificateReporter:
             ],
             "not_a_full_mirror": True,
         }
+
+    def _completion_blockers(self, certificate: dict[str, Any]) -> list[str]:
+        blockers: list[str] = []
+        daily_like = [item for item in certificate.get("coverage_summary", []) if item.get("coverage_class") == "daily_like"]
+        if not daily_like or any(item.get("status") != "complete" for item in daily_like):
+            blockers.append("requested date range is not completed; use mirror-batch-bundle for planned future batch")
+        if certificate.get("backup_status") != "valid":
+            blockers.append("backup status is not valid")
+        if certificate.get("restore_check_status") != "succeeded":
+            blockers.append("restore-check status is not succeeded")
+        return blockers
 
     def _validation_status(self, catalog: CatalogStore) -> dict[str, Any]:
         with catalog.connect() as conn:
