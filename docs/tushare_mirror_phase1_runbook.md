@@ -2342,3 +2342,105 @@ endpoints, execute stock loops, enable financial/PIT/object/intraday/compaction
 execution, implement PostgreSQL loading, implement remote backup or restore-into,
 run a scheduler, or introduce parallel execution. It is a read-only and
 file-output safety layer around one bounded low-risk batch.
+
+## February Batch Readiness Blocker Resolution
+
+The February bundle may have been generated before bundle manifests existed. A
+pre-manifest directory such as `/tmp/tushare-mirror-batch-bundle-202502` is not a
+valid execution candidate until it is regenerated with `bundle_manifest.json`.
+Regeneration is allowed only for an explicit output path outside the mirror and
+backup roots:
+
+```bash
+python3 -m tushare_mirror mirror-batch-bundle \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope low-risk-a-share \
+  --start-date 20250201 \
+  --end-date 20250228 \
+  --max-jobs-per-api 20 \
+  --output "$BUNDLE" \
+  --overwrite \
+  --json
+```
+
+Without `--overwrite`, an existing non-manifest bundle is refused with a clear
+diagnostic. With `--overwrite`, only the requested bundle output path is
+replaced. The command still does not execute `mirror-run`, fetch Tushare data,
+backfill dates, or write mirror/backup catalog state.
+
+Verify the regenerated bundle before using it in any checklist:
+
+```bash
+python3 -m tushare_mirror mirror-batch-bundle-verify --bundle "$BUNDLE" --json
+python3 -m tushare_mirror command-safety-check --file "$BUNDLE/commands.sh" --json
+python3 -m tushare_mirror mirror-batch-rehearse \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --bundle "$BUNDLE" \
+  --json
+```
+
+`commands.sh` is staged documentation. Stage 1 describes the February
+`trade_cal` dependency and the single guarded monthly orchestrator command.
+Stage 2 describes the post-dependency checks: rerun batch planning, validate
+with `--no-record`, back up, restore-check, and review. The file must not be
+run directly, and every real execution command remains commented and marked
+`USER_CONFIRMATION_REQUIRED`.
+
+January weekly and monthly pilot coverage is advisory for February promotion
+unless the configured pilot plan explicitly required a missing date. The
+coverage matrix distinguishes `coverage_class=daily_like` from
+`coverage_class=weekly_monthly`; daily-like source-month gaps remain hard
+blockers, while ambiguous weekly/monthly pilot differences are warnings. January
+2025 monthly pilot coverage may be represented by the planned/executed
+`20250127` endpoint date rather than naive calendar month-end `20250131`.
+
+February daily-like execution depends on local February `trade_cal`. If that
+range is missing locally, reports should show:
+
+- `dependency_status=missing`
+- `dependency_action=fetch_trade_cal_first`
+- `trade_cal_params={exchange:SSE,start_date:20250201,end_date:20250228}`
+- `daily_like_status=blocked_until_trade_cal`
+- `natural_day_fallback=false`
+
+This staged state is not immediate readiness for all February daily-like jobs.
+It means the next safe action is a user-confirmed bounded February orchestrator
+command that first handles `trade_cal` under the same guardrails. Do not fetch
+`trade_cal` separately by inventing an unsafe command if the orchestrator is the
+only supported path.
+
+Use this exact readiness sequence:
+
+1. Run `mirror-status`.
+2. Run `backup-status`.
+3. Regenerate `mirror-batch-bundle --overwrite` to `$BUNDLE`.
+4. Run `mirror-batch-bundle-verify`.
+5. Run `command-safety-check`.
+6. Run `mirror-batch-rehearse`.
+7. Run `monthly-promotion-checklist --bundle "$BUNDLE"`.
+8. Run `mirror-ops-report`.
+9. Obtain explicit user confirmation.
+10. Only after confirmation, run the reviewed `mirror-run --execute` command.
+
+The promotion checklist and ops report classify hard blockers separately from
+the dependency stage. Hard blockers include failed restore-check, backup
+mutation, missing token, incomplete daily-like source coverage, incompatible
+schema/quarantine, unsafe paths, excessive max jobs, or invalid command bundle.
+Warnings include pilot-only scope, advisory weekly/monthly differences, missing
+remote disaster recovery, missing compaction, disabled high-risk API families,
+and target `trade_cal` missing when a safe dependency plan is present.
+
+The ledger distinguishes completed pilot batches from planned future bundles.
+A February bundle is recorded as planned and `not_executed`; it is not a
+completion certificate. `mirror-batch-certificate` writes completion
+certificates only for completed ranges such as January 2025. A February
+completion certificate before execution is blocked and should be replaced by a
+verified bundle and promotion report.
+
+These blocker-resolution commands remain infrastructure-only. They do not run
+`commands.sh`, execute `mirror-run`, fetch real Tushare data, backfill new dates,
+enter full mirror mode, add executable endpoints, run stock loops, enable
+financial/PIT/object/intraday/compaction execution, implement PostgreSQL
+loading, or add remote backup, restore-into, scheduler, or parallel execution.
