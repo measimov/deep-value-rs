@@ -1770,6 +1770,14 @@ class MirrorOpsReportTests(PreBackfillOperationsTestCase):
         BackupExecutor(self.root, self.catalog).backup(plan)
         return backup
 
+    def prepare_staged_ops(self) -> Path:
+        self.build_pilot()
+        self.cover_january_matrix()
+        backup = self.base / "ops-staged-backup"
+        plan = BackupPlanner(self.root, self.catalog).plan(backup)
+        BackupExecutor(self.root, self.catalog).backup(plan)
+        return backup
+
     def report(self, backup: Path):
         return MirrorOpsReportReporter(token_available=True).report(
             root=self.root,
@@ -1789,6 +1797,15 @@ class MirrorOpsReportTests(PreBackfillOperationsTestCase):
         self.assertEqual(report.report_version, "mirror-ops-report/v1")
         self.assertEqual(report.overall_status, "ready")
         self.assertTrue(report.ready_for_next_user_confirmed_batch)
+        self.assertFalse(report.hard_blockers)
+        self.assertEqual(report.promotion_status, "ready")
+        self.assertEqual(report.dependency_stage["dependency_status"], "covered")
+        self.assertTrue(report.daily_like_coverage)
+        self.assertTrue(report.weekly_monthly_advisory_coverage)
+        self.assertIn(report.bundle_status["status"], {"not_provided", "passed", "warning", "blocked"})
+        self.assertFalse(report.token_hygiene["token_plaintext_found"])
+        self.assertEqual(report.backup_status["restore_check_status"], "succeeded")
+        self.assertEqual(report.schema_status["incompatible_schema_count"], 0)
         self.assertFalse(report.blocking_errors)
         for section in [
             "mirror_status",
@@ -1802,10 +1819,24 @@ class MirrorOpsReportTests(PreBackfillOperationsTestCase):
             "stop_policy",
             "path_diagnostics",
             "token_hygiene",
+            "bundle_status",
             "promotion_checklist",
         ]:
             self.assertIn(section, report.sections)
         self.assertIn("mirror-run --execute", report.recommended_next_action)
+
+    def test_staged_dependency_state_is_reported(self):
+        backup = self.prepare_staged_ops()
+        report = self.report(backup)
+        self.assertEqual(report.overall_status, "staged")
+        self.assertTrue(report.ready_for_next_user_confirmed_batch)
+        self.assertFalse(report.hard_blockers)
+        self.assertEqual(report.promotion_status, "staged")
+        self.assertEqual(report.dependency_stage["dependency_status"], "missing")
+        self.assertEqual(report.dependency_stage["dependency_action"], "fetch_trade_cal_first")
+        self.assertEqual(report.dependency_stage["daily_like_status"], "blocked_until_trade_cal")
+        self.assertFalse(report.dependency_stage["natural_day_fallback"])
+        self.assertIn("Regenerate verified bundle", report.next_safe_action)
 
     def test_blocking_section_propagates(self):
         backup = self.prepare_ready_ops()
@@ -1813,6 +1844,7 @@ class MirrorOpsReportTests(PreBackfillOperationsTestCase):
         report = self.report(backup)
         self.assertEqual(report.overall_status, "blocked")
         self.assertFalse(report.ready_for_next_user_confirmed_batch)
+        self.assertTrue(report.hard_blockers)
         self.assertTrue(any("backup_status" in error or "promotion_checklist" in error for error in report.blocking_errors))
 
     def test_cli_json_contract_and_no_side_effects_for_ops_report(self):
@@ -1835,6 +1867,16 @@ class MirrorOpsReportTests(PreBackfillOperationsTestCase):
             "report_version",
             "overall_status",
             "ready_for_next_user_confirmed_batch",
+            "hard_blockers",
+            "dependency_stage",
+            "bundle_status",
+            "promotion_status",
+            "daily_like_coverage",
+            "weekly_monthly_advisory_coverage",
+            "backup_status",
+            "token_hygiene",
+            "schema_status",
+            "next_safe_action",
             "sections",
             "warnings",
             "blocking_errors",

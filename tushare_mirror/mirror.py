@@ -640,6 +640,16 @@ class MirrorOpsReportResult:
     report_version: str
     overall_status: str
     ready_for_next_user_confirmed_batch: bool
+    hard_blockers: list[str]
+    dependency_stage: dict[str, Any]
+    bundle_status: dict[str, Any]
+    promotion_status: str
+    daily_like_coverage: list[dict[str, Any]]
+    weekly_monthly_advisory_coverage: list[dict[str, Any]]
+    backup_status: dict[str, Any]
+    token_hygiene: dict[str, Any]
+    schema_status: dict[str, Any]
+    next_safe_action: str
     root: str
     backup: str
     scope: str
@@ -3945,9 +3955,12 @@ class MirrorOpsReportReporter:
         self._add_section(sections, warnings, blocking_errors, "mirror_status", MirrorStatusReporter().report(root=mirror_root, backup=backup_root, scope=scope).to_dict())
         self._add_section(sections, warnings, blocking_errors, "mirror_audit", MirrorAuditReporter().report(root=mirror_root, backup=backup_root, scope=scope).to_dict())
         self._add_section(sections, warnings, blocking_errors, "mirror_next_batch", MirrorNextBatchReporter().report(root=mirror_root, scope=scope).to_dict())
-        self._add_section(sections, warnings, blocking_errors, "backup_status", BackupStatusReporter().report(backup=backup_root).to_dict())
-        self._add_section(sections, warnings, blocking_errors, "schema_status", SchemaStatusReporter().report(root=mirror_root).to_dict())
-        self._add_section(sections, warnings, blocking_errors, "coverage_matrix", MirrorCoverageMatrixReporter().report(root=mirror_root, scope=scope, start_date=start_date, end_date=end_date).to_dict())
+        backup_payload = BackupStatusReporter().report(backup=backup_root).to_dict()
+        self._add_section(sections, warnings, blocking_errors, "backup_status", backup_payload)
+        schema_payload = SchemaStatusReporter().report(root=mirror_root).to_dict()
+        self._add_section(sections, warnings, blocking_errors, "schema_status", schema_payload)
+        coverage_payload = MirrorCoverageMatrixReporter().report(root=mirror_root, scope=scope, start_date=start_date, end_date=end_date).to_dict()
+        self._add_section(sections, warnings, blocking_errors, "coverage_matrix", coverage_payload)
         self._add_section(sections, warnings, blocking_errors, "request_estimate", RequestEstimateReporter().report(root=mirror_root, scope=scope, start_date=next_start_date, end_date=next_end_date).to_dict())
         self._add_section(
             sections,
@@ -3974,27 +3987,41 @@ class MirrorOpsReportReporter:
             "warnings": [*token_root.warnings, *token_backup.warnings],
         }
         self._add_section(sections, warnings, blocking_errors, "token_hygiene", token_section)
-        self._add_section(
-            sections,
-            warnings,
-            blocking_errors,
-            "promotion_checklist",
-            MonthlyPromotionChecklistReporter(token_available=self._token_available_override).report(
-                root=mirror_root,
-                backup=backup_root,
-                scope=scope,
-                from_month=start_date[:6],
-                to_month=next_start_date[:6],
-            ).to_dict(),
+        bundle_status = self._bundle_status(next_start_date)
+        sections["bundle_status"] = bundle_status
+        promotion = MonthlyPromotionChecklistReporter(token_available=self._token_available_override).report(
+            root=mirror_root,
+            backup=backup_root,
+            scope=scope,
+            from_month=start_date[:6],
+            to_month=next_start_date[:6],
         )
+        promotion_payload = promotion.to_dict()
+        self._add_section(sections, warnings, blocking_errors, "promotion_checklist", promotion_payload)
 
         warnings = _dedupe_messages(warnings)
-        blocking_errors = _dedupe_messages(blocking_errors)
-        ready = not blocking_errors
+        hard_blockers = _dedupe_messages([*blocking_errors, *promotion.hard_blockers])
+        blocking_errors = hard_blockers
+        dependency_stage = promotion.dependency_stage
+        ready_for_next = bool(promotion.ready_to_promote or promotion.ready_for_dependency_stage) and not hard_blockers
+        overall_status = "blocked" if hard_blockers else ("staged" if promotion.ready_for_dependency_stage else "ready" if promotion.ready_to_promote else "warning")
+        daily_like_coverage = [item for item in coverage_payload.get("items", []) if item.get("coverage_class") == "daily_like"]
+        weekly_monthly_coverage = [item for item in coverage_payload.get("items", []) if item.get("coverage_class") == "weekly_monthly"]
+        next_safe_action = promotion.next_safe_action if promotion.next_safe_action else self._recommended_next_action(ready_for_next)
         return MirrorOpsReportResult(
             report_version=self.REPORT_VERSION,
-            overall_status="ready" if ready else "blocked",
-            ready_for_next_user_confirmed_batch=ready,
+            overall_status=overall_status,
+            ready_for_next_user_confirmed_batch=ready_for_next,
+            hard_blockers=hard_blockers,
+            dependency_stage=dependency_stage,
+            bundle_status=bundle_status,
+            promotion_status=promotion.status,
+            daily_like_coverage=daily_like_coverage,
+            weekly_monthly_advisory_coverage=weekly_monthly_coverage,
+            backup_status=backup_payload,
+            token_hygiene=token_section,
+            schema_status=schema_payload,
+            next_safe_action=next_safe_action,
             root=str(mirror_root),
             backup=str(backup_root),
             scope=scope,
@@ -4005,7 +4032,7 @@ class MirrorOpsReportReporter:
             sections=sections,
             warnings=warnings,
             blocking_errors=blocking_errors,
-            recommended_next_action=self._recommended_next_action(ready),
+            recommended_next_action=next_safe_action,
         )
 
     def _add_section(
@@ -4021,6 +4048,23 @@ class MirrorOpsReportReporter:
             warnings.append(f"{name}: {warning}")
         for error in payload.get("blocking_errors") or []:
             blocking_errors.append(f"{name}: {error}")
+
+    def _bundle_status(self, next_start_date: str) -> dict[str, Any]:
+        bundle = Path("/tmp") / f"tushare-mirror-batch-bundle-{next_start_date[:6]}"
+        if not bundle.exists():
+            return {
+                "status": "not_provided",
+                "bundle": str(bundle),
+                "verified": False,
+                "report": None,
+            }
+        report = MirrorBatchBundleVerifier().verify(bundle=bundle).to_dict()
+        return {
+            "status": report.get("status"),
+            "bundle": str(bundle),
+            "verified": report.get("status") == "passed",
+            "report": report,
+        }
 
     def _recommended_next_action(self, ready: bool) -> str:
         if not ready:
