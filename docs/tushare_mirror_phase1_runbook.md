@@ -2630,3 +2630,36 @@ preview marked `USER_CONFIRMATION_REQUIRED`; it must not be run by automation.
 After every user-run batch, run validation with `--no-record`, inspect backup,
 run restore-check, and run post-batch review. If any stop condition appears,
 stop, preserve artifacts, and classify the failure before continuing.
+
+For a controlled unattended `a-share-low-risk` run from 1990 to the current
+trade calendar horizon, use the foreground auto-sync runner instead of a shell
+loop:
+
+```bash
+export MIRROR_ROOT=/mnt/gw/TuShare
+export MIRROR_BACKUP=/mnt/gw/TuShare-backup
+export TUSHARE_TOKEN='your-token-here'
+
+python3 -m tushare_mirror mirror-auto-sync \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope a-share-low-risk \
+  --from-date 19900101 \
+  --to-date latest-trade-date \
+  --window-days 20 \
+  --max-jobs-per-api 20 \
+  --state /mnt/gw/TuShare-auto-sync-state.json \
+  --max-attempts 3 \
+  --retry-backoff-seconds 60 \
+  --execute \
+  --confirm-auto-sync \
+  --json
+```
+
+Run the same command without `--execute --confirm-auto-sync` first to preview
+bounded windows. The state file is required for execution and lets a later run
+resume from the next uncompleted window. This is not a daemon and does not
+expand scope: plan-only/disabled endpoints, stock loops, intraday data,
+financial PIT execution, object downloads, remote backup, restore-into,
+compaction execution, PostgreSQL loading, scheduling, and parallel execution
+remain outside the allowed path.

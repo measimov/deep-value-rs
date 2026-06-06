@@ -982,6 +982,57 @@ class MirrorPullCommandResult:
 
 
 @dataclass(frozen=True)
+class MirrorAutoSyncResult:
+    report_version: str
+    status: str
+    execute: bool
+    root: str
+    backup: str
+    scope: str
+    from_date: str
+    to_date: str
+    resolved_to_date: str
+    window_days: int
+    max_jobs_per_api: int
+    state_path: str | None
+    resume_from_state: bool
+    next_start_date: str | None
+    planned_window_count: int
+    executed_window_count: int
+    succeeded_window_count: int
+    failed_window_count: int
+    max_attempts: int
+    windows: list[dict[str, Any]]
+    safety_boundaries: list[str]
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "report_version": self.report_version,
+            "status": self.status,
+            "execute": self.execute,
+            "root": self.root,
+            "backup": self.backup,
+            "scope": self.scope,
+            "from_date": self.from_date,
+            "to_date": self.to_date,
+            "resolved_to_date": self.resolved_to_date,
+            "planned_window_count": self.planned_window_count,
+            "executed_window_count": self.executed_window_count,
+            "succeeded_window_count": self.succeeded_window_count,
+            "failed_window_count": self.failed_window_count,
+            "next_start_date": self.next_start_date,
+            "state_path": self.state_path,
+            "warnings": self.warnings,
+            "blocking_errors": self.blocking_errors,
+        }
+
+
+@dataclass(frozen=True)
 class BackupStatusResult:
     report_version: str
     backup: str
@@ -1336,6 +1387,139 @@ def _is_under_tmp(path: Path) -> bool:
     resolved = _resolve_path(path)
     tmp = Path('/tmp').resolve(strict=False)
     return resolved == tmp or _is_relative_to(resolved, tmp)
+
+
+def _natural_dates_between(start_date: str, end_date: str) -> list[str]:
+    current = datetime.strptime(start_date, "%Y%m%d")
+    stop = datetime.strptime(end_date, "%Y%m%d")
+    out: list[str] = []
+    while current <= stop:
+        out.append(current.strftime("%Y%m%d"))
+        current += timedelta(days=1)
+    return out
+
+
+def _calendar_weekly_dates(start_date: str, end_date: str) -> list[str]:
+    return [date for date in _natural_dates_between(start_date, end_date) if datetime.strptime(date, "%Y%m%d").weekday() == 4]
+
+
+def _calendar_monthly_dates(start_date: str, end_date: str) -> list[str]:
+    by_month: dict[str, str] = {}
+    for date in _natural_dates_between(start_date, end_date):
+        by_month[date[:6]] = date
+    return sorted(by_month.values())
+
+
+def _trade_calendar_period_dates(root: Path, catalog: CatalogStore, start_date: str, end_date: str, *, period: str) -> list[str] | None:
+    expanded_start, expanded_end = _period_bounds(start_date, end_date, period=period)
+    overlap = _trade_calendar_range_overlap(root, catalog, start_date, end_date)
+    if overlap is False:
+        return None
+    try:
+        open_dates, _ = DatePlanner(root, catalog).plan_dates_with_metadata(
+            start_date=expanded_start,
+            end_date=expanded_end,
+            trading_days_only=True,
+            calendar_exchange="SSE",
+        )
+    except Exception:
+        return None
+    if not open_dates:
+        return []
+    by_period: dict[str, str] = {}
+    for date in open_dates:
+        parsed = datetime.strptime(date, "%Y%m%d")
+        if period == "weekly":
+            iso = parsed.isocalendar()
+            key = f"{iso.year:04d}-W{iso.week:02d}"
+        elif period == "monthly":
+            key = date[:6]
+        else:
+            raise ValueError(f"unknown period: {period}")
+        by_period[key] = date
+    return sorted(
+        date
+        for date in by_period.values()
+        if start_date <= date <= end_date and _period_candidate_is_complete(date, end_date, period=period)
+    )
+
+
+def _period_bounds(start_date: str, end_date: str, *, period: str) -> tuple[str, str]:
+    start = datetime.strptime(start_date, "%Y%m%d")
+    end = datetime.strptime(end_date, "%Y%m%d")
+    if period == "weekly":
+        expanded_start = start - timedelta(days=start.weekday())
+        expanded_end = end + timedelta(days=6 - end.weekday())
+        return expanded_start.strftime("%Y%m%d"), expanded_end.strftime("%Y%m%d")
+    if period == "monthly":
+        expanded_start = start.replace(day=1)
+        if end.month == 12:
+            next_month = end.replace(year=end.year + 1, month=1, day=1)
+        else:
+            next_month = end.replace(month=end.month + 1, day=1)
+        expanded_end = next_month - timedelta(days=1)
+        return expanded_start.strftime("%Y%m%d"), expanded_end.strftime("%Y%m%d")
+    raise ValueError(f"unknown period: {period}")
+
+
+def _trade_calendar_range_overlap(root: Path, catalog: CatalogStore, start_date: str, end_date: str) -> bool | None:
+    if not catalog.latest_snapshot("trade_cal"):
+        return None
+    try:
+        table = LakeReader(root, catalog).scan_api("trade_cal", columns=["exchange", "cal_date"])
+    except Exception:
+        return None
+    if table.num_rows == 0:
+        return False
+    exchanges = table["exchange"].to_pylist()
+    cal_dates = table["cal_date"].to_pylist()
+    for exchange, cal_date in zip(exchanges, cal_dates):
+        if str(exchange).upper() != "SSE":
+            continue
+        text = str(cal_date).strip()
+        try:
+            value = DatePlanner(root, catalog)._normalize_date(text)
+        except ValueError:
+            continue
+        if start_date <= value <= end_date:
+            return True
+    return False
+
+
+def _period_candidate_is_complete(candidate: str, requested_end_date: str, *, period: str) -> bool:
+    parsed = datetime.strptime(candidate, "%Y%m%d")
+    requested_end = datetime.strptime(requested_end_date, "%Y%m%d")
+    if period == "weekly":
+        if parsed.weekday() == 4:
+            return True
+        week_end = parsed + timedelta(days=6 - parsed.weekday())
+        return requested_end >= week_end
+    if period == "monthly":
+        if parsed.month == 12:
+            next_month = parsed.replace(year=parsed.year + 1, month=1, day=1)
+        else:
+            next_month = parsed.replace(month=parsed.month + 1, day=1)
+        month_end = next_month - timedelta(days=1)
+        if parsed.date() == month_end.date():
+            return True
+        return requested_end >= month_end
+    raise ValueError(f"unknown period: {period}")
+
+
+def _pilot_compatible_period_dates(root: Path, catalog: CatalogStore, start_date: str, end_date: str, *, period: str) -> list[str]:
+    if period == "weekly":
+        trade_dates = _trade_calendar_period_dates(root, catalog, start_date, end_date, period=period)
+        fallback = trade_dates if trade_dates is not None else _calendar_weekly_dates(start_date, end_date)
+        pilot_dates = PILOT_JAN_2025_WEEKLY_DATES
+    elif period == "monthly":
+        trade_dates = _trade_calendar_period_dates(root, catalog, start_date, end_date, period=period)
+        fallback = trade_dates if trade_dates is not None else _calendar_monthly_dates(start_date, end_date)
+        pilot_dates = PILOT_JAN_2025_MONTHLY_DATES
+    else:
+        raise ValueError(f"unknown period: {period}")
+    expected = {date for date in fallback if not ("20250101" <= date <= "20250131")}
+    expected.update(date for date in pilot_dates if start_date <= date <= end_date)
+    return sorted(expected)
 
 
 def _nearest_existing_parent(path: Path) -> Path | None:
@@ -5307,6 +5491,364 @@ class MirrorPullCommandReporter:
         ) + "\n"
 
 
+class MirrorAutoSyncReporter:
+    REPORT_VERSION = "mirror-auto-sync/v1"
+    STATE_VERSION = "mirror-auto-sync-state/v1"
+    RETRYABLE_FAILURES = {"rate_limited", "network_error", "server_error", "unknown_error"}
+
+    def create(
+        self,
+        *,
+        root: Path | str,
+        backup: Path | str,
+        scope: str,
+        from_date: str,
+        to_date: str,
+        window_days: int,
+        max_jobs_per_api: int,
+        state: Path | str | None = None,
+        execute: bool = False,
+        confirm_auto_sync: bool = False,
+        max_attempts: int = 3,
+        retry_backoff_seconds: int = 60,
+        client: Any | None = None,
+        sleep=time.sleep,
+    ) -> MirrorAutoSyncResult:
+        ensure_mirror_scope(scope)
+        mirror_root = _resolve_path(Path(root))
+        backup_root = _resolve_path(Path(backup))
+        state_path = _resolve_path(Path(state)) if state else None
+        warnings = [
+            "mirror-auto-sync uses bounded pilot windows and does not enable disabled or plan-only endpoints",
+        ]
+        blocking_errors: list[str] = []
+        if scope != "a-share-low-risk":
+            blocking_errors.append("mirror-auto-sync currently supports only scope a-share-low-risk")
+        if window_days <= 0:
+            blocking_errors.append("--window-days must be positive")
+        if max_jobs_per_api <= 0:
+            blocking_errors.append("--max-jobs-per-api must be positive")
+        if max_jobs_per_api > MODE_MAX_JOBS["pilot"]:
+            blocking_errors.append("mirror-auto-sync max-jobs-per-api cannot exceed 20")
+        if window_days > max_jobs_per_api:
+            blocking_errors.append("--window-days must be <= --max-jobs-per-api so no endpoint window can be silently truncated")
+        if max_attempts <= 0:
+            blocking_errors.append("--max-attempts must be positive")
+        if retry_backoff_seconds < 0:
+            blocking_errors.append("--retry-backoff-seconds must be >= 0")
+        if execute and not confirm_auto_sync:
+            blocking_errors.append("--execute requires --confirm-auto-sync")
+        if execute and state_path is None:
+            blocking_errors.append("--execute requires --state for checkpoint/resume")
+        if execute and client is None:
+            blocking_errors.append("--execute requires a Tushare client")
+        if state_path is not None:
+            blocking_errors.extend(self._preflight_state_path(mirror_root, backup_root, state_path))
+        if not mirror_root.exists():
+            blocking_errors.append(f"mirror root does not exist: {mirror_root}")
+        if not backup_root.exists():
+            blocking_errors.append(f"backup root does not exist: {backup_root}")
+
+        normalized_from = self._normalize_date(from_date)
+        resolved_to, latest_warning = self._resolve_to_date(to_date)
+        if latest_warning:
+            warnings.append(latest_warning)
+        if normalized_from > resolved_to:
+            blocking_errors.append("from-date must be <= resolved to-date")
+
+        resume_from_state = False
+        state_payload = self._read_state(state_path) if state_path and state_path.exists() else {}
+        effective_start = normalized_from
+        if state_payload.get("next_start_date"):
+            candidate = self._normalize_date(str(state_payload["next_start_date"]))
+            if candidate > effective_start:
+                effective_start = candidate
+                resume_from_state = True
+
+        windows = self._planned_windows(effective_start, resolved_to, window_days) if not blocking_errors else []
+        for window in windows:
+            window["command_preview"] = self._mirror_run_command(mirror_root, backup_root, scope, window["start_date"], window["end_date"], max_jobs_per_api)
+            window["attempts"] = 0
+            window["status"] = "planned"
+            window["would_execute_real_requests"] = execute
+            window["user_confirmation_required"] = bool(execute)
+
+        executed = 0
+        succeeded = 0
+        failed = 0
+        next_start_date = windows[0]["start_date"] if windows else None
+        if execute and not blocking_errors:
+            catalog = CatalogStore(mirror_root)
+            if not catalog.db_path.exists():
+                blocking_errors.append(f"catalog not found: {catalog.db_path}; run init-catalog first")
+            else:
+                load_into_catalog(mirror_root, catalog)
+                state_payload = self._initial_state(state_payload, mirror_root, backup_root, scope, normalized_from, to_date, resolved_to, window_days, max_jobs_per_api)
+                for window in windows:
+                    executed += 1
+                    result = self._execute_window(
+                        mirror_root=mirror_root,
+                        backup_root=backup_root,
+                        catalog=catalog,
+                        client=client,
+                        scope=scope,
+                        window=window,
+                        max_jobs_per_api=max_jobs_per_api,
+                        max_attempts=max_attempts,
+                        retry_backoff_seconds=retry_backoff_seconds,
+                        sleep=sleep,
+                    )
+                    if result["status"] == "succeeded":
+                        succeeded += 1
+                        next_start_date = self._next_date(window["end_date"])
+                        self._write_state(state_path, state_payload, window, next_start_date)
+                        continue
+                    failed += 1
+                    next_start_date = window["start_date"]
+                    blocking_errors.extend(result.get("blocking_errors") or [])
+                    break
+
+        status = "blocked" if blocking_errors else ("succeeded" if execute and failed == 0 else "planned")
+        return MirrorAutoSyncResult(
+            report_version=self.REPORT_VERSION,
+            status=status,
+            execute=execute,
+            root=str(mirror_root),
+            backup=str(backup_root),
+            scope=scope,
+            from_date=normalized_from,
+            to_date=to_date,
+            resolved_to_date=resolved_to,
+            window_days=window_days,
+            max_jobs_per_api=max_jobs_per_api,
+            state_path=str(state_path) if state_path else None,
+            resume_from_state=resume_from_state,
+            next_start_date=next_start_date,
+            planned_window_count=len(windows),
+            executed_window_count=executed,
+            succeeded_window_count=succeeded,
+            failed_window_count=failed,
+            max_attempts=max_attempts,
+            windows=windows,
+            safety_boundaries=self._safety_boundaries(max_jobs_per_api, window_days),
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _preflight_state_path(self, root: Path, backup: Path, state: Path) -> list[str]:
+        errors: list[str] = []
+        if state == root or _is_relative_to(state, root):
+            errors.append("state path must not be inside mirror root")
+        if state == backup or _is_relative_to(state, backup):
+            errors.append("state path must not be inside backup root")
+        if state.exists() and state.is_dir():
+            errors.append("state path exists and is a directory")
+        if not state.parent.exists():
+            errors.append(f"state path parent does not exist: {state.parent}")
+        return errors
+
+    def _resolve_to_date(self, to_date: str) -> tuple[str, str | None]:
+        text = str(to_date).strip().lower()
+        if text in {"latest", "latest-trade-date"}:
+            resolved = datetime.now().strftime("%Y%m%d")
+            return resolved, "latest-trade-date is resolved to today's calendar date for planning; execution fetches trade_cal per window and never uses natural-day fallback for daily-like endpoints"
+        return self._normalize_date(to_date), None
+
+    def _normalize_date(self, value: str) -> str:
+        text = str(value).strip()
+        for fmt in ("%Y%m%d", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, fmt).strftime("%Y%m%d")
+            except ValueError:
+                pass
+        raise ValueError(f"invalid date: {value}")
+
+    def _planned_windows(self, start_date: str, end_date: str, window_days: int) -> list[dict[str, Any]]:
+        windows: list[dict[str, Any]] = []
+        current = datetime.strptime(start_date, "%Y%m%d")
+        stop = datetime.strptime(end_date, "%Y%m%d")
+        while current <= stop:
+            window_end = min(current + timedelta(days=window_days - 1), stop)
+            windows.append(
+                {
+                    "start_date": current.strftime("%Y%m%d"),
+                    "end_date": window_end.strftime("%Y%m%d"),
+                }
+            )
+            current = window_end + timedelta(days=1)
+        return windows
+
+    def _mirror_run_command(self, root: Path, backup: Path, scope: str, start_date: str, end_date: str, max_jobs: int) -> str:
+        return (
+            f"python3 -m tushare_mirror mirror-run --root {root} --scope {scope} --mode pilot "
+            f"--start-date {start_date} --end-date {end_date} --max-jobs-per-api {max_jobs} "
+            f"--backup-target {backup} --execute --json"
+        )
+
+    def _execute_window(
+        self,
+        *,
+        mirror_root: Path,
+        backup_root: Path,
+        catalog: CatalogStore,
+        client: Any,
+        scope: str,
+        window: dict[str, Any],
+        max_jobs_per_api: int,
+        max_attempts: int,
+        retry_backoff_seconds: int,
+        sleep,
+    ) -> dict[str, Any]:
+        attempt = 1
+        while attempt <= max_attempts:
+            window["attempts"] = attempt
+            window["status"] = "running"
+            result = MirrorOrchestrator(mirror_root, catalog, client, sleep=sleep).run(
+                scope=scope,
+                mode="pilot",
+                start_date=window["start_date"],
+                end_date=window["end_date"],
+                max_jobs_per_api=max_jobs_per_api,
+                backup_target=str(backup_root),
+                backup_overwrite=True,
+            )
+            window["run_id"] = result.run_id
+            window["mirror_run_status"] = result.status
+            window["summary"] = self._window_summary(result)
+            if result.status == "succeeded" and self._post_checks_passed(result):
+                window["status"] = "succeeded"
+                return {"status": "succeeded"}
+            retryable = self._retryable_result(result)
+            if not retryable or attempt >= max_attempts:
+                window["status"] = "failed"
+                errors = self._result_blockers(result)
+                if retryable and attempt >= max_attempts:
+                    errors.append("retry attempts exhausted for window %s-%s" % (window["start_date"], window["end_date"]))
+                return {"status": "failed", "blocking_errors": errors}
+            window["status"] = "retrying"
+            sleep(retry_backoff_seconds)
+            attempt += 1
+        window["status"] = "failed"
+        return {"status": "failed", "blocking_errors": ["retry attempts exhausted"]}
+
+    def _window_summary(self, result: MirrorRunResult) -> dict[str, Any]:
+        summary = result.summary or {}
+        return {
+            "status": result.status,
+            "run_id": result.run_id,
+            "failed_endpoints": summary.get("failed_endpoints"),
+            "blocked_endpoints": summary.get("blocked_endpoints"),
+            "critical_dependency_failed": summary.get("critical_dependency_failed"),
+            "total_jobs_executed": summary.get("total_jobs_executed"),
+            "backup_status": summary.get("backup_status"),
+            "restore_check_status": summary.get("restore_check_status"),
+            "validation_status": summary.get("validation_status"),
+        }
+
+    def _post_checks_passed(self, result: MirrorRunResult) -> bool:
+        summary = result.summary or {}
+        return (
+            summary.get("validation_status") == "succeeded"
+            and summary.get("backup_status") in {None, "not_requested", "succeeded"}
+            and summary.get("restore_check_status") in {None, "not_requested", "succeeded"}
+        )
+
+    def _retryable_result(self, result: MirrorRunResult) -> bool:
+        summary = result.summary or {}
+        if summary.get("backup_status") not in {None, "not_requested", "succeeded"}:
+            return False
+        if summary.get("restore_check_status") not in {None, "not_requested", "succeeded"}:
+            return False
+        if summary.get("validation_status") not in {None, "succeeded"}:
+            return False
+        failed_reasons = []
+        for item in summary.get("items") or []:
+            if item.get("status") not in {"failed", "blocked"}:
+                continue
+            failed_reasons.append(item.get("error_type") or item.get("blocked_reason") or "unknown_error")
+        return bool(failed_reasons) and all(reason in self.RETRYABLE_FAILURES for reason in failed_reasons)
+
+    def _result_blockers(self, result: MirrorRunResult) -> list[str]:
+        summary = result.summary or {}
+        errors: list[str] = []
+        if summary.get("validation_status") not in {None, "succeeded"}:
+            errors.append("validation failed after mirror window")
+        if summary.get("backup_status") not in {None, "not_requested", "succeeded"}:
+            errors.append(f"backup failed after mirror window: {summary.get('backup_status')}")
+        if summary.get("restore_check_status") not in {None, "not_requested", "succeeded"}:
+            errors.append(f"restore-check failed after mirror window: {summary.get('restore_check_status')}")
+        for item in summary.get("items") or []:
+            if item.get("status") in {"failed", "blocked"}:
+                reason = item.get("error_type") or item.get("blocked_reason") or "unknown_error"
+                errors.append(f"{item.get('endpoint')} {item.get('status')}: {reason}")
+        return _dedupe_messages(errors or ["mirror window failed"])
+
+    def _initial_state(self, state: dict[str, Any], root: Path, backup: Path, scope: str, from_date: str, to_date: str, resolved_to_date: str, window_days: int, max_jobs: int) -> dict[str, Any]:
+        if state:
+            state.setdefault("completed_windows", [])
+            return state
+        return {
+            "state_version": self.STATE_VERSION,
+            "root": str(root),
+            "backup": str(backup),
+            "scope": scope,
+            "from_date": from_date,
+            "to_date": to_date,
+            "resolved_to_date": resolved_to_date,
+            "window_days": window_days,
+            "max_jobs_per_api": max_jobs,
+            "completed_windows": [],
+            "created_at": now_utc(),
+        }
+
+    def _read_state(self, state_path: Path | None) -> dict[str, Any]:
+        if state_path is None or not state_path.exists():
+            return {}
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid auto-sync state file: {state_path}: {exc}") from exc
+        if payload.get("state_version") != self.STATE_VERSION:
+            raise ValueError(f"unsupported auto-sync state file version: {payload.get('state_version')}")
+        return payload
+
+    def _write_state(self, state_path: Path | None, payload: dict[str, Any], window: dict[str, Any], next_start_date: str) -> None:
+        if state_path is None:
+            return
+        completed = payload.setdefault("completed_windows", [])
+        completed.append(
+            {
+                "start_date": window["start_date"],
+                "end_date": window["end_date"],
+                "attempts": window.get("attempts"),
+                "run_id": window.get("run_id"),
+                "finished_at": now_utc(),
+                "status": "succeeded",
+            }
+        )
+        payload["last_successful_end_date"] = window["end_date"]
+        payload["next_start_date"] = next_start_date
+        payload["updated_at"] = now_utc()
+        state_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+    def _next_date(self, date: str) -> str:
+        return (datetime.strptime(date, "%Y%m%d") + timedelta(days=1)).strftime("%Y%m%d")
+
+    def _safety_boundaries(self, max_jobs: int, window_days: int) -> list[str]:
+        return [
+            "scope is fixed to a-share-low-risk",
+            "each execution window is bounded by start_date/end_date",
+            f"window_days={window_days} and max_jobs_per_api={max_jobs}",
+            "disabled and plan-only endpoints remain excluded",
+            "trade_cal is fetched per window before daily-like endpoints",
+            "daily-like endpoints use trading-days-only with no natural-day fallback",
+            "checkpoint state is required for execution and written only to --state",
+            "each failed window stops later windows after retry attempts are exhausted",
+            "backup and restore-check must pass after each window",
+            "auto-sync atomically refreshes the configured backup target after each successful window",
+        ]
+
+
 class SchemaStatusReporter:
     REPORT_VERSION = "schema-status/v1"
 
@@ -5555,7 +6097,7 @@ class MirrorCoverageMatrixReporter:
                     calendar_exchange="SSE",
                 )
             else:
-                dates = self._weekly_monthly_dates(api_name, start_date, end_date)
+                dates = self._weekly_monthly_dates(root, catalog, api_name, start_date, end_date)
                 report = CoverageReporter(root, catalog).report(api_name, dates=dates)
         except Exception as exc:
             if api_name in daily_like:
@@ -5594,18 +6136,18 @@ class MirrorCoverageMatrixReporter:
             "failed_date_sample": [],
         }
 
-    def _weekly_dates(self, start_date: str, end_date: str) -> list[str]:
-        return MirrorBatchPlanner(Path("."), CatalogStore(Path("."), read_only=True))._weekly_dates(start_date, end_date)
+    def _weekly_dates(self, root: Path, catalog: CatalogStore, start_date: str, end_date: str) -> list[str]:
+        return _pilot_compatible_period_dates(root, catalog, start_date, end_date, period="weekly")
 
-    def _monthly_dates(self, start_date: str, end_date: str) -> list[str]:
-        return MirrorBatchPlanner(Path("."), CatalogStore(Path("."), read_only=True))._monthly_dates(start_date, end_date)
+    def _monthly_dates(self, root: Path, catalog: CatalogStore, start_date: str, end_date: str) -> list[str]:
+        return _pilot_compatible_period_dates(root, catalog, start_date, end_date, period="monthly")
 
-    def _weekly_monthly_dates(self, api_name: str, start_date: str, end_date: str) -> list[str]:
+    def _weekly_monthly_dates(self, root: Path, catalog: CatalogStore, api_name: str, start_date: str, end_date: str) -> list[str]:
         if api_name in {"weekly", "index_weekly"}:
-            fallback_dates = self._weekly_dates(start_date, end_date)
+            fallback_dates = self._weekly_dates(root, catalog, start_date, end_date)
             pilot_dates = PILOT_JAN_2025_WEEKLY_DATES
         else:
-            fallback_dates = self._monthly_dates(start_date, end_date)
+            fallback_dates = self._monthly_dates(root, catalog, start_date, end_date)
             pilot_dates = PILOT_JAN_2025_MONTHLY_DATES
         expected = {date for date in fallback_dates if not ("20250101" <= date <= "20250131")}
         expected.update(date for date in pilot_dates if start_date <= date <= end_date)
@@ -6013,29 +6555,13 @@ class MirrorBatchPlanner:
         )
 
     def _natural_dates(self, start: str, end: str) -> list[str]:
-        current = datetime.strptime(start, "%Y%m%d")
-        stop = datetime.strptime(end, "%Y%m%d")
-        out = []
-        while current <= stop:
-            out.append(current.strftime("%Y%m%d"))
-            current += timedelta(days=1)
-        return out
+        return _natural_dates_between(start, end)
 
     def _weekly_dates(self, start: str, end: str) -> list[str]:
-        dates = []
-        for date in self._natural_dates(start, end):
-            if datetime.strptime(date, "%Y%m%d").weekday() == 4:
-                dates.append(date)
-        return dates
+        return _pilot_compatible_period_dates(self.root, self.catalog, start, end, period="weekly")
 
     def _monthly_dates(self, start: str, end: str) -> list[str]:
-        dates = self._natural_dates(start, end)
-        if not dates:
-            return []
-        by_month: dict[str, str] = {}
-        for date in dates:
-            by_month[date[:6]] = date
-        return sorted(by_month.values())
+        return _pilot_compatible_period_dates(self.root, self.catalog, start, end, period="monthly")
 
 
 class MirrorPreflightChecker:
@@ -6457,10 +6983,10 @@ class MirrorPlanner:
         )
 
     def _pilot_weekly_dates(self, start_date: str, end_date: str) -> list[str]:
-        return [date for date in PILOT_JAN_2025_WEEKLY_DATES if start_date <= date <= end_date]
+        return _pilot_compatible_period_dates(self.root, self.catalog, start_date, end_date, period="weekly")
 
     def _pilot_monthly_dates(self, start_date: str, end_date: str) -> list[str]:
-        return [date for date in PILOT_JAN_2025_MONTHLY_DATES if start_date <= date <= end_date]
+        return _pilot_compatible_period_dates(self.root, self.catalog, start_date, end_date, period="monthly")
 
 
 class MirrorOrchestrator:
@@ -6479,6 +7005,7 @@ class MirrorOrchestrator:
         start_date: str | None = None,
         end_date: str | None = None,
         backup_target: str | None = None,
+        backup_overwrite: bool = False,
     ) -> MirrorRunResult:
         ensure_mirror_scope(scope)
         ensure_mirror_mode(mode)
@@ -6547,7 +7074,7 @@ class MirrorOrchestrator:
         restore_check = None
         if backup_target:
             plan = BackupPlanner(self.root, self.catalog).plan(backup_target)
-            backup_result = BackupExecutor(self.root, self.catalog).backup(plan)
+            backup_result = BackupExecutor(self.root, self.catalog).backup(plan, overwrite=backup_overwrite)
             backup = backup_result.to_dict()
             restore = RestoreChecker().check(Path(backup_target))
             restore_check = restore.to_dict()
@@ -6564,10 +7091,10 @@ class MirrorOrchestrator:
         return SMOKE_REFERENCE_FETCHES["trade_cal"]
 
     def _pilot_weekly_dates(self, start_date: str, end_date: str) -> list[str]:
-        return [date for date in PILOT_JAN_2025_WEEKLY_DATES if start_date <= date <= end_date]
+        return _pilot_compatible_period_dates(self.root, self.catalog, start_date, end_date, period="weekly")
 
     def _pilot_monthly_dates(self, start_date: str, end_date: str) -> list[str]:
-        return [date for date in PILOT_JAN_2025_MONTHLY_DATES if start_date <= date <= end_date]
+        return _pilot_compatible_period_dates(self.root, self.catalog, start_date, end_date, period="monthly")
 
     def _probe_all(self, scope: str, mode: str) -> dict[str, str]:
         statuses: dict[str, str] = {}
@@ -6679,6 +7206,19 @@ class MirrorOrchestrator:
     def _execute_date_backfill(self, endpoint: str, dates: list[str], max_jobs: int, probe_statuses: Mapping[str, str]) -> dict[str, Any]:
         if self._permission_blocks(endpoint, probe_statuses):
             return self._blocked(endpoint, "date_based", self._permission_blocks(endpoint, probe_statuses) or "blocked")
+        if not dates:
+            return {
+                "endpoint": endpoint,
+                "category": "date_based",
+                "status": "skipped",
+                "planned_jobs": 0,
+                "executed_jobs": 0,
+                "skipped_jobs": 0,
+                "record_count": 0,
+                "raw_event_count": 0,
+                "snapshot_id": None,
+                "notes": "no explicit period dates in bounded window",
+            }
         plan = BackfillPlanner(self.root, self.catalog).plan_date_backfill(endpoint, dates, max_jobs=max_jobs)
         result = BackfillExecutor(self.root, self.catalog).execute(plan, self.client, validate_latest=True)
         return self._backfill_item(endpoint, "date_based", result)

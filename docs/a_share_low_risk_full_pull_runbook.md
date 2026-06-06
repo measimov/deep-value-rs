@@ -78,3 +78,65 @@ appears in the plan.
 
 After each completed batch, run validation with `--no-record`, inspect backup,
 run restore-check, and run post-batch review before planning the next month.
+
+## Controlled Auto Sync
+
+For a long unattended run, use `mirror-auto-sync`. It is a foreground runner,
+not a scheduler daemon. It splits the requested range into bounded pilot
+windows, writes a checkpoint state file, retries failed windows, refreshes the
+backup after each successful window, and stops before later windows if a window
+exhausts retries.
+
+Set paths and token in the shell:
+
+```bash
+export MIRROR_ROOT=/mnt/gw/TuShare
+export MIRROR_BACKUP=/mnt/gw/TuShare-backup
+export TUSHARE_TOKEN='your-token-here'
+```
+
+Or put `TUSHARE_TOKEN=...` in `.env` at the repository root. The CLI reads it
+but does not print it.
+
+Preview the full 1990-to-current plan without requests or writes:
+
+```bash
+python3 -m tushare_mirror mirror-auto-sync \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope a-share-low-risk \
+  --from-date 19900101 \
+  --to-date latest-trade-date \
+  --window-days 20 \
+  --max-jobs-per-api 20 \
+  --state /mnt/gw/TuShare-auto-sync-state.json \
+  --json
+```
+
+Start the controlled unattended run only after reviewing the plan:
+
+```bash
+python3 -m tushare_mirror mirror-auto-sync \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope a-share-low-risk \
+  --from-date 19900101 \
+  --to-date latest-trade-date \
+  --window-days 20 \
+  --max-jobs-per-api 20 \
+  --state /mnt/gw/TuShare-auto-sync-state.json \
+  --max-attempts 3 \
+  --retry-backoff-seconds 60 \
+  --execute \
+  --confirm-auto-sync \
+  --json
+```
+
+`max-jobs-per-api` caps jobs per endpoint per window. Keep it at `20`; widen
+coverage by using more windows, not by raising this guardrail. Re-run the same
+command after interruption to resume from `next_start_date` in the state file.
+
+This is still not full mirror automation: disabled and plan-only endpoints
+remain excluded, no stock loops are executed, no minute/tick/order or PIT
+financial endpoints are enabled, and no scheduler, remote backup, restore-into,
+compaction executor, PostgreSQL loader, or parallel execution is introduced.

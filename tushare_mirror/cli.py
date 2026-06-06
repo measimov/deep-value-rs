@@ -33,7 +33,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, ExecuteReadinessReporter, ExecuteScriptReporter, FinalGateReporter, MirrorAuditReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOpsReportReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorPullCommandReporter, MirrorReadinessReporter, MirrorReviewer, MirrorScopeReporter, MirrorStatusReporter, MonthlyPromotionChecklistReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, TokenHygieneScanner, init_catalog_if_requested
+from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, ExecuteReadinessReporter, ExecuteScriptReporter, FinalGateReporter, MirrorAuditReporter, MirrorAutoSyncReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOpsReportReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorPullCommandReporter, MirrorReadinessReporter, MirrorReviewer, MirrorScopeReporter, MirrorStatusReporter, MonthlyPromotionChecklistReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, TokenHygieneScanner, init_catalog_if_requested
 from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
@@ -971,6 +971,38 @@ def cmd_mirror_pull_command(args) -> int:
         _print_json(result.to_dict())
     else:
         _print_key_values(result.summary())
+    return 1 if result.status == "blocked" else 0
+
+
+def cmd_mirror_auto_sync(args) -> int:
+    client = TushareClient(require_token()) if args.execute else None
+    try:
+        result = MirrorAutoSyncReporter().create(
+            root=args.mirror_root_arg,
+            backup=args.backup,
+            scope=args.scope,
+            from_date=args.from_date,
+            to_date=args.to_date,
+            window_days=args.window_days,
+            max_jobs_per_api=args.max_jobs_per_api,
+            state=args.state,
+            execute=args.execute,
+            confirm_auto_sync=args.confirm_auto_sync,
+            max_attempts=args.max_attempts,
+            retry_backoff_seconds=args.retry_backoff_seconds,
+            client=client,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
+        if result.windows:
+            _print_table(
+                result.windows,
+                ["start_date", "end_date", "status", "attempts", "mirror_run_status", "run_id"],
+            )
     return 1 if result.status == "blocked" else 0
 
 
@@ -1934,6 +1966,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--overwrite', action='store_true')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_pull_command)
+
+    p = sub.add_parser('mirror-auto-sync', description='Controlled foreground auto-sync runner with bounded windows, checkpoint state, and retries. Dry-run by default; execute requires --execute --confirm-auto-sync and TUSHARE_TOKEN.')
+    p.add_argument('--root', dest='mirror_root_arg', required=True)
+    p.add_argument('--backup', required=True)
+    p.add_argument('--scope', default='a-share-low-risk')
+    p.add_argument('--from-date', required=True)
+    p.add_argument('--to-date', default='latest-trade-date')
+    p.add_argument('--window-days', type=int, default=20)
+    p.add_argument('--max-jobs-per-api', type=int, default=20)
+    p.add_argument('--state')
+    p.add_argument('--max-attempts', type=int, default=3)
+    p.add_argument('--retry-backoff-seconds', type=int, default=60)
+    p.add_argument('--execute', action='store_true')
+    p.add_argument('--confirm-auto-sync', action='store_true')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_auto_sync)
 
     p = sub.add_parser('schema-status', description='Read-only schema drift and quarantine status report; does not make real requests or write catalog state.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
