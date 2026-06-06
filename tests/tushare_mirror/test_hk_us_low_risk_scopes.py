@@ -36,24 +36,24 @@ class HKUSLowRiskScopeTests(unittest.TestCase):
         self.assertEqual(payload["report_version"], "mirror-scope/v1")
         self.assertEqual(payload["scope"], "hk-low-risk")
         self.assertIn("hk_basic", payload["endpoints_in_scope"])
-        self.assertIn("hk_daily_adj", payload["plan_only"])
+        self.assertIn("hk_daily_adj", payload["executable_now"])
         self.assertIn("hk_mins", payload["disabled"])
         self.assertIn("rt_hk_k", payload["disabled"])
+        self.assertIn("hk_income", payload["plan_only"])
         self.assertEqual(payload["real_probe_status"]["hk_daily_adj"], "passed")
         self.assertEqual(payload["pagination_strategy"]["hk_daily_adj"], "offset_limit")
-        self.assertIn("hk_daily_adj", payload["missing_metadata"])
-        self.assertEqual(payload["executable_now"], [])
+        self.assertEqual(payload["missing_metadata"], [])
 
     def test_us_scope_exists_and_is_read_only(self):
         payload = MirrorScopeReporter().report(scope="us-low-risk").to_dict()
         self.assertEqual(payload["scope"], "us-low-risk")
         self.assertIn("us_basic", payload["endpoints_in_scope"])
-        self.assertIn("us_daily_adj", payload["plan_only"])
+        self.assertIn("us_daily_adj", payload["executable_now"])
         self.assertIn("us_income", payload["plan_only"])
         self.assertNotIn("us_income", payload["executable_now"])
         self.assertEqual(payload["real_probe_status"]["us_daily"], "passed")
         self.assertEqual(payload["pagination_strategy"]["us_daily"], "offset_limit")
-        self.assertIn("us_daily", payload["missing_metadata"])
+        self.assertEqual(payload["missing_metadata"], [])
 
     def test_global_scope_is_explicit_composition(self):
         payload = MirrorScopeReporter().report(scope="global-equity-low-risk").to_dict()
@@ -63,10 +63,12 @@ class HKUSLowRiskScopeTests(unittest.TestCase):
         self.assertIn("hk_daily", payload["child_scopes"]["hk-low-risk"]["endpoints_in_scope"])
         self.assertIn("us_daily", payload["child_scopes"]["us-low-risk"]["endpoints_in_scope"])
         self.assertIn("daily", payload["executable_now"])
+        self.assertIn("hk_daily", payload["executable_now"])
+        self.assertIn("us_daily", payload["executable_now"])
         self.assertNotIn("hk_mins", payload["executable_now"])
         self.assertNotIn("us_income", payload["executable_now"])
-        self.assertIn("hk_daily", payload["plan_only"])
-        self.assertIn("us_daily", payload["plan_only"])
+        self.assertIn("hk_income", payload["plan_only"])
+        self.assertIn("us_income", payload["plan_only"])
 
     def test_cli_json_contract_is_stable_for_new_scopes(self):
         for scope in ["hk-low-risk", "us-low-risk", "global-equity-low-risk"]:
@@ -106,4 +108,3 @@ class HKUSLowRiskScopeTests(unittest.TestCase):
         self.assertIn("stock_company", payload["executable_now"])
         self.assertIn("top10_holders", payload["disabled"])
         self.assertEqual(payload["missing_metadata"], [])
-

@@ -1449,7 +1449,7 @@ class MirrorScopeReporter:
             excluded_high_risk_patterns=PROHIBITED_SCOPE_ENDPOINT_PATTERNS,
             warnings=[
                 "mirror-scope is read-only and does not fetch, backfill, or write catalog state",
-                "HK/US executable candidates remain plan-only until endpoint configs and fake tests are added",
+                "HK/US executable configs are present; bounded planners, fake tests, and report integration are completed in later phases",
             ],
             real_probe_status=real_probe_status,
             pagination_strategy=pagination_strategy,

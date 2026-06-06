@@ -1,0 +1,138 @@
+endpoints:
+  - api_name: hk_mins
+    family: hk_market_data
+    market: hk
+    domain: stock
+    endpoint_kind: minute_bar
+    planner_kind: bucketed_intraday
+    execution_status: disabled
+    reason_disabled: "HK minute bars are intraday data and outside the low-risk historical mirror goal"
+    required_infra:
+      - intraday bucket planner
+      - storage estimate
+      - compaction policy
+      - explicit future execution goal
+    risk_level: high
+    doc_url: "https://tushare.pro/document/2?doc_id=304"
+    notes: "Inventory only. No HK minute execution in this goal."
+
+  - api_name: rt_hk_k
+    family: hk_realtime
+    market: hk
+    domain: stock
+    endpoint_kind: realtime
+    planner_kind: realtime_poll
+    execution_status: disabled
+    reason_disabled: "HK realtime daily K-line is realtime data and outside the low-risk historical mirror goal"
+    required_infra:
+      - realtime polling policy
+      - retention and rate policy
+      - explicit future execution goal
+    risk_level: high
+    doc_url: "https://tushare.pro/document/2?doc_id=383"
+    notes: "Inventory only. No realtime execution in this goal."
+
+  - api_name: hk_income
+    family: hk_financial
+    market: hk
+    domain: financial
+    endpoint_kind: financial_statement
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "HK financial statements require PIT-safe disclosure-date execution infrastructure"
+    required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
+    risk_level: high
+    doc_url: "https://tushare.pro/document/2?doc_id=389"
+    notes: "Plan-only inventory. Execution remains blocked."
+
+  - api_name: hk_balancesheet
+    family: hk_financial
+    market: hk
+    domain: financial
+    endpoint_kind: financial_statement
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "HK financial statements require PIT-safe disclosure-date execution infrastructure"
+    required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
+    risk_level: high
+    doc_url: "https://tushare.pro/document/2?doc_id=390"
+    notes: "Plan-only inventory. Execution remains blocked."
+
+  - api_name: hk_cashflow
+    family: hk_financial
+    market: hk
+    domain: financial
+    endpoint_kind: financial_statement
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "HK financial statements require PIT-safe disclosure-date execution infrastructure"
+    required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
+    risk_level: high
+    doc_url: "https://tushare.pro/document/2?doc_id=391"
+    notes: "Plan-only inventory. Execution remains blocked."
+
+  - api_name: hk_fina_indicator
+    family: hk_financial
+    market: hk
+    domain: financial
+    endpoint_kind: financial_indicator
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "HK financial indicators require PIT-safe disclosure-date execution infrastructure"
+    required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
+    risk_level: high
+    doc_url: "https://tushare.pro/document/2?doc_id=388"
+    notes: "Plan-only inventory. Execution remains blocked."
+
+  - api_name: us_income
+    family: us_financial
+    market: us
+    domain: financial
+    endpoint_kind: financial_statement
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "US financial statements require PIT-safe disclosure-date execution infrastructure"
+    required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
+    risk_level: high
+    doc_url: "https://tushare.pro/document/2?doc_id=394"
+    notes: "Plan-only inventory. Execution remains blocked."
+
+  - api_name: us_balancesheet
+    family: us_financial
+    market: us
+    domain: financial
+    endpoint_kind: financial_statement
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "US financial statements require PIT-safe disclosure-date execution infrastructure"
+    required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
+    risk_level: high
+    doc_url: "https://tushare.pro/document/2?doc_id=395"
+    notes: "Plan-only inventory. Execution remains blocked."
+
+  - api_name: us_cashflow
+    family: us_financial
+    market: us
+    domain: financial
+    endpoint_kind: financial_statement
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "US financial statements require PIT-safe disclosure-date execution infrastructure"
+    required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
+    risk_level: high
+    doc_url: "https://tushare.pro/document/2?doc_id=396"
+    notes: "Plan-only inventory. Execution remains blocked."
+
+  - api_name: us_fina_indicator
+    family: us_financial
+    market: us
+    domain: financial
+    endpoint_kind: financial_indicator
+    planner_kind: code_period_matrix
+    execution_status: disabled
+    reason_disabled: "US financial indicators require PIT-safe disclosure-date execution infrastructure"
+    required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
+    risk_level: high
+    doc_url: "https://tushare.pro/document/2?doc_id=393"
+    notes: "Plan-only inventory. Execution remains blocked."
+

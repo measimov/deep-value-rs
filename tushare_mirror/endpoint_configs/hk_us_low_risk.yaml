@@ -1,0 +1,324 @@
+endpoints:
+  - api_name: hk_basic
+    family: hk_reference
+    market: hk
+    domain: stock
+    permission_class: hk_basic
+    volume_class: S0_STATIC
+    endpoint_kind: hk_us
+    planner_kind: single_snapshot
+    execution_status: enabled
+    partition_template: snapshot_date
+    primary_date_field: null
+    supported_params: [ts_code, list_status]
+    default_params:
+      list_status: L
+    default_fields: [ts_code, name, fullname, enname, cn_spell, market, list_status, list_date, delist_date, trade_unit, isin, curr_type]
+    probe:
+      params:
+        list_status: L
+      fields: [ts_code, name, list_status, list_date]
+      allow_empty_probe: false
+    pagination_mode: none
+    risk_level: low
+    required_infra:
+      - single snapshot fetch
+      - fake fixture validation
+      - HK/US source probe contract
+    doc_url: "https://tushare.pro/document/2?doc_id=191"
+    real_probe_status: passed
+    notes: "HK reference snapshot. Real bounded probe returned accessible rows without requiring pagination."
+    enabled: true
+
+  - api_name: hk_tradecal
+    family: hk_calendar
+    market: hk
+    domain: calendar
+    permission_class: hk_basic
+    volume_class: D0_CALENDAR
+    endpoint_kind: calendar
+    planner_kind: date_backfill
+    execution_status: enabled
+    partition_template: year_month
+    primary_date_field: cal_date
+    supported_params: [start_date, end_date, is_open]
+    default_fields: [cal_date, is_open, pretrade_date]
+    probe:
+      params:
+        start_date: "20250101"
+        end_date: "20250110"
+        is_open: "1"
+      fields: [cal_date, is_open, pretrade_date]
+      allow_empty_probe: false
+    pagination_mode: none
+    date_strategy: explicit_dates
+    risk_level: low
+    required_infra:
+      - date range planner
+      - HK calendar dependency wiring
+      - fake fixture validation
+    doc_url: "https://tushare.pro/document/2?doc_id=250"
+    real_probe_status: passed
+    notes: "HK trade calendar has no documented exchange parameter; do not pass SSE."
+    enabled: true
+
+  - api_name: hk_daily
+    family: hk_market_data
+    market: hk
+    domain: stock
+    permission_class: hk_daily
+    volume_class: D1_DAILY_NARROW
+    endpoint_kind: hk_us
+    planner_kind: calendar_backfill
+    execution_status: enabled
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params: [ts_code, trade_date, start_date, end_date]
+    default_fields: [ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount]
+    probe:
+      params:
+        ts_code: 00001.HK
+        start_date: "20250102"
+        end_date: "20250102"
+      fields: [ts_code, trade_date, open, close, vol, amount]
+      allow_empty_probe: false
+    pagination_mode: none
+    date_strategy: local_hk_tradecal
+    risk_level: medium
+    required_infra:
+      - HK trade calendar planner
+      - no natural-day fallback
+      - fake fixture validation
+    doc_url: "https://tushare.pro/document/2?doc_id=192"
+    real_probe_status: passed
+    notes: "Daily-like HK endpoint. Use local hk_tradecal for scoped mirror planning."
+    enabled: true
+
+  - api_name: hk_daily_adj
+    family: hk_market_data
+    market: hk
+    domain: stock
+    permission_class: hk_daily
+    volume_class: D1_DAILY_NARROW
+    endpoint_kind: hk_us
+    planner_kind: calendar_backfill
+    execution_status: enabled
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params: [ts_code, trade_date, start_date, end_date, offset, limit]
+    default_fields: [ts_code, trade_date, close, open, high, low, pre_close, change, pct_change, vol, amount, vwap, adj_factor, turnover_ratio, free_share, total_share, free_mv, total_mv]
+    probe:
+      params:
+        trade_date: "20250102"
+        offset: 0
+        limit: 2
+      fields: [ts_code, trade_date, close, adj_factor, total_mv]
+      allow_empty_probe: false
+    page_size: 6000
+    pagination_mode: offset
+    date_strategy: local_hk_tradecal
+    risk_level: medium
+    required_infra:
+      - HK trade calendar planner
+      - offset pagination
+      - fake fixture validation
+    doc_url: "https://tushare.pro/document/2?doc_id=339"
+    real_probe_status: passed
+    notes: "Docs omit offset/limit in the input table, but bounded real probe confirmed offset pagination."
+    enabled: true
+
+  - api_name: hk_adjfactor
+    family: hk_market_data
+    market: hk
+    domain: stock
+    permission_class: hk_daily
+    volume_class: D1_DAILY_NARROW
+    endpoint_kind: hk_us
+    planner_kind: calendar_backfill
+    execution_status: enabled
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params: [ts_code, trade_date, start_date, end_date]
+    default_fields: [ts_code, trade_date, cum_adjfactor, close_price]
+    probe:
+      params:
+        ts_code: 00001.HK
+        start_date: "20250102"
+        end_date: "20250102"
+      fields: [ts_code, trade_date, cum_adjfactor, close_price]
+      allow_empty_probe: false
+    pagination_mode: none
+    date_strategy: local_hk_tradecal
+    risk_level: medium
+    required_infra:
+      - HK trade calendar planner
+      - fake fixture validation
+    doc_url: "https://tushare.pro/document/2?doc_id=401"
+    real_probe_status: passed
+    notes: "Discovered in current HK docs; daily-like adjustment factor endpoint."
+    enabled: true
+
+  - api_name: us_basic
+    family: us_reference
+    market: us
+    domain: stock
+    permission_class: us_basic
+    volume_class: S0_STATIC
+    endpoint_kind: hk_us
+    planner_kind: single_snapshot
+    execution_status: enabled
+    partition_template: snapshot_date
+    primary_date_field: null
+    supported_params: [ts_code, classify, offset, limit]
+    default_params:
+      classify: EQ
+    default_fields: [ts_code, name, enname, classify, list_date, delist_date]
+    probe:
+      params:
+        classify: EQ
+        offset: 0
+        limit: 2
+      fields: [ts_code, name, enname, classify, list_date, delist_date]
+      allow_empty_probe: false
+    page_size: 6000
+    pagination_mode: offset
+    risk_level: low
+    required_infra:
+      - single snapshot fetch
+      - offset pagination
+      - fake fixture validation
+    doc_url: "https://tushare.pro/document/2?doc_id=252"
+    real_probe_status: passed
+    notes: "US reference snapshot with documented offset/limit pagination."
+    enabled: true
+
+  - api_name: us_tradecal
+    family: us_calendar
+    market: us
+    domain: calendar
+    permission_class: us_basic
+    volume_class: D0_CALENDAR
+    endpoint_kind: calendar
+    planner_kind: date_backfill
+    execution_status: enabled
+    partition_template: year_month
+    primary_date_field: cal_date
+    supported_params: [start_date, end_date, is_open]
+    default_fields: [cal_date, is_open, pretrade_date]
+    probe:
+      params:
+        start_date: "20250101"
+        end_date: "20250110"
+        is_open: "1"
+      fields: [cal_date, is_open, pretrade_date]
+      allow_empty_probe: false
+    pagination_mode: none
+    date_strategy: explicit_dates
+    risk_level: low
+    required_infra:
+      - date range planner
+      - US calendar dependency wiring
+      - fake fixture validation
+    doc_url: "https://tushare.pro/document/2?doc_id=253"
+    real_probe_status: passed
+    notes: "US trade calendar has no documented exchange parameter; do not pass SSE."
+    enabled: true
+
+  - api_name: us_daily
+    family: us_market_data
+    market: us
+    domain: stock
+    permission_class: us_daily
+    volume_class: D1_DAILY_NARROW
+    endpoint_kind: hk_us
+    planner_kind: calendar_backfill
+    execution_status: enabled
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params: [ts_code, trade_date, start_date, end_date, offset, limit]
+    default_fields: [ts_code, trade_date, close, open, high, low, pre_close, change, pct_change, vol, amount, vwap, turnover_ratio, total_mv, pe, pb]
+    probe:
+      params:
+        trade_date: "20250102"
+        offset: 0
+        limit: 2
+      fields: [ts_code, trade_date, close, open, vol, amount, vwap]
+      allow_empty_probe: false
+    page_size: 6000
+    pagination_mode: offset
+    date_strategy: local_us_tradecal
+    risk_level: medium
+    required_infra:
+      - US trade calendar planner
+      - offset pagination
+      - fake fixture validation
+    doc_url: "https://tushare.pro/document/2?doc_id=254"
+    real_probe_status: passed
+    notes: "Docs omit offset/limit in the input table, but bounded real probe confirmed offset pagination."
+    enabled: true
+
+  - api_name: us_daily_adj
+    family: us_market_data
+    market: us
+    domain: stock
+    permission_class: us_daily
+    volume_class: D1_DAILY_NARROW
+    endpoint_kind: hk_us
+    planner_kind: calendar_backfill
+    execution_status: enabled
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params: [ts_code, trade_date, start_date, end_date, exchange, offset, limit]
+    default_fields: [ts_code, trade_date, close, open, high, low, pre_close, change, pct_change, vol, amount, vwap, adj_factor, turnover_ratio, free_share, total_share, free_mv, total_mv, exchange]
+    probe:
+      params:
+        trade_date: "20250102"
+        exchange: NAS
+        offset: 0
+        limit: 2
+      fields: [ts_code, trade_date, close, adj_factor, exchange]
+      allow_empty_probe: false
+    page_size: 8000
+    pagination_mode: offset
+    date_strategy: local_us_tradecal
+    risk_level: medium
+    required_infra:
+      - US trade calendar planner
+      - offset pagination
+      - fake fixture validation
+    doc_url: "https://tushare.pro/document/2?doc_id=338"
+    real_probe_status: passed
+    notes: "US adjusted daily endpoint with documented offset/limit and exchange params."
+    enabled: true
+
+  - api_name: us_adjfactor
+    family: us_market_data
+    market: us
+    domain: stock
+    permission_class: us_daily
+    volume_class: D1_DAILY_NARROW
+    endpoint_kind: hk_us
+    planner_kind: calendar_backfill
+    execution_status: enabled
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params: [ts_code, trade_date, start_date, end_date]
+    default_fields: [ts_code, trade_date, exchange, cum_adjfactor, close_price]
+    probe:
+      params:
+        ts_code: AAPL
+        start_date: "20250102"
+        end_date: "20250102"
+      fields: [ts_code, trade_date, exchange, cum_adjfactor, close_price]
+      allow_empty_probe: false
+    pagination_mode: none
+    date_strategy: local_us_tradecal
+    risk_level: medium
+    required_infra:
+      - US trade calendar planner
+      - fake fixture validation
+    doc_url: "https://tushare.pro/document/2?doc_id=402"
+    real_probe_status: passed
+    notes: "US daily-like adjustment factor endpoint."
+    enabled: true
+
