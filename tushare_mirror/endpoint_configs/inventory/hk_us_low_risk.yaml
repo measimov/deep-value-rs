@@ -42,6 +42,23 @@ endpoints:
     reason_disabled: "HK financial statements require PIT-safe disclosure-date execution infrastructure"
     required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
     risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+      - f_ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+        - f_ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "HK financial execution remains disabled until PIT validation is implemented"
     doc_url: "https://tushare.pro/document/2?doc_id=389"
     notes: "Plan-only inventory. Execution remains blocked."
 
@@ -55,6 +72,23 @@ endpoints:
     reason_disabled: "HK financial statements require PIT-safe disclosure-date execution infrastructure"
     required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
     risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+      - f_ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+        - f_ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "HK financial execution remains disabled until PIT validation is implemented"
     doc_url: "https://tushare.pro/document/2?doc_id=390"
     notes: "Plan-only inventory. Execution remains blocked."
 
@@ -68,6 +102,23 @@ endpoints:
     reason_disabled: "HK financial statements require PIT-safe disclosure-date execution infrastructure"
     required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
     risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+      - f_ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+        - f_ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "HK financial execution remains disabled until PIT validation is implemented"
     doc_url: "https://tushare.pro/document/2?doc_id=391"
     notes: "Plan-only inventory. Execution remains blocked."
 
@@ -81,6 +132,21 @@ endpoints:
     reason_disabled: "HK financial indicators require PIT-safe disclosure-date execution infrastructure"
     required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
     risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "HK financial execution remains disabled until PIT validation is implemented"
     doc_url: "https://tushare.pro/document/2?doc_id=388"
     notes: "Plan-only inventory. Execution remains blocked."
 
@@ -94,6 +160,23 @@ endpoints:
     reason_disabled: "US financial statements require PIT-safe disclosure-date execution infrastructure"
     required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
     risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+      - f_ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+        - f_ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "US financial execution remains disabled until PIT validation is implemented"
     doc_url: "https://tushare.pro/document/2?doc_id=394"
     notes: "Plan-only inventory. Execution remains blocked."
 
@@ -107,6 +190,23 @@ endpoints:
     reason_disabled: "US financial statements require PIT-safe disclosure-date execution infrastructure"
     required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
     risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+      - f_ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+        - f_ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "US financial execution remains disabled until PIT validation is implemented"
     doc_url: "https://tushare.pro/document/2?doc_id=395"
     notes: "Plan-only inventory. Execution remains blocked."
 
@@ -120,6 +220,23 @@ endpoints:
     reason_disabled: "US financial statements require PIT-safe disclosure-date execution infrastructure"
     required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
     risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+      - f_ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+        - f_ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "US financial execution remains disabled until PIT validation is implemented"
     doc_url: "https://tushare.pro/document/2?doc_id=396"
     notes: "Plan-only inventory. Execution remains blocked."
 
@@ -133,6 +250,20 @@ endpoints:
     reason_disabled: "US financial indicators require PIT-safe disclosure-date execution infrastructure"
     required_infra: [PIT usable-after derivation, code/period matrix planner, endpoint-specific fake tests, rate-limit policy]
     risk_level: high
+    period_field: period
+    announcement_date_fields:
+      - ann_date
+    usable_after_field: ann_date
+    pit_safety:
+      pit_required: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+      blocked_reason: "US financial execution remains disabled until PIT validation is implemented"
     doc_url: "https://tushare.pro/document/2?doc_id=393"
     notes: "Plan-only inventory. Execution remains blocked."
-

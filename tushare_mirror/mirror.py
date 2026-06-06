@@ -6545,7 +6545,8 @@ class RequestEstimateReporter:
         reference_refresh = sum(by_api.get(api_name, 0) for api_name in reference_refresh_apis_for_scope(scope) if api_name not in calendar_dependencies)
         trade_cal_requests = sum(by_api.get(api_name, 0) for api_name in calendar_dependencies)
         if plan.trade_cal_dependency_status != "covered":
-            warnings.append(f"local market calendar range is {plan.trade_cal_dependency_status}; daily-like estimates may be deferred until calendar is present")
+            dependency_label = "/".join(sorted(calendar_dependencies)) or "market calendar"
+            warnings.append(f"local {dependency_label} range is {plan.trade_cal_dependency_status}; daily-like estimates may be deferred until calendar is present")
             warnings.append("daily-like request counts are deferred until the market calendar is local; natural day fallback is disabled")
         total = sum(by_api.values())
         return self._result(
