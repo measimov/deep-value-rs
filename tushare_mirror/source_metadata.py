@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
@@ -30,6 +30,17 @@ SOURCE_MAP_REQUIRED_FIELDS = {
     "safety_notes",
 }
 RECOMMENDATION_VALUES = {"executable_candidate", "plan_only", "disabled"}
+REAL_PROBE_STATUS_VALUES = {"pending", "passed", "blocked_by_permission", "empty_but_accessible", "not_planned"}
+REAL_PROBE_OBSERVED_REQUIRED_FIELDS = {
+    "observed_at",
+    "artifact_path",
+    "status",
+    "request_count",
+    "row_count",
+    "fields",
+    "pagination_probe_attempted",
+    "pagination_supported",
+}
 HIGH_RISK_HK_US_APIS = {
     "hk_mins",
     "rt_hk_k",
@@ -103,6 +114,19 @@ def validate_hk_us_low_risk_source_map() -> list[str]:
         recommendation = str(endpoint.get("recommendation") or "")
         if recommendation not in RECOMMENDATION_VALUES:
             errors.append(f"{api_name} has unsupported recommendation: {recommendation}")
+        real_probe_status = str(endpoint.get("real_probe_status") or "")
+        if real_probe_status not in REAL_PROBE_STATUS_VALUES:
+            errors.append(f"{api_name} has unsupported real_probe_status: {real_probe_status}")
+        if real_probe_status == "passed":
+            observed = endpoint.get("real_probe_observed")
+            if not isinstance(observed, Mapping):
+                errors.append(f"{api_name} real_probe_observed must be present when real_probe_status is passed")
+            else:
+                observed_missing = sorted(field for field in REAL_PROBE_OBSERVED_REQUIRED_FIELDS if field not in observed)
+                if observed_missing:
+                    errors.append(f"{api_name} real_probe_observed missing: {', '.join(observed_missing)}")
+                if str(observed.get("artifact_path") or "") != "/tmp/tushare-hk-us-low-risk-probe.json":
+                    errors.append(f"{api_name} real_probe_observed artifact_path must be the redacted /tmp probe artifact")
         if api_name in HIGH_RISK_HK_US_APIS and recommendation == "executable_candidate":
             errors.append(f"{api_name} is high-risk for this goal and cannot be executable_candidate")
         if not endpoint.get("documented_params"):
@@ -110,4 +134,3 @@ def validate_hk_us_low_risk_source_map() -> list[str]:
         if not endpoint.get("documented_fields"):
             errors.append(f"{api_name} documented_fields must not be empty")
     return errors
-

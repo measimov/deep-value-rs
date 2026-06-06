@@ -28,6 +28,7 @@ class HKUSLowRiskSourceMapTests(unittest.TestCase):
             "hk_tradecal",
             "hk_daily",
             "hk_daily_adj",
+            "hk_adjfactor",
             "us_basic",
             "us_tradecal",
             "us_daily",
@@ -35,7 +36,9 @@ class HKUSLowRiskSourceMapTests(unittest.TestCase):
             "us_adjfactor",
         ]:
             self.assertEqual(endpoints[api_name]["recommendation"], "executable_candidate")
-            self.assertEqual(endpoints[api_name]["real_probe_status"], "pending")
+            self.assertEqual(endpoints[api_name]["real_probe_status"], "passed")
+            self.assertEqual(endpoints[api_name]["real_probe_observed"]["status"], "accessible")
+            self.assertGreater(endpoints[api_name]["real_probe_observed"]["row_count"], 0)
 
     def test_all_candidate_endpoints_have_doc_urls_and_fields(self):
         endpoints = hk_us_low_risk_source_endpoints()
@@ -56,12 +59,15 @@ class HKUSLowRiskSourceMapTests(unittest.TestCase):
                 joined_notes = " ".join(endpoints[api_name]["safety_notes"])
                 self.assertTrue("outside this goal" in joined_notes or "no execution in this goal" in joined_notes)
 
-    def test_pagination_risks_are_explicit_for_ambiguous_endpoints(self):
+    def test_pagination_findings_are_recorded_for_doc_ambiguous_endpoints(self):
         endpoints = {item["api_name"]: item for item in hk_us_low_risk_source_endpoints()}
         for api_name in ["hk_daily_adj", "us_daily"]:
             with self.subTest(api_name=api_name):
-                self.assertEqual(endpoints[api_name]["recommended_pagination_strategy"], "unknown_until_probe")
+                self.assertEqual(endpoints[api_name]["recommended_pagination_strategy"], "offset_limit")
                 self.assertTrue(endpoints[api_name]["missing_metadata"])
+                observed = endpoints[api_name]["real_probe_observed"]
+                self.assertTrue(observed["pagination_probe_attempted"])
+                self.assertTrue(observed["pagination_supported"])
 
     def test_source_map_json_is_stable_and_contains_no_token_plaintext(self):
         payload = json.loads(hk_us_low_risk_source_map_json())

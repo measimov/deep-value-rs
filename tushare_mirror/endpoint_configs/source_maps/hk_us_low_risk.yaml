@@ -19,7 +19,16 @@ endpoints:
     recommended_planner_kind: single_snapshot
     recommended_partition_template: snapshot_date
     recommendation: executable_candidate
-    real_probe_status: pending
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-06T18:25:57Z"
+      artifact_path: "/tmp/tushare-hk-us-low-risk-probe.json"
+      status: accessible
+      request_count: 1
+      row_count: 2743
+      fields: [ts_code, name, list_status, list_date]
+      pagination_probe_attempted: false
+      pagination_supported: false
     missing_metadata: []
     safety_notes:
       - "snapshot endpoint; no stock loop needed"
@@ -38,7 +47,16 @@ endpoints:
     recommended_planner_kind: date_backfill
     recommended_partition_template: year_month
     recommendation: executable_candidate
-    real_probe_status: pending
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-06T18:25:57Z"
+      artifact_path: "/tmp/tushare-hk-us-low-risk-probe.json"
+      status: accessible
+      request_count: 1
+      row_count: 7
+      fields: [cal_date, is_open, pretrade_date]
+      pagination_probe_attempted: false
+      pagination_supported: false
     missing_metadata: []
     safety_notes:
       - "HK calendar dependency; do not pass SSE exchange"
@@ -57,7 +75,16 @@ endpoints:
     recommended_planner_kind: calendar_backfill
     recommended_partition_template: year_month
     recommendation: executable_candidate
-    real_probe_status: pending
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-06T18:25:57Z"
+      artifact_path: "/tmp/tushare-hk-us-low-risk-probe.json"
+      status: accessible
+      request_count: 1
+      row_count: 1
+      fields: [ts_code, trade_date, open, close, vol, amount]
+      pagination_probe_attempted: false
+      pagination_supported: false
     missing_metadata: []
     safety_notes:
       - "daily-like endpoint must use local hk_tradecal; no natural-day fallback"
@@ -72,11 +99,20 @@ endpoints:
     permission_notes: "120 points trial; formal permission required"
     update_cadence: "daily adjusted market data; adjustment factors may refresh historically"
     pagination_hints: "pagination mentioned, but offset/limit params are not listed in the current input table"
-    recommended_pagination_strategy: unknown_until_probe
+    recommended_pagination_strategy: offset_limit
     recommended_planner_kind: calendar_backfill
     recommended_partition_template: year_month
     recommendation: executable_candidate
-    real_probe_status: pending
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-06T18:25:57Z"
+      artifact_path: "/tmp/tushare-hk-us-low-risk-probe.json"
+      status: accessible
+      request_count: 2
+      row_count: 4
+      fields: [ts_code, trade_date, close, adj_factor, total_mv]
+      pagination_probe_attempted: true
+      pagination_supported: true
     missing_metadata:
       - "real probe must determine whether offset/limit are accepted despite not appearing in the documented input table"
     safety_notes:
@@ -96,7 +132,16 @@ endpoints:
     recommended_planner_kind: calendar_backfill
     recommended_partition_template: year_month
     recommendation: executable_candidate
-    real_probe_status: pending
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-06T18:25:57Z"
+      artifact_path: "/tmp/tushare-hk-us-low-risk-probe.json"
+      status: accessible
+      request_count: 1
+      row_count: 1
+      fields: [ts_code, trade_date, cum_adjfactor, close_price]
+      pagination_probe_attempted: false
+      pagination_supported: false
     missing_metadata:
       - "discovered from current HK documentation menu; not in the original initial candidate list"
     safety_notes:
@@ -116,7 +161,16 @@ endpoints:
     recommended_planner_kind: single_snapshot
     recommended_partition_template: snapshot_date
     recommendation: executable_candidate
-    real_probe_status: pending
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-06T18:25:57Z"
+      artifact_path: "/tmp/tushare-hk-us-low-risk-probe.json"
+      status: accessible
+      request_count: 2
+      row_count: 4
+      fields: [ts_code, name, enname, classify, list_date, delist_date]
+      pagination_probe_attempted: true
+      pagination_supported: true
     missing_metadata: []
     safety_notes:
       - "snapshot endpoint; pagination must be characterized before enablement"
@@ -135,7 +189,16 @@ endpoints:
     recommended_planner_kind: date_backfill
     recommended_partition_template: year_month
     recommendation: executable_candidate
-    real_probe_status: pending
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-06T18:25:57Z"
+      artifact_path: "/tmp/tushare-hk-us-low-risk-probe.json"
+      status: accessible
+      request_count: 1
+      row_count: 6
+      fields: [cal_date, is_open, pretrade_date]
+      pagination_probe_attempted: false
+      pagination_supported: false
     missing_metadata: []
     safety_notes:
       - "US calendar dependency; do not pass SSE exchange"
@@ -150,11 +213,20 @@ endpoints:
     permission_notes: "120 points trial; formal permission required"
     update_cadence: "daily market data"
     pagination_hints: "pagination mentioned for formal permission, but offset/limit params are not listed in the input table"
-    recommended_pagination_strategy: unknown_until_probe
+    recommended_pagination_strategy: offset_limit
     recommended_planner_kind: calendar_backfill
     recommended_partition_template: year_month
     recommendation: executable_candidate
-    real_probe_status: pending
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-06T18:25:57Z"
+      artifact_path: "/tmp/tushare-hk-us-low-risk-probe.json"
+      status: accessible
+      request_count: 2
+      row_count: 3
+      fields: [ts_code, trade_date, close, open, vol, amount, vwap]
+      pagination_probe_attempted: true
+      pagination_supported: true
     missing_metadata:
       - "real probe must characterize whether date windows alone are complete or whether hidden offset/limit is accepted"
     safety_notes:
@@ -174,7 +246,16 @@ endpoints:
     recommended_planner_kind: calendar_backfill
     recommended_partition_template: year_month
     recommendation: executable_candidate
-    real_probe_status: pending
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-06T18:25:57Z"
+      artifact_path: "/tmp/tushare-hk-us-low-risk-probe.json"
+      status: accessible
+      request_count: 2
+      row_count: 4
+      fields: [ts_code, trade_date, close, adj_factor, exchange]
+      pagination_probe_attempted: true
+      pagination_supported: true
     missing_metadata: []
     safety_notes:
       - "exchange parameter must be treated as US endpoint-specific, not calendar exchange"
@@ -193,7 +274,16 @@ endpoints:
     recommended_planner_kind: calendar_backfill
     recommended_partition_template: year_month
     recommendation: executable_candidate
-    real_probe_status: pending
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-06T18:25:57Z"
+      artifact_path: "/tmp/tushare-hk-us-low-risk-probe.json"
+      status: accessible
+      request_count: 1
+      row_count: 1
+      fields: [ts_code, trade_date, exchange, cum_adjfactor, close_price]
+      pagination_probe_attempted: false
+      pagination_supported: false
     missing_metadata: []
     safety_notes:
       - "daily-like endpoint must use local us_tradecal; no natural-day fallback"
@@ -387,4 +477,3 @@ endpoints:
     missing_metadata: []
     safety_notes:
       - "financial/PIT boundary; no execution in this goal"
-

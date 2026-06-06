@@ -55,3 +55,28 @@ Pagination risks that must be resolved by bounded probes before enablement:
 - `us_daily`: docs mention formal-permission pagination, but the current input
   table does not list `offset`/`limit`.
 
+## Bounded Probe Findings
+
+The bounded probe was run on 2026-06-06T18:25:57Z and wrote the redacted
+diagnostic artifact to `/tmp/tushare-hk-us-low-risk-probe.json`. The artifact is
+not committed.
+
+All executable candidates returned accessible responses and
+`token_plaintext_found=false`.
+
+Observed row counts:
+
+- `hk_basic`: 2743 rows, 1 request.
+- `hk_tradecal`: 7 rows, 1 request.
+- `hk_daily`: 1 row, 1 request.
+- `hk_daily_adj`: 4 rows, 2 requests; offset/limit pagination observed.
+- `hk_adjfactor`: 1 row, 1 request.
+- `us_basic`: 4 rows, 2 requests; offset/limit pagination observed.
+- `us_tradecal`: 6 rows, 1 request.
+- `us_daily`: 3 rows, 2 requests; offset/limit pagination observed.
+- `us_daily_adj`: 4 rows, 2 requests; offset/limit pagination observed.
+- `us_adjfactor`: 1 row, 1 request.
+
+This probe is an interface characterization only. It is not a full HK/US pull,
+does not write to the durable mirror, and does not by itself authorize
+mirror-run execution.
