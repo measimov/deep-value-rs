@@ -1348,6 +1348,47 @@ def reference_refresh_apis_for_scope(scope: str) -> list[str]:
     return ["stock_basic", "hs_const"]
 
 
+def calendar_api_for_scope(scope: str) -> str:
+    ensure_mirror_scope(scope)
+    if scope in HK_US_SCOPE_MARKETS:
+        return HK_US_CALENDAR_API_BY_SCOPE[scope]
+    return "trade_cal"
+
+
+def calendar_exchange_for_scope(scope: str, requested: str = "SSE") -> str:
+    ensure_mirror_scope(scope)
+    if scope in HK_US_SCOPE_MARKETS:
+        return HK_US_CALENDAR_EXCHANGE_BY_SCOPE[scope]
+    return requested.upper()
+
+
+def calendar_dependency_apis_for_scope(scope: str) -> list[str]:
+    ensure_mirror_scope(scope)
+    if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+        return [calendar_api_for_scope(child) for child in GLOBAL_EQUITY_CHILD_SCOPES]
+    return [calendar_api_for_scope(scope)]
+
+
+def calendar_exchange_for_api(api_name: str, requested: str = "SSE") -> str:
+    if api_name.startswith("hk_"):
+        return "HKEX"
+    if api_name.startswith("us_"):
+        return "NASDAQ"
+    return requested.upper()
+
+
+def calendar_api_for_api(api_name: str) -> str:
+    if api_name.startswith("hk_"):
+        return "hk_tradecal"
+    if api_name.startswith("us_"):
+        return "us_tradecal"
+    return "trade_cal"
+
+
+def scope_has_periodic_apis(scope: str) -> bool:
+    return scope in {"low-risk-a-share", "a-share-low-risk", GLOBAL_EQUITY_LOW_RISK_SCOPE}
+
+
 def _hk_us_source_endpoints_for_scope(scope: str) -> list[dict[str, Any]]:
     market = HK_US_SCOPE_MARKETS[scope]
     return [item for item in hk_us_low_risk_source_endpoints() if item.get("market") == market]
@@ -1994,7 +2035,7 @@ class MirrorReviewer:
                     start_date=start_date,
                     end_date=end_date,
                     trading_days_only=True,
-                    calendar_exchange=calendar_exchange,
+                    calendar_exchange=calendar_exchange_for_api(api, calendar_exchange),
                 )
                 data = report.to_dict()
                 data.pop("items", None)
@@ -2060,6 +2101,8 @@ class MirrorReadinessReporter:
     def _checks(self, review: MirrorReviewResult, root: Path, backup: Path, scope: str) -> dict[str, Any]:
         endpoint_status = {row["endpoint"]: row for row in review.endpoint_summary}
         required_coverage_apis = set(DAILY_LIKE_MIRROR_APIS) if scope == "a-share-low-risk" else set(daily_like_apis_for_scope(scope))
+        required_calendar_apis = calendar_dependency_apis_for_scope(scope)
+        calendar_latest_passed = all((endpoint_status.get(api_name) or {}).get("status") == "current" for api_name in required_calendar_apis)
         required_coverage_rows = [row for row in review.coverage_summary if row.get("api_name") in required_coverage_apis]
         coverage_complete = bool(required_coverage_rows) and all(
             int(row.get("total_dates") or 0) > 0
@@ -2088,8 +2131,8 @@ class MirrorReadinessReporter:
             },
             "trade_cal_latest_exists": {
                 "required": True,
-                "passed": (endpoint_status.get("trade_cal") or {}).get("status") == "current",
-                "message": "trade_cal latest snapshot is missing",
+                "passed": calendar_latest_passed,
+                "message": f"calendar latest snapshot is missing: {', '.join(required_calendar_apis)}",
             },
             "backup_exists": {
                 "required": True,
@@ -2160,7 +2203,7 @@ class MirrorStatusReporter:
             calendar_exchange="SSE",
         )
         readiness = MirrorReadinessReporter().report(root=root, backup=backup, scope=scope)
-        api_infra = ApiInfrastructureReadinessReporter().report()
+        api_infra = ApiInfrastructureReadinessReporter().report(scope=scope if scope in {"low-risk-a-share", "a-share-low-risk", HK_LOW_RISK_SCOPE, US_LOW_RISK_SCOPE, GLOBAL_EQUITY_LOW_RISK_SCOPE} else "all")
         catalog_status = dict(review.catalog_status)
         catalog_status.setdefault("present", review.root_status == "existing_catalog")
         backup_status = self._backup_status(review)
@@ -2496,11 +2539,14 @@ class MirrorNextBatchReporter:
     def _month_status(self, root: Path, catalog: CatalogStore, scope: str, month: str) -> dict[str, Any]:
         start, end = self._month_range(month)
         planner = MirrorBatchPlanner(root, catalog)
-        calendar = planner._calendar_range(start, end, "SSE")
+        calendar_api = calendar_api_for_scope(scope)
+        calendar_exchange = calendar_exchange_for_scope(scope)
+        calendar = planner._calendar_range(start, end, calendar_exchange, calendar_api=calendar_api)
         calendar_summary = {
             "start_date": start,
             "end_date": end,
-            "exchange": "SSE",
+            "exchange": calendar_exchange,
+            "calendar_api": calendar_api,
             "status": calendar.get("status"),
             "missing_calendar_dates": calendar.get("missing_calendar_dates") or [],
             "trading_dates": calendar.get("open_dates") or [],
@@ -2514,7 +2560,7 @@ class MirrorNextBatchReporter:
                 start_date=start,
                 end_date=end,
                 trading_days_only=True,
-                calendar_exchange="SSE",
+                calendar_exchange=calendar_exchange_for_api(api_name),
             )
             data = report.to_dict()
             data.pop("items", None)
@@ -2550,7 +2596,7 @@ class MirrorNextBatchReporter:
                 scope=scope,
                 start_date=start,
                 end_date=end,
-                calendar_exchange="SSE",
+                calendar_exchange=calendar_exchange_for_scope(scope),
                 max_jobs_per_api=self.RECOMMENDED_MAX_JOBS_PER_API,
             )
             return plan.estimated_request_count
@@ -3985,7 +4031,7 @@ class MirrorOperatorChecklistReporter:
                 scope=scope,
                 start_date=start_date,
                 end_date=end_date,
-                calendar_exchange="SSE",
+                calendar_exchange=calendar_exchange_for_scope(scope),
                 max_jobs_per_api=self.MAX_JOBS_PER_API,
             )
             return True
@@ -4017,6 +4063,9 @@ class StopPolicyReporter:
     CATEGORIES = {
         "low-risk-a-share",
         "a-share-low-risk",
+        HK_LOW_RISK_SCOPE,
+        US_LOW_RISK_SCOPE,
+        GLOBAL_EQUITY_LOW_RISK_SCOPE,
         "code-loop",
         "financial",
         "object-text",
@@ -4680,16 +4729,18 @@ class MonthlyPromotionChecklistReporter:
         plan_available, plan_report, plan_errors = self._next_plan(mirror_root, scope, to_start, to_end)
         checks["next_batch_plan_available"] = {"passed": plan_available, "report": plan_report}
         dependency_stage = self._dependency_stage(plan_report, plan_available)
+        dependency_action = str(dependency_stage.get("dependency_action") or "")
         dependency_plan_present = bool(
             dependency_stage.get("dependency_status") == "missing"
-            and dependency_stage.get("dependency_action") == "fetch_trade_cal_first"
+            and dependency_action.startswith("fetch_")
+            and dependency_action.endswith("_first")
             and dependency_stage.get("daily_like_status") == "blocked_until_trade_cal"
             and dependency_stage.get("natural_day_fallback") is False
         )
         if plan_errors:
             hard_blockers.extend(plan_errors)
         elif dependency_plan_present:
-            warnings.append("target trade_cal is missing, but a safe dependency plan is present")
+            warnings.append("target market calendar is missing, but a safe dependency plan is present")
 
         request_estimate = RequestEstimateReporter().report(root=mirror_root, scope=scope, start_date=to_start, end_date=to_end)
         request_risk_ok = request_estimate.risk_level in {"low", "moderate"}
@@ -4780,7 +4831,7 @@ class MonthlyPromotionChecklistReporter:
                 scope=scope,
                 start_date=start_date,
                 end_date=end_date,
-                calendar_exchange="SSE",
+                calendar_exchange=calendar_exchange_for_scope(scope),
                 max_jobs_per_api=MirrorNextBatchReporter.RECOMMENDED_MAX_JOBS_PER_API,
             )
         except Exception as exc:
@@ -4789,7 +4840,8 @@ class MonthlyPromotionChecklistReporter:
         if plan.blocked_endpoints:
             if (
                 plan.dependency_status == "missing"
-                and plan.dependency_action == "fetch_trade_cal_first"
+                and str(plan.dependency_action or "").startswith("fetch_")
+                and str(plan.dependency_action or "").endswith("_first")
                 and plan.daily_like_status == "blocked_until_trade_cal"
                 and plan.natural_day_fallback is False
             ):
@@ -4813,7 +4865,8 @@ class MonthlyPromotionChecklistReporter:
         ready = bool(
             plan_available
             and plan_report.get("dependency_status") == "missing"
-            and plan_report.get("dependency_action") == "fetch_trade_cal_first"
+            and str(plan_report.get("dependency_action") or "").startswith("fetch_")
+            and str(plan_report.get("dependency_action") or "").endswith("_first")
             and plan_report.get("daily_like_status") == "blocked_until_trade_cal"
             and plan_report.get("natural_day_fallback") is False
         )
@@ -4834,7 +4887,7 @@ class MonthlyPromotionChecklistReporter:
         if hard_blockers:
             return "Resolve hard blockers before regenerating or confirming any February command."
         if ready_for_dependency_stage:
-            return "Regenerate verified bundle; user may confirm the bounded February command that first fetches trade_cal and then proceeds under orchestrator control."
+            return "Regenerate verified bundle; user may confirm the bounded command that first fetches the market calendar and then proceeds under orchestrator control."
         if ready:
             return "Review verified bundle, rehearsal, and operator checklist; only then request explicit user confirmation for the bounded February mirror-run --execute command."
         return "Rerun monthly-promotion-checklist after dependency state changes."
@@ -6287,7 +6340,7 @@ class MirrorCoverageMatrixReporter:
         )
 
     def _api_row(self, root: Path, catalog: CatalogStore, api_name: str, start_date: str, end_date: str, warnings: list[str]) -> dict[str, Any]:
-        daily_like = set(DAILY_LIKE_MIRROR_APIS) | set(A_SHARE_LOW_RISK_DAILY_LIKE_APIS)
+        daily_like = set(DAILY_LIKE_MIRROR_APIS) | set(A_SHARE_LOW_RISK_DAILY_LIKE_APIS) | set(HK_LOW_RISK_DAILY_LIKE_APIS) | set(US_LOW_RISK_DAILY_LIKE_APIS)
         coverage_class = "daily_like" if api_name in daily_like else "weekly_monthly"
         try:
             if api_name in daily_like:
@@ -6296,7 +6349,7 @@ class MirrorCoverageMatrixReporter:
                     start_date=start_date,
                     end_date=end_date,
                     trading_days_only=True,
-                    calendar_exchange="SSE",
+                    calendar_exchange=calendar_exchange_for_api(api_name),
                 )
             else:
                 dates = self._weekly_monthly_dates(root, catalog, api_name, start_date, end_date)
@@ -6388,15 +6441,18 @@ class RequestEstimateReporter:
             return self._result(mirror_root, scope, start_date, end_date, {}, 0, 0, 0, 0, 0, 0, 0, 0, "unknown", None, {}, "unknown", False, "unknown", warnings, blocking_errors)
         by_api = {item.endpoint: int(item.missing_jobs) for item in plan.endpoint_plans}
         daily_like = sum(by_api.get(api_name, 0) for api_name in daily_like_apis_for_scope(scope))
-        periodic = ["weekly", "monthly"]
-        if scope == "a-share-low-risk":
+        periodic: list[str] = []
+        if scope_has_periodic_apis(scope):
+            periodic.extend(["weekly", "monthly"])
+        if scope == "a-share-low-risk" or scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
             periodic.extend(["index_weekly", "index_monthly"])
         weekly_monthly = sum(by_api.get(api_name, 0) for api_name in periodic)
-        reference_refresh = sum(by_api.get(api_name, 0) for api_name in reference_refresh_apis_for_scope(scope))
-        trade_cal_requests = by_api.get("trade_cal", 0)
+        calendar_dependencies = set(calendar_dependency_apis_for_scope(scope))
+        reference_refresh = sum(by_api.get(api_name, 0) for api_name in reference_refresh_apis_for_scope(scope) if api_name not in calendar_dependencies)
+        trade_cal_requests = sum(by_api.get(api_name, 0) for api_name in calendar_dependencies)
         if plan.trade_cal_dependency_status != "covered":
-            warnings.append(f"local trade_cal range is {plan.trade_cal_dependency_status}; daily-like estimates may be deferred until calendar is present")
-            warnings.append("daily-like request counts are deferred until trade_cal is local; natural day fallback is disabled")
+            warnings.append(f"local market calendar range is {plan.trade_cal_dependency_status}; daily-like estimates may be deferred until calendar is present")
+            warnings.append("daily-like request counts are deferred until the market calendar is local; natural day fallback is disabled")
         total = sum(by_api.values())
         return self._result(
             mirror_root,
@@ -6515,19 +6571,28 @@ class MirrorBatchPlanner:
         if start > end:
             raise ValueError("start_date must be <= end_date")
         warnings = ["mirror-batch-plan is read-only; execute requires separate user confirmation"]
-        calendar = self._calendar_range(start, end, calendar_exchange)
+        if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+            return self._global_plan(start, end, max_jobs_per_api, warnings)
+        calendar_exchange = calendar_exchange_for_scope(scope, calendar_exchange)
+        calendar_api = calendar_api_for_scope(scope)
+        calendar = self._calendar_range(start, end, calendar_exchange, calendar_api=calendar_api)
         endpoint_plans: list[MirrorBatchEndpointPlan] = []
-        endpoint_plans.append(self._trade_cal_plan(start, end, calendar_exchange, calendar))
+        endpoint_plans.append(self._trade_cal_plan(start, end, calendar_exchange, calendar, calendar_api=calendar_api))
         for endpoint in reference_refresh_apis_for_scope(scope):
+            if endpoint == calendar_api:
+                continue
             endpoint_plans.append(self._reference_plan(endpoint))
         for endpoint in daily_like_apis_for_scope(scope):
-            endpoint_plans.append(self._daily_like_plan(endpoint, start, end, calendar_exchange, max_jobs_per_api, calendar))
-        endpoint_plans.append(self._explicit_date_plan("weekly", self._weekly_dates(start, end), max_jobs_per_api, "weekly uses bounded explicit date planning only"))
-        endpoint_plans.append(self._explicit_date_plan("monthly", self._monthly_dates(start, end), max_jobs_per_api, "monthly uses bounded explicit date planning only"))
+            endpoint_plans.append(self._daily_like_plan(endpoint, start, end, calendar_exchange, max_jobs_per_api, calendar, calendar_api=calendar_api))
+        if scope_has_periodic_apis(scope):
+            endpoint_plans.append(self._explicit_date_plan("weekly", self._weekly_dates(start, end), max_jobs_per_api, "weekly uses bounded explicit date planning only"))
+            endpoint_plans.append(self._explicit_date_plan("monthly", self._monthly_dates(start, end), max_jobs_per_api, "monthly uses bounded explicit date planning only"))
         if scope == "a-share-low-risk":
             endpoint_plans.append(self._explicit_date_plan("index_weekly", self._weekly_dates(start, end), max_jobs_per_api, "index_weekly uses bounded explicit date planning only"))
             endpoint_plans.append(self._explicit_date_plan("index_monthly", self._monthly_dates(start, end), max_jobs_per_api, "index_monthly uses bounded explicit date planning only"))
             excluded = A_SHARE_LOW_RISK_PLAN_ONLY_APIS
+        elif scope in HK_US_SCOPE_MARKETS:
+            excluded = HK_US_PLAN_ONLY_APIS_BY_SCOPE[scope]
         else:
             excluded = self.EVENT_APIS
         for endpoint in excluded:
@@ -6537,11 +6602,11 @@ class MirrorBatchPlanner:
         blocked = sum(1 for item in endpoint_plans if item.plan_status.startswith("blocked"))
         estimated = sum(item.missing_jobs for item in endpoint_plans if item.plan_status not in {"excluded_no_stock_loop"})
         dependency_missing = calendar["status"] != "covered"
-        dependency_requests = sum(item.missing_jobs for item in endpoint_plans if item.endpoint == "trade_cal")
+        dependency_requests = sum(item.missing_jobs for item in endpoint_plans if item.endpoint == calendar_api)
         currently_unblocked_requests = sum(
             item.missing_jobs
             for item in endpoint_plans
-            if item.endpoint != "trade_cal"
+            if item.endpoint != calendar_api
             and item.category != "daily_like"
             and item.plan_status not in {"excluded_no_stock_loop"}
         )
@@ -6564,8 +6629,8 @@ class MirrorBatchPlanner:
             requires_execute_confirmation=True,
             trade_cal_dependency_status=calendar["status"],
             dependency_status="missing" if dependency_missing else "covered",
-            dependency_action="fetch_trade_cal_first" if dependency_missing else None,
-            trade_cal_params={"exchange": calendar_exchange.upper(), "start_date": start, "end_date": end},
+            dependency_action=f"fetch_{calendar_api}_first" if dependency_missing else None,
+            trade_cal_params=self._calendar_params(calendar_api, start, end, calendar_exchange),
             daily_like_status="blocked_until_trade_cal" if dependency_missing else "ready",
             natural_day_fallback=False,
             dependency_requests=dependency_requests,
@@ -6573,9 +6638,56 @@ class MirrorBatchPlanner:
             currently_unblocked_requests=currently_unblocked_requests,
         )
 
-    def _calendar_range(self, start: str, end: str, exchange: str) -> dict[str, Any]:
+    def _global_plan(self, start: str, end: str, max_jobs_per_api: int, warnings: list[str]) -> MirrorBatchPlan:
+        child_plans = [
+            self.plan(
+                scope=child_scope,
+                start_date=start,
+                end_date=end,
+                calendar_exchange=calendar_exchange_for_scope(child_scope),
+                max_jobs_per_api=max_jobs_per_api,
+            )
+            for child_scope in GLOBAL_EQUITY_CHILD_SCOPES
+        ]
+        endpoint_plans: list[MirrorBatchEndpointPlan] = []
+        for child_plan in child_plans:
+            endpoint_plans.extend(child_plan.endpoint_plans)
+            warnings.extend(f"{child_plan.scope}: {warning}" for warning in child_plan.warnings)
+        dependency_missing = any(plan.dependency_status != "covered" for plan in child_plans)
+        daily_like_blocked = any(plan.daily_like_status == "blocked_until_trade_cal" for plan in child_plans)
+        trade_cal_params = {
+            plan.scope: json.dumps(plan.trade_cal_params, sort_keys=True)
+            for plan in child_plans
+        }
+        return MirrorBatchPlan(
+            batch_id=f"batch_{start}_{end}",
+            scope=GLOBAL_EQUITY_LOW_RISK_SCOPE,
+            root=str(self.root),
+            start_date=start,
+            end_date=end,
+            calendar_exchange="MULTI",
+            max_jobs_per_api=max_jobs_per_api,
+            endpoint_plans=endpoint_plans,
+            total_candidate_jobs=sum(plan.total_candidate_jobs for plan in child_plans),
+            total_planned_jobs=sum(plan.total_planned_jobs for plan in child_plans),
+            blocked_endpoints=sum(plan.blocked_endpoints for plan in child_plans),
+            warnings=_dedupe_messages(warnings),
+            estimated_request_count=sum(plan.estimated_request_count for plan in child_plans),
+            requires_execute_confirmation=True,
+            trade_cal_dependency_status="missing" if dependency_missing else "covered",
+            dependency_status="missing" if dependency_missing else "covered",
+            dependency_action="fetch_market_calendars_first" if dependency_missing else None,
+            trade_cal_params=trade_cal_params,
+            daily_like_status="blocked_until_trade_cal" if daily_like_blocked else "ready",
+            natural_day_fallback=False,
+            dependency_requests=sum(plan.dependency_requests for plan in child_plans),
+            executable_after_dependency_requests=sum(plan.executable_after_dependency_requests for plan in child_plans),
+            currently_unblocked_requests=sum(plan.currently_unblocked_requests for plan in child_plans),
+        )
+
+    def _calendar_range(self, start: str, end: str, exchange: str, *, calendar_api: str = "trade_cal") -> dict[str, Any]:
         natural = self._natural_dates(start, end)
-        snapshot = self.catalog.latest_snapshot("trade_cal")
+        snapshot = self.catalog.latest_snapshot(calendar_api)
         if not snapshot:
             return {
                 "status": "missing_snapshot",
@@ -6585,7 +6697,10 @@ class MirrorBatchPlanner:
                 "filtered_non_trading_dates": [],
             }
         try:
-            table = LakeReader(self.root, self.catalog).scan_api("trade_cal", columns=["exchange", "cal_date", "is_open"])
+            columns = ["cal_date", "is_open"]
+            if calendar_api == "trade_cal":
+                columns.insert(0, "exchange")
+            table = LakeReader(self.root, self.catalog).scan_api(calendar_api, columns=columns)
         except Exception as exc:
             return {
                 "status": "unreadable",
@@ -6599,12 +6714,12 @@ class MirrorBatchPlanner:
         present: set[str] = set()
         open_dates: set[str] = set()
         if table.num_rows:
-            exchanges = table["exchange"].to_pylist()
+            exchanges = table["exchange"].to_pylist() if "exchange" in table.column_names else [exchange_upper] * table.num_rows
             cal_dates = table["cal_date"].to_pylist()
             flags = table["is_open"].to_pylist()
             planner = DatePlanner(self.root, self.catalog)
             for source_exchange, cal_date, flag in zip(exchanges, cal_dates, flags):
-                if str(source_exchange).upper() != exchange_upper:
+                if calendar_api == "trade_cal" and str(source_exchange).upper() != exchange_upper:
                     continue
                 try:
                     date = planner._normalize_date(str(cal_date))
@@ -6624,10 +6739,10 @@ class MirrorBatchPlanner:
             "filtered_non_trading_dates": sorted(set(natural) - set(open_sorted) - set(missing)),
         }
 
-    def _trade_cal_plan(self, start: str, end: str, exchange: str, calendar: dict[str, Any]) -> MirrorBatchEndpointPlan:
+    def _trade_cal_plan(self, start: str, end: str, exchange: str, calendar: dict[str, Any], *, calendar_api: str = "trade_cal") -> MirrorBatchEndpointPlan:
         missing = calendar["status"] != "covered"
         return MirrorBatchEndpointPlan(
-            endpoint="trade_cal",
+            endpoint=calendar_api,
             category="calendar_dependency",
             requires_trade_cal=False,
             plan_status="planned" if missing else "current",
@@ -6640,10 +6755,15 @@ class MirrorBatchPlanner:
             max_jobs=1,
             truncated=False,
             dates=[],
-            refresh_strategy=f"ensure SSE trade_cal coverage for {start}-{end}",
+            refresh_strategy=f"ensure {calendar_api} coverage for {start}-{end}",
             blocked_reason=None,
             warnings=[f"missing calendar dates: {calendar['missing_calendar_dates']}"] if missing else [],
         )
+
+    def _calendar_params(self, calendar_api: str, start: str, end: str, exchange: str) -> dict[str, str]:
+        if calendar_api == "trade_cal":
+            return {"exchange": exchange.upper(), "start_date": start, "end_date": end}
+        return {"start_date": start, "end_date": end, "is_open": "1"}
 
     def _reference_plan(self, endpoint: str) -> MirrorBatchEndpointPlan:
         snapshot = self.catalog.latest_snapshot(endpoint)
@@ -6665,7 +6785,7 @@ class MirrorBatchPlanner:
             refresh_strategy="fetch once if missing; do not refetch blindly",
         )
 
-    def _daily_like_plan(self, endpoint: str, start: str, end: str, exchange: str, max_jobs: int, calendar: dict[str, Any]) -> MirrorBatchEndpointPlan:
+    def _daily_like_plan(self, endpoint: str, start: str, end: str, exchange: str, max_jobs: int, calendar: dict[str, Any], *, calendar_api: str = "trade_cal") -> MirrorBatchEndpointPlan:
         if calendar["status"] != "covered":
             return MirrorBatchEndpointPlan(
                 endpoint=endpoint,
@@ -6685,7 +6805,8 @@ class MirrorBatchPlanner:
                 warnings=["daily-like endpoints do not fall back to natural days"],
             )
         metadata = {
-            "calendar_source": "local trade_cal latest snapshot",
+            "calendar_source": f"local {calendar_api} latest snapshot",
+            "calendar_api": calendar_api,
             "exchange": exchange.upper(),
             "requested_start_date": start,
             "requested_end_date": end,

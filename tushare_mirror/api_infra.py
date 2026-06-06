@@ -78,14 +78,52 @@ A_SHARE_LOW_RISK_PLAN_ONLY_APIS = {
     "ths_member",
 }
 
+HK_LOW_RISK_EXECUTABLE_APIS = {
+    "hk_basic",
+    "hk_tradecal",
+    "hk_daily",
+    "hk_daily_adj",
+    "hk_adjfactor",
+}
+
+US_LOW_RISK_EXECUTABLE_APIS = {
+    "us_basic",
+    "us_tradecal",
+    "us_daily",
+    "us_daily_adj",
+    "us_adjfactor",
+}
+
+HK_LOW_RISK_PLAN_ONLY_APIS = {
+    "hk_mins",
+    "rt_hk_k",
+    "hk_income",
+    "hk_balancesheet",
+    "hk_cashflow",
+    "hk_fina_indicator",
+}
+
+US_LOW_RISK_PLAN_ONLY_APIS = {
+    "us_income",
+    "us_balancesheet",
+    "us_cashflow",
+    "us_fina_indicator",
+}
+
 SCOPE_EXECUTABLE_APIS = {
     "low-risk-a-share": LOW_RISK_A_SHARE_EXECUTABLE_APIS,
     "a-share-low-risk": A_SHARE_LOW_RISK_EXECUTABLE_APIS,
+    "hk-low-risk": HK_LOW_RISK_EXECUTABLE_APIS,
+    "us-low-risk": US_LOW_RISK_EXECUTABLE_APIS,
+    "global-equity-low-risk": A_SHARE_LOW_RISK_EXECUTABLE_APIS | HK_LOW_RISK_EXECUTABLE_APIS | US_LOW_RISK_EXECUTABLE_APIS,
 }
 
 SCOPE_PLAN_ONLY_APIS = {
     "low-risk-a-share": set(),
     "a-share-low-risk": A_SHARE_LOW_RISK_PLAN_ONLY_APIS,
+    "hk-low-risk": HK_LOW_RISK_PLAN_ONLY_APIS,
+    "us-low-risk": US_LOW_RISK_PLAN_ONLY_APIS,
+    "global-equity-low-risk": A_SHARE_LOW_RISK_PLAN_ONLY_APIS | HK_LOW_RISK_PLAN_ONLY_APIS | US_LOW_RISK_PLAN_ONLY_APIS,
 }
 
 SCOPE_EXCLUDED_HIGH_RISK_FAMILIES = {
