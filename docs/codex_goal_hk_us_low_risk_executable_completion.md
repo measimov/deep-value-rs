@@ -127,6 +127,30 @@ Safety:
 - Generated commands include USER_CONFIRMATION_REQUIRED.
 - Real smoke/probe commands are opt-in and bounded.
 
+Implementation reality checks:
+
+- Scope enablement must update every scope gate and helper, including
+  `ensure_mirror_scope`, `mirror_scope_endpoints`,
+  `daily_like_apis_for_scope`, `coverage_matrix_apis_for_scope`,
+  `reference_refresh_apis_for_scope`, request-estimate helpers, batch-plan
+  helpers, and orchestration scope dispatch. Do not leave hidden
+  `low-risk-a-share`/`a-share-low-risk` hard gates that make HK/US commands
+  fail after scope definition.
+- Calendar support must be parameterized by market calendar API, not by a
+  single A-share exchange default. A-share uses `trade_cal` with the existing
+  SSE-oriented behavior; HK uses `hk_tradecal`; US uses `us_tradecal`. Only pass
+  an `exchange` parameter where the Tushare endpoint explicitly documents one.
+- `global-equity-low-risk` must be a composed scope with explicit child scopes:
+  `a-share-low-risk`, `hk-low-risk`, and `us-low-risk`. Reports must preserve
+  per-market sections, calendar policies, endpoint status, and warnings instead
+  of flattening into an ambiguous all-endpoint list.
+- Pagination must be treated as a data-completeness risk. An endpoint cannot be
+  promoted to executable if the real probe or docs leave pagination behavior
+  ambiguous enough that rows could be silently truncated.
+- `mirror-auto-sync` execute mode is A-share-only by design in this goal. HK/US
+  auto-sync may be planned or dry-run only unless a later goal explicitly
+  expands execution with separate safety gates.
+
 Testing:
 
 - Unit tests include fake fetch/write/read/validate for every executable HK/US
@@ -240,13 +264,19 @@ Probe requirements:
 - no default real request
 - require TUSHARE_TOKEN env var
 - never print token
+- redact token-like values before stdout and before writing JSON; do not rely
+  only on post-hoc token hygiene scanning
 - write only /tmp output path unless user supplies another safe non-root path
 - refuse output inside mirror root or backup root
 - for each candidate endpoint, run one tiny request
 - for paginated endpoints, run at most one additional tiny page request
 - record real fields and row counts
 - record permission errors without failing the whole harness
-- classify pagination strategy from observed behavior
+- classify pagination strategy from observed behavior: none, offset_limit,
+  limit_only, date_window, code_date_window, or unknown
+- record requested limit, returned row count, page count tested, whether offset
+  changed the result, whether the API appears to cap rows, and whether a
+  planner guard is required to avoid truncation
 - produce machine-readable JSON and concise table output
 
 Candidate probe examples, bounded:
@@ -308,6 +338,16 @@ If a candidate endpoint returns empty data with valid code, record it and use
 docs plus fake tests for planner design, but keep executable promotion
 conditional unless another tiny date is clearly justified.
 
+If TUSHARE_TOKEN is missing, do not pretend probes passed. Stop this phase with
+a clear blocker:
+
+```text
+blocked_by_missing_token: set TUSHARE_TOKEN and rerun the bounded probe
+```
+
+Do not promote HK/US endpoints to executable from docs alone when the real probe
+phase was skipped.
+
 Commit only code/test/doc changes, not /tmp probe output.
 
 Commit if code/docs changed:
@@ -342,6 +382,10 @@ Tests:
 - scopes exist
 - A-share scope remains unchanged
 - global scope includes A/HK/US low-risk only
+- global scope is implemented as explicit scope composition with child-scope
+  sections, not as a broad wildcard over endpoint inventory
+- all existing scope gates and helper functions accept the new scopes or return
+  clear unsupported errors where intentionally out of scope
 - high-risk families excluded
 - JSON stable
 - no side effects
@@ -421,6 +465,13 @@ Requirements:
   is required
 - missing hk_tradecal/us_tradecal dependency must produce explicit dependency
   stage
+- existing A-share `calendar_exchange` assumptions must be isolated so HK/US
+  daily-like planning does not use SSE `trade_cal`
+- planner metadata must identify `calendar_api`, `calendar_date_field`,
+  `calendar_open_field`, supported calendar params, and whether the market has
+  exchange-specific calendar variants
+- weekly/monthly period derivation, if later added for HK/US, must use the
+  market calendar rather than naive Fridays/month-end dates
 - no stock loops
 - no full mode auto-execution
 - pagination guards must bound requests per date/page
@@ -430,6 +481,9 @@ Tests:
 - planner resolves executable endpoints
 - plan-only endpoints return blocked output
 - dependency stage reported for missing calendar
+- A-share planner still uses existing trade_cal behavior
+- HK planner uses hk_tradecal
+- US planner uses us_tradecal
 - pagination plan bounded
 - no side effects
 
@@ -442,6 +496,28 @@ feat: add HK US low-risk planners
 ## Phase 7: Fake Fixtures and Executable Tests
 
 For every executable endpoint, create fake response fixtures.
+
+Minimum fixture field contracts:
+
+- hk_basic: ts_code, name, fullname, enname, market, list_status, list_date,
+  delist_date where available from docs/probe.
+- hk_tradecal: cal_date, is_open, pretrade_date.
+- hk_daily: ts_code, trade_date, open, high, low, close, pre_close, change,
+  pct_chg, vol, amount.
+- hk_daily_adj: ts_code, trade_date, close, open, high, low, pre_close, change,
+  pct_change, vol, amount, vwap, adj_factor, turnover_ratio, free_share,
+  total_share, free_mv, total_mv.
+- us_basic: ts_code, name, enname, classify, list_date, delist_date.
+- us_tradecal: cal_date, is_open, pretrade_date.
+- us_daily: ts_code, trade_date, close, open, high, low, pre_close, change,
+  pct_change, vol, amount, vwap, turnover_ratio, total_mv, pe, pb.
+- us_daily_adj: ts_code, trade_date, close, open, high, low, pre_close, change,
+  pct_change, vol, amount, vwap, adj_factor, turnover_ratio, free_share,
+  total_share, free_mv, total_mv, exchange.
+- us_adjfactor: ts_code, trade_date, exchange, cum_adjfactor, close_price.
+
+If real probes show fields differ from docs, preserve raw returned fields in
+probe output and update fixture contracts deliberately with a documented reason.
 
 Tests must cover:
 
@@ -642,8 +718,9 @@ Acceptance:
 - no real HK/US auto-sync starts
 - dry-run shows checkpoint path, windows, calendar dependencies, endpoint list,
   and retry policy
-- execute mode blocked unless all safety criteria and user confirmation are
-  added in a later goal
+- execute mode remains blocked for HK/US unless all safety criteria and user
+  confirmation are added in a later goal
+- existing A-share auto-sync hard gate and behavior remain unchanged
 
 Tests:
 
