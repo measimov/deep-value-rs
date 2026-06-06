@@ -5711,6 +5711,7 @@ class MirrorAutoSyncReporter:
                 max_jobs_per_api=max_jobs_per_api,
                 backup_target=str(backup_root),
                 backup_overwrite=True,
+                allow_quarantined_retry=True,
             )
             window["run_id"] = result.run_id
             window["mirror_run_status"] = result.status
@@ -7006,6 +7007,7 @@ class MirrorOrchestrator:
         end_date: str | None = None,
         backup_target: str | None = None,
         backup_overwrite: bool = False,
+        allow_quarantined_retry: bool = False,
     ) -> MirrorRunResult:
         ensure_mirror_scope(scope)
         ensure_mirror_mode(mode)
@@ -7033,7 +7035,7 @@ class MirrorOrchestrator:
             if mode != "smoke":
                 calendar_apis = A_SHARE_LOW_RISK_DAILY_LIKE_APIS if scope == "a-share-low-risk" else ["daily", "adj_factor", "daily_basic", "suspend_d"]
             for endpoint in calendar_apis:
-                items.append(self._execute_calendar_backfill(endpoint, mode, max_jobs_per_api, start_date, end_date, probe_statuses))
+                items.append(self._execute_calendar_backfill(endpoint, mode, max_jobs_per_api, start_date, end_date, probe_statuses, allow_quarantined_retry=allow_quarantined_retry))
         else:
             calendar_apis = A_SHARE_LOW_RISK_CALENDAR_BACKFILL_APIS if scope == "a-share-low-risk" else SMOKE_CALENDAR_BACKFILL_APIS
             if mode != "smoke":
@@ -7055,7 +7057,7 @@ class MirrorOrchestrator:
             else:
                 date_groups = [("weekly", self._pilot_weekly_dates(start_date, end_date)), ("monthly", self._pilot_monthly_dates(start_date, end_date))]
         for endpoint, dates in date_groups:
-            items.append(self._execute_date_backfill(endpoint, list(dates), max_jobs_per_api, probe_statuses))
+            items.append(self._execute_date_backfill(endpoint, list(dates), max_jobs_per_api, probe_statuses, allow_quarantined_retry=allow_quarantined_retry))
         if mode == "smoke":
             stock_code_fetches = A_SHARE_LOW_RISK_STOCK_CODE_SMOKE_FETCHES if scope == "a-share-low-risk" else {endpoint: SMOKE_REFERENCE_FETCHES[endpoint] for endpoint in ["namechange", "stk_managers", "stk_rewards"]}
             for endpoint, params in stock_code_fetches.items():
@@ -7193,17 +7195,17 @@ class MirrorOrchestrator:
                 "error": str(exc),
             }
 
-    def _execute_calendar_backfill(self, endpoint: str, mode: str, max_jobs: int, start_date: str | None, end_date: str | None, probe_statuses: Mapping[str, str]) -> dict[str, Any]:
+    def _execute_calendar_backfill(self, endpoint: str, mode: str, max_jobs: int, start_date: str | None, end_date: str | None, probe_statuses: Mapping[str, str], *, allow_quarantined_retry: bool = False) -> dict[str, Any]:
         if self._permission_blocks(endpoint, probe_statuses):
             return self._blocked(endpoint, "daily_like", self._permission_blocks(endpoint, probe_statuses) or "blocked")
         start = start_date if mode == "pilot" else "20250101"
         end = end_date if mode == "pilot" else "20250110"
         dates, calendar = DatePlanner(self.root, self.catalog).plan_dates_with_metadata(start_date=start, end_date=end, trading_days_only=True, calendar_exchange="SSE")
-        plan = BackfillPlanner(self.root, self.catalog).plan_date_backfill(endpoint, dates, max_jobs=max_jobs, calendar_metadata=calendar)
+        plan = BackfillPlanner(self.root, self.catalog).plan_date_backfill(endpoint, dates, max_jobs=max_jobs, calendar_metadata=calendar, allow_quarantined_retry=allow_quarantined_retry)
         result = BackfillExecutor(self.root, self.catalog).execute(plan, self.client, validate_latest=True)
         return self._backfill_item(endpoint, "daily_like", result)
 
-    def _execute_date_backfill(self, endpoint: str, dates: list[str], max_jobs: int, probe_statuses: Mapping[str, str]) -> dict[str, Any]:
+    def _execute_date_backfill(self, endpoint: str, dates: list[str], max_jobs: int, probe_statuses: Mapping[str, str], *, allow_quarantined_retry: bool = False) -> dict[str, Any]:
         if self._permission_blocks(endpoint, probe_statuses):
             return self._blocked(endpoint, "date_based", self._permission_blocks(endpoint, probe_statuses) or "blocked")
         if not dates:
@@ -7219,7 +7221,7 @@ class MirrorOrchestrator:
                 "snapshot_id": None,
                 "notes": "no explicit period dates in bounded window",
             }
-        plan = BackfillPlanner(self.root, self.catalog).plan_date_backfill(endpoint, dates, max_jobs=max_jobs)
+        plan = BackfillPlanner(self.root, self.catalog).plan_date_backfill(endpoint, dates, max_jobs=max_jobs, allow_quarantined_retry=allow_quarantined_retry)
         result = BackfillExecutor(self.root, self.catalog).execute(plan, self.client, validate_latest=True)
         return self._backfill_item(endpoint, "date_based", result)
 

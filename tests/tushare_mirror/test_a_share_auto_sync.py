@@ -12,6 +12,7 @@ from pathlib import Path
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
+from tushare_mirror.backfill import BackfillPlanner
 from tushare_mirror.mirror import MirrorAutoSyncReporter, MirrorOrchestrator
 
 
@@ -190,6 +191,37 @@ class AShareAutoSyncTests(unittest.TestCase):
         self.assertEqual(state_payload["next_start_date"], "20250221")
         called = set(client.request_calls) | {api for api, _ in client.query_calls}
         self.assertFalse({"top10_holders", "concept_detail", "index_weight", "ths_member"} & called)
+
+    def test_auto_sync_retries_existing_schema_quarantine_without_manual_catalog_cleanup(self):
+        quarantine_plan = BackfillPlanner(self.root, self.catalog).plan_date_backfill("weekly", ["20250207"], max_jobs=1)
+        quarantine_job = quarantine_plan.planned_jobs[0]
+        quarantine_run = self.catalog.create_run("backfill")
+        self.catalog.record_quarantine(quarantine_run, quarantine_job.job_key, "weekly", "schema_incompatible", "_quarantine/test", None, None)
+
+        strict = BackfillPlanner(self.root, self.catalog).plan_date_backfill("weekly", ["20250207"], max_jobs=1)
+        self.assertEqual(strict.planned_jobs[0].planned_action, "blocked_quarantined")
+
+        state = self.base / "auto-sync-state.json"
+        client = AutoSyncFakeClient()
+        result = MirrorAutoSyncReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="a-share-low-risk",
+            from_date="20250201",
+            to_date="20250220",
+            window_days=20,
+            max_jobs_per_api=20,
+            state=state,
+            execute=True,
+            confirm_auto_sync=True,
+            max_attempts=1,
+            retry_backoff_seconds=0,
+            client=client,
+            sleep=lambda _: None,
+        )
+        self.assertEqual(result.status, "succeeded", result.to_dict())
+        self.assertIn(("weekly", {"trade_date": "20250207"}), client.query_calls)
+        self.assertEqual(json.loads(state.read_text())["next_start_date"], "20250221")
 
     def test_february_pilot_executes_dynamic_weekly_dates(self):
         result = MirrorOrchestrator(self.root, self.catalog, AutoSyncFakeClient(), sleep=lambda _: None).run(

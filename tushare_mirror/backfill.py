@@ -242,6 +242,7 @@ class BackfillPlanner:
         fields: list[str] | None = None,
         dry_run: bool = True,
         calendar_metadata: dict[str, Any] | None = None,
+        allow_quarantined_retry: bool = False,
     ) -> BackfillPlan:
         if api_name not in SUPPORTED_DATE_BACKFILL_APIS:
             supported = ", ".join(sorted(SUPPORTED_DATE_BACKFILL_APIS))
@@ -258,7 +259,14 @@ class BackfillPlanner:
         for date in normalized_dates[:max_jobs]:
             params = {date_field: date}
             fetch_plan = self.job_planner.plan_single_fetch(api_name, params, fields)
-            existing_status, action = self._existing_status_and_action(api_name, fetch_plan.job_key, fetch_plan.existing_active_data)
+            existing_status, action = self._existing_status_and_action(
+                api_name,
+                fetch_plan.job_key,
+                fetch_plan.existing_active_data,
+                allow_quarantined_retry=allow_quarantined_retry,
+            )
+            if existing_status == "quarantined_exists" and action == "retry_failed":
+                warnings.append("retrying quarantined jobs by explicit override")
             planned_jobs.append(
                 BackfillJobPlan(
                     api_name=api_name,
@@ -297,10 +305,12 @@ class BackfillPlanner:
             truncated_by_max_jobs=truncated_by_max_jobs,
         )
 
-    def _existing_status_and_action(self, api_name: str, job_key: str, active_exists: bool) -> tuple[str, str]:
+    def _existing_status_and_action(self, api_name: str, job_key: str, active_exists: bool, *, allow_quarantined_retry: bool = False) -> tuple[str, str]:
         if active_exists:
             return "active_exists", "skip_existing"
         if self.catalog.quarantine_exists_for_job(job_key):
+            if allow_quarantined_retry:
+                return "quarantined_exists", "retry_failed"
             return "quarantined_exists", "blocked_quarantined"
         statuses = self.catalog.file_statuses_for_job(job_key, api_name)
         if "staged" in statuses:

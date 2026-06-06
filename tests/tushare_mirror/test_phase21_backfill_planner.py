@@ -309,6 +309,10 @@ class Phase21BackfillPlannerTests(unittest.TestCase):
         quarantined = BackfillPlanner(self.root, self.catalog).plan_date_backfill("daily", ["20250105"], max_jobs=1)
         self.assertEqual(quarantined.planned_jobs[0].existing_status, "quarantined_exists")
         self.assertEqual(quarantined.planned_jobs[0].planned_action, "blocked_quarantined")
+        retry_quarantined = BackfillPlanner(self.root, self.catalog).plan_date_backfill("daily", ["20250105"], max_jobs=1, allow_quarantined_retry=True)
+        self.assertEqual(retry_quarantined.planned_jobs[0].existing_status, "quarantined_exists")
+        self.assertEqual(retry_quarantined.planned_jobs[0].planned_action, "retry_failed")
+        self.assertIn("retrying quarantined jobs by explicit override", retry_quarantined.warnings)
 
     def test_backfill_execute_success_rerun_skip_and_validate_latest(self):
         dates = ["20250102", "20250103"]
