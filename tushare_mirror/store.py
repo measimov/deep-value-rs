@@ -95,7 +95,8 @@ class FileLakeStore:
             error_event_count = sum(1 for e in raw_events if e.get("tushare_code") not in (0, None))
 
             schema_registry = SchemaRegistry(self.catalog)
-            decision = schema_registry.decide(api_name, result.fields, result.items)
+            prepared = schema_registry.prepare(api_name, result.fields, result.items)
+            decision = prepared.decision
             if not decision.compatible:
                 self.catalog.record_schema_change(
                     api_name,
@@ -113,7 +114,7 @@ class FileLakeStore:
                 return FetchResult(run_id, plan.job_key, None, 0)
 
             schema_registry.commit(api_name, decision)
-            rows = self._rows(api_name, plan.params, plan.job_key, run_id, decision.schema_id, result.fields, result.items)
+            rows = self._rows(api_name, plan.params, plan.job_key, run_id, decision.schema_id, result.fields, prepared.items)
             record_count = len(rows)
             try:
                 self._write_parquet(parquet_tmp, rows)

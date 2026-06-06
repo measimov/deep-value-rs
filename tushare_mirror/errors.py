@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import urllib.error
 from enum import Enum
 from typing import Any, Mapping
@@ -77,7 +78,7 @@ def classify_exception(exc: Exception) -> ErrorType:
             return ErrorType(status)
         except ValueError:
             return ErrorType.UNKNOWN_ERROR
-    if isinstance(exc, (TimeoutError, ConnectionError, urllib.error.URLError)):
+    if isinstance(exc, (TimeoutError, ConnectionError, urllib.error.URLError, http.client.IncompleteRead, http.client.RemoteDisconnected)):
         return ErrorType.NETWORK_ERROR
     return ErrorType.UNKNOWN_ERROR
 
