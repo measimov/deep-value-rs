@@ -798,7 +798,7 @@ class AShareLowRiskPullCommandTests(unittest.TestCase):
         )
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status"], "created")
-        self.assertEqual(set(payload["files"]), {"README.md", "commands.sh", "plan.json"})
+        self.assertEqual(set(payload["files"]), {"README.md", "commands.sh", "plan.json", "request_estimate.json", "stop_policy.json"})
         commands = (output / "commands.sh").read_text()
         self.assertIn("USER_CONFIRMATION_REQUIRED", commands)
         self.assertNotIn("\npython3 -m tushare_mirror mirror-run", commands)

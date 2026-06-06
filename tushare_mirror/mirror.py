@@ -1011,6 +1011,8 @@ class MirrorPullCommandResult:
     commands: list[dict[str, Any]]
     user_confirmation_required: bool
     estimated_requests: dict[str, Any]
+    pagination_strategy_summary: dict[str, str]
+    calendar_dependency_summary: dict[str, Any]
     warnings: list[str]
     stop_conditions: dict[str, Any]
     output: str | None
@@ -1639,6 +1641,18 @@ def _natural_dates_between(start_date: str, end_date: str) -> list[str]:
         out.append(current.strftime("%Y%m%d"))
         current += timedelta(days=1)
     return out
+
+
+def _resolve_planning_date(value: str) -> str:
+    if str(value).strip() == "latest-trade-date":
+        return datetime.now().strftime("%Y%m%d")
+    text = str(value).strip()
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%Y%m%d")
+        except ValueError:
+            pass
+    raise ValueError(f"invalid date: {value}")
 
 
 def _calendar_weekly_dates(start_date: str, end_date: str) -> list[str]:
@@ -5628,6 +5642,10 @@ class MirrorPullCommandReporter:
         commands = self._commands(mirror_root, backup_root, scope, start_date, end_date, max_jobs_per_api)
         estimate = RequestEstimateReporter().report(root=mirror_root, scope=scope, start_date=start_date, end_date=end_date).to_dict()
         stop_policy = StopPolicyReporter().report(scope=scope).to_dict()
+        pagination_strategy_summary = self._pagination_strategy_summary(scope)
+        calendar_dependency_summary = self._calendar_dependency_summary(scope, start_date, end_date)
+        warnings.extend(estimate.get("warnings") or [])
+        blocking_errors.extend(estimate.get("blocking_errors") or [])
         output_path: Path | None = None
         files: list[str] = []
         if output is not None:
@@ -5646,6 +5664,8 @@ class MirrorPullCommandReporter:
                     "max_jobs_per_api": max_jobs_per_api,
                     "commands": commands,
                     "estimated_requests": estimate,
+                    "pagination_strategy_summary": pagination_strategy_summary,
+                    "calendar_dependency_summary": calendar_dependency_summary,
                     "stop_conditions": stop_policy,
                     "user_confirmation_required": True,
                     "real_requests_sent": False,
@@ -5654,7 +5674,9 @@ class MirrorPullCommandReporter:
                 (output_path / "commands.sh").write_text(self._commands_sh(commands), encoding="utf-8")
                 (output_path / "commands.sh").chmod(0o644)
                 (output_path / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-                files = ["README.md", "commands.sh", "plan.json"]
+                (output_path / "request_estimate.json").write_text(json.dumps(estimate, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+                (output_path / "stop_policy.json").write_text(json.dumps(stop_policy, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+                files = ["README.md", "commands.sh", "plan.json", "request_estimate.json", "stop_policy.json"]
                 safety = CommandSafetyAnalyzer().analyze(file=output_path / "commands.sh")
                 warnings.extend(safety.warnings)
                 blocking_errors.extend(safety.blocking_errors)
@@ -5671,6 +5693,8 @@ class MirrorPullCommandReporter:
             commands=commands,
             user_confirmation_required=True,
             estimated_requests=estimate,
+            pagination_strategy_summary=pagination_strategy_summary,
+            calendar_dependency_summary=calendar_dependency_summary,
             warnings=_dedupe_messages(warnings),
             stop_conditions=stop_policy,
             output=str(output_path) if output_path else None,
@@ -5691,10 +5715,11 @@ class MirrorPullCommandReporter:
         return blocking_errors
 
     def _commands(self, root: Path, backup: Path, scope: str, start_date: str, end_date: str, max_jobs: int) -> list[dict[str, Any]]:
+        calendar_exchange = "SSE" if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE else calendar_exchange_for_scope(scope)
         rows = [
             ("mirror-review-before", f"python3 -m tushare_mirror mirror-review --root {root} --backup {backup} --scope {scope} --start-date {start_date} --end-date {end_date} --json", False),
             ("mirror-readiness", f"python3 -m tushare_mirror mirror-readiness --root {root} --backup {backup} --scope {scope} --json", False),
-            ("mirror-batch-plan", f"python3 -m tushare_mirror mirror-batch-plan --root {root} --scope {scope} --start-date {start_date} --end-date {end_date} --calendar-exchange SSE --max-jobs-per-api {max_jobs} --json", False),
+            ("mirror-batch-plan", f"python3 -m tushare_mirror mirror-batch-plan --root {root} --scope {scope} --start-date {start_date} --end-date {end_date} --calendar-exchange {calendar_exchange} --max-jobs-per-api {max_jobs} --json", False),
             ("mirror-run-execute", f"python3 -m tushare_mirror mirror-run --root {root} --scope {scope} --mode pilot --start-date {start_date} --end-date {end_date} --max-jobs-per-api {max_jobs} --backup-target {backup} --execute --json", True),
             ("validate-no-record", f"python3 -m tushare_mirror --root {root} validate --latest-all --no-record --json", False),
             ("backup-inspect", f"python3 -m tushare_mirror backup-inspect --backup {backup} --json", False),
@@ -5711,6 +5736,28 @@ class MirrorPullCommandReporter:
             }
             for name, text, would_execute in rows
         ]
+
+    def _pagination_strategy_summary(self, scope: str) -> dict[str, str]:
+        configs = {str(cfg["api_name"]): cfg for cfg in load_bundled_endpoint_configs()}
+        out: dict[str, str] = {}
+        for api_name in mirror_scope_endpoints(scope):
+            cfg = configs.get(api_name)
+            if not cfg:
+                continue
+            out[api_name] = str(cfg.get("pagination_mode") or cfg.get("pagination_strategy") or "none")
+        return out
+
+    def _calendar_dependency_summary(self, scope: str, start_date: str, end_date: str) -> dict[str, Any]:
+        return {
+            "calendar_apis": calendar_dependency_apis_for_scope(scope),
+            "calendar_exchange_by_api": {
+                api_name: calendar_exchange_for_api(api_name)
+                for api_name in calendar_dependency_apis_for_scope(scope)
+            },
+            "date_range": {"start_date": start_date, "end_date": end_date},
+            "natural_day_fallback": False,
+            "daily_like_endpoints": daily_like_apis_for_scope(scope),
+        }
 
     def _commands_sh(self, commands: list[dict[str, Any]]) -> str:
         lines = [
@@ -5733,7 +5780,7 @@ class MirrorPullCommandReporter:
     def _readme(self, scope: str, start_date: str, end_date: str) -> str:
         return "\n".join(
             [
-                "# A-share Low-risk Pull Command Bundle",
+                "# Low-risk Pull Command Bundle",
                 "",
                 f"Scope: {scope}",
                 f"Date range: {start_date}-{end_date}",
@@ -6424,6 +6471,14 @@ class RequestEstimateReporter:
         mirror_root = Path(root)
         warnings = ["request-estimate is read-only, does not call Tushare, and does not inspect token quota"]
         blocking_errors: list[str] = []
+        try:
+            resolved_start_date = _resolve_planning_date(start_date)
+            resolved_end_date = _resolve_planning_date(end_date)
+        except ValueError as exc:
+            blocking_errors.append(str(exc))
+            return self._result(mirror_root, scope, start_date, end_date, {}, 0, 0, 0, 0, 0, 0, 0, 0, "unknown", None, {}, "unknown", False, "unknown", warnings, blocking_errors)
+        if end_date == "latest-trade-date":
+            warnings.append(f"latest-trade-date was resolved to {resolved_end_date} for read-only request estimation; no market calendar was fetched")
         catalog = CatalogStore(mirror_root, read_only=True)
         if not catalog.db_path.exists():
             blocking_errors.append(f"catalog not found: {catalog.db_path}; run init-catalog first")
@@ -6431,8 +6486,8 @@ class RequestEstimateReporter:
         try:
             plan = MirrorBatchPlanner(mirror_root, catalog).plan(
                 scope=scope,
-                start_date=start_date,
-                end_date=end_date,
+                start_date=resolved_start_date,
+                end_date=resolved_end_date,
                 calendar_exchange="SSE",
                 max_jobs_per_api=MirrorNextBatchReporter.RECOMMENDED_MAX_JOBS_PER_API,
             )
