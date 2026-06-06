@@ -1,0 +1,390 @@
+source_map_version: hk-us-low-risk-source-map/v1
+reviewed_at: "2026-06-07"
+menu_doc_url: "https://tushare.pro/document/2?doc_id=199"
+notes:
+  - "This is documentation-derived source metadata only; it does not enable execution."
+  - "Every executable_candidate remains blocked from promotion until bounded real probes, planner support, and fake tests agree."
+endpoints:
+  - api_name: hk_basic
+    market: hk
+    category: reference_snapshot
+    doc_url: "https://tushare.pro/document/2?doc_id=191"
+    documented_params: [ts_code, list_status]
+    documented_fields: [ts_code, name, fullname, enname, cn_spell, market, list_status, list_date, delist_date, trade_unit, isin, curr_type]
+    documented_row_limit: "single request can extract all actively trading HK stock list rows"
+    permission_notes: "requires at least 2000 Tushare points"
+    update_cadence: "reference list; cadence not explicitly stated"
+    pagination_hints: "none documented"
+    recommended_pagination_strategy: none
+    recommended_planner_kind: single_snapshot
+    recommended_partition_template: snapshot_date
+    recommendation: executable_candidate
+    real_probe_status: pending
+    missing_metadata: []
+    safety_notes:
+      - "snapshot endpoint; no stock loop needed"
+
+  - api_name: hk_tradecal
+    market: hk
+    category: calendar
+    doc_url: "https://tushare.pro/document/2?doc_id=250"
+    documented_params: [start_date, end_date, is_open]
+    documented_fields: [cal_date, is_open, pretrade_date]
+    documented_row_limit: "single request maximum 2000 rows"
+    permission_notes: "requires at least 2000 Tushare points"
+    update_cadence: "calendar range"
+    pagination_hints: "date range bounded; no exchange parameter documented"
+    recommended_pagination_strategy: date_window
+    recommended_planner_kind: date_backfill
+    recommended_partition_template: year_month
+    recommendation: executable_candidate
+    real_probe_status: pending
+    missing_metadata: []
+    safety_notes:
+      - "HK calendar dependency; do not pass SSE exchange"
+
+  - api_name: hk_daily
+    market: hk
+    category: daily_market_data
+    doc_url: "https://tushare.pro/document/2?doc_id=192"
+    documented_params: [ts_code, trade_date, start_date, end_date]
+    documented_fields: [ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount]
+    documented_row_limit: "single request maximum 5000 rows; repeat requests supported"
+    permission_notes: "separate permission required"
+    update_cadence: "daily around 18:00"
+    pagination_hints: "date window or trade_date; no offset/limit documented"
+    recommended_pagination_strategy: date_window
+    recommended_planner_kind: calendar_backfill
+    recommended_partition_template: year_month
+    recommendation: executable_candidate
+    real_probe_status: pending
+    missing_metadata: []
+    safety_notes:
+      - "daily-like endpoint must use local hk_tradecal; no natural-day fallback"
+
+  - api_name: hk_daily_adj
+    market: hk
+    category: daily_market_data
+    doc_url: "https://tushare.pro/document/2?doc_id=339"
+    documented_params: [ts_code, trade_date, start_date, end_date]
+    documented_fields: [ts_code, trade_date, close, open, high, low, pre_close, change, pct_change, vol, amount, vwap, adj_factor, turnover_ratio, free_share, total_share, free_mv, total_mv]
+    documented_row_limit: "single request maximum 6000 rows; docs say all rows can be fetched cyclically and pagination is supported"
+    permission_notes: "120 points trial; formal permission required"
+    update_cadence: "daily adjusted market data; adjustment factors may refresh historically"
+    pagination_hints: "pagination mentioned, but offset/limit params are not listed in the current input table"
+    recommended_pagination_strategy: unknown_until_probe
+    recommended_planner_kind: calendar_backfill
+    recommended_partition_template: year_month
+    recommendation: executable_candidate
+    real_probe_status: pending
+    missing_metadata:
+      - "real probe must determine whether offset/limit are accepted despite not appearing in the documented input table"
+    safety_notes:
+      - "data-completeness risk until pagination is characterized"
+
+  - api_name: hk_adjfactor
+    market: hk
+    category: daily_market_data
+    doc_url: "https://tushare.pro/document/2?doc_id=401"
+    documented_params: [ts_code, trade_date, start_date, end_date]
+    documented_fields: [ts_code, trade_date, cum_adjfactor, close_price]
+    documented_row_limit: "single request maximum 6000 rows; can loop by date"
+    permission_notes: "available after HK daily permission is opened"
+    update_cadence: "daily rolling refresh"
+    pagination_hints: "date window or trade_date; no offset/limit documented"
+    recommended_pagination_strategy: date_window
+    recommended_planner_kind: calendar_backfill
+    recommended_partition_template: year_month
+    recommendation: executable_candidate
+    real_probe_status: pending
+    missing_metadata:
+      - "discovered from current HK documentation menu; not in the original initial candidate list"
+    safety_notes:
+      - "candidate only; not enabled until explicitly probed and tested"
+
+  - api_name: us_basic
+    market: us
+    category: reference_snapshot
+    doc_url: "https://tushare.pro/document/2?doc_id=252"
+    documented_params: [ts_code, classify, offset, limit]
+    documented_fields: [ts_code, name, enname, classify, list_date, delist_date]
+    documented_row_limit: "single request maximum 6000 rows; pagination supported"
+    permission_notes: "120 points trial; 5000 points formal permission"
+    update_cadence: "reference list; cadence not explicitly stated"
+    pagination_hints: "offset/limit documented"
+    recommended_pagination_strategy: offset_limit
+    recommended_planner_kind: single_snapshot
+    recommended_partition_template: snapshot_date
+    recommendation: executable_candidate
+    real_probe_status: pending
+    missing_metadata: []
+    safety_notes:
+      - "snapshot endpoint; pagination must be characterized before enablement"
+
+  - api_name: us_tradecal
+    market: us
+    category: calendar
+    doc_url: "https://tushare.pro/document/2?doc_id=253"
+    documented_params: [start_date, end_date, is_open]
+    documented_fields: [cal_date, is_open, pretrade_date]
+    documented_row_limit: "single request maximum 6000 rows; date range supported"
+    permission_notes: "permission note not explicit on the endpoint page"
+    update_cadence: "calendar range"
+    pagination_hints: "date range bounded; no exchange parameter documented"
+    recommended_pagination_strategy: date_window
+    recommended_planner_kind: date_backfill
+    recommended_partition_template: year_month
+    recommendation: executable_candidate
+    real_probe_status: pending
+    missing_metadata: []
+    safety_notes:
+      - "US calendar dependency; do not pass SSE exchange"
+
+  - api_name: us_daily
+    market: us
+    category: daily_market_data
+    doc_url: "https://tushare.pro/document/2?doc_id=254"
+    documented_params: [ts_code, trade_date, start_date, end_date]
+    documented_fields: [ts_code, trade_date, close, open, high, low, pre_close, change, pct_change, vol, amount, vwap, turnover_ratio, total_mv, pe, pb]
+    documented_row_limit: "single request maximum 6000 rows; date-parameter loops documented; formal permission may support pagination"
+    permission_notes: "120 points trial; formal permission required"
+    update_cadence: "daily market data"
+    pagination_hints: "pagination mentioned for formal permission, but offset/limit params are not listed in the input table"
+    recommended_pagination_strategy: unknown_until_probe
+    recommended_planner_kind: calendar_backfill
+    recommended_partition_template: year_month
+    recommendation: executable_candidate
+    real_probe_status: pending
+    missing_metadata:
+      - "real probe must characterize whether date windows alone are complete or whether hidden offset/limit is accepted"
+    safety_notes:
+      - "daily-like endpoint must use local us_tradecal; no natural-day fallback"
+
+  - api_name: us_daily_adj
+    market: us
+    category: daily_market_data
+    doc_url: "https://tushare.pro/document/2?doc_id=338"
+    documented_params: [ts_code, trade_date, start_date, end_date, exchange, offset, limit]
+    documented_fields: [ts_code, trade_date, close, open, high, low, pre_close, change, pct_change, vol, amount, vwap, adj_factor, turnover_ratio, free_share, total_share, free_mv, total_mv, exchange]
+    documented_row_limit: "single request maximum 8000 rows; cyclic fetching and pagination supported"
+    permission_notes: "120 points trial; formal permission required"
+    update_cadence: "daily adjusted market data; adjustment factors may refresh historically"
+    pagination_hints: "offset/limit documented"
+    recommended_pagination_strategy: offset_limit
+    recommended_planner_kind: calendar_backfill
+    recommended_partition_template: year_month
+    recommendation: executable_candidate
+    real_probe_status: pending
+    missing_metadata: []
+    safety_notes:
+      - "exchange parameter must be treated as US endpoint-specific, not calendar exchange"
+
+  - api_name: us_adjfactor
+    market: us
+    category: daily_market_data
+    doc_url: "https://tushare.pro/document/2?doc_id=402"
+    documented_params: [ts_code, trade_date, start_date, end_date]
+    documented_fields: [ts_code, trade_date, exchange, cum_adjfactor, close_price]
+    documented_row_limit: "single request maximum 15000 rows; can loop by date"
+    permission_notes: "available after US daily permission is opened"
+    update_cadence: "daily rolling refresh after US close"
+    pagination_hints: "date window or trade_date; no offset/limit documented"
+    recommended_pagination_strategy: date_window
+    recommended_planner_kind: calendar_backfill
+    recommended_partition_template: year_month
+    recommendation: executable_candidate
+    real_probe_status: pending
+    missing_metadata: []
+    safety_notes:
+      - "daily-like endpoint must use local us_tradecal; no natural-day fallback"
+
+  - api_name: hk_mins
+    market: hk
+    category: intraday_minute
+    doc_url: "https://tushare.pro/document/2?doc_id=304"
+    documented_params: [ts_code, freq, start_date, end_date]
+    documented_fields: [ts_code, trade_time, open, close, high, low, vol, amount]
+    documented_row_limit: "single request maximum 8000 rows; loops by code and datetime"
+    permission_notes: "120 points trial; formal permission required"
+    update_cadence: "minute bars"
+    pagination_hints: "intraday code/time windows"
+    recommended_pagination_strategy: disabled_intraday
+    recommended_planner_kind: unsupported
+    recommended_partition_template: null
+    recommendation: disabled
+    real_probe_status: not_planned
+    missing_metadata: []
+    safety_notes:
+      - "intraday/minute endpoint is outside this goal"
+
+  - api_name: rt_hk_k
+    market: hk
+    category: realtime_market_data
+    doc_url: "https://tushare.pro/document/2?doc_id=383"
+    documented_params: [ts_code]
+    documented_fields: [ts_code, pre_close, close, high, open, low, vol, amount]
+    documented_row_limit: "single request maximum 5000 rows"
+    permission_notes: "separate permission required"
+    update_cadence: "realtime daily K-line"
+    pagination_hints: "wildcard realtime pull; not a historical bounded planner"
+    recommended_pagination_strategy: disabled_realtime
+    recommended_planner_kind: unsupported
+    recommended_partition_template: null
+    recommendation: disabled
+    real_probe_status: not_planned
+    missing_metadata: []
+    safety_notes:
+      - "realtime endpoint is outside this goal"
+
+  - api_name: hk_income
+    market: hk
+    category: financial_statement
+    doc_url: "https://tushare.pro/document/2?doc_id=389"
+    documented_params: [ts_code, period, ind_name, start_date, end_date]
+    documented_fields: [ts_code, end_date, name, ind_name, ind_value]
+    documented_row_limit: "single stock history; single request maximum 10000 rows"
+    permission_notes: "separate permission required"
+    update_cadence: "financial reporting"
+    pagination_hints: "code-period loop required"
+    recommended_pagination_strategy: plan_only_code_period
+    recommended_planner_kind: code_period_matrix
+    recommended_partition_template: period_year
+    recommendation: plan_only
+    real_probe_status: not_planned
+    missing_metadata: []
+    safety_notes:
+      - "financial/PIT boundary; no execution in this goal"
+
+  - api_name: hk_balancesheet
+    market: hk
+    category: financial_statement
+    doc_url: "https://tushare.pro/document/2?doc_id=390"
+    documented_params: [ts_code, period, ind_name, start_date, end_date]
+    documented_fields: [ts_code, name, end_date, ind_name, ind_value]
+    documented_row_limit: "single stock history; single request maximum 10000 rows"
+    permission_notes: "separate permission or high points required"
+    update_cadence: "financial reporting"
+    pagination_hints: "code-period loop required"
+    recommended_pagination_strategy: plan_only_code_period
+    recommended_planner_kind: code_period_matrix
+    recommended_partition_template: period_year
+    recommendation: plan_only
+    real_probe_status: not_planned
+    missing_metadata: []
+    safety_notes:
+      - "financial/PIT boundary; no execution in this goal"
+
+  - api_name: hk_cashflow
+    market: hk
+    category: financial_statement
+    doc_url: "https://tushare.pro/document/2?doc_id=391"
+    documented_params: [ts_code, period, ind_name, start_date, end_date]
+    documented_fields: [ts_code, end_date, name, ind_name, ind_value]
+    documented_row_limit: "single stock history; single request maximum 10000 rows"
+    permission_notes: "separate permission required"
+    update_cadence: "financial reporting"
+    pagination_hints: "code-period loop required"
+    recommended_pagination_strategy: plan_only_code_period
+    recommended_planner_kind: code_period_matrix
+    recommended_partition_template: period_year
+    recommendation: plan_only
+    real_probe_status: not_planned
+    missing_metadata: []
+    safety_notes:
+      - "financial/PIT boundary; no execution in this goal"
+
+  - api_name: hk_fina_indicator
+    market: hk
+    category: financial_indicator
+    doc_url: "https://tushare.pro/document/2?doc_id=388"
+    documented_params: [ts_code, period, report_type, start_date, end_date]
+    documented_fields: [ts_code, end_date, ind_type, security_name_abbr, notice_date, start_date, std_report_date, currency, report_type]
+    documented_row_limit: "financial indicator endpoint; documented fields are broad and must be narrowed by fields"
+    permission_notes: "separate permission or high points required"
+    update_cadence: "financial reporting"
+    pagination_hints: "code-period loop required"
+    recommended_pagination_strategy: plan_only_code_period
+    recommended_planner_kind: code_period_matrix
+    recommended_partition_template: period_year
+    recommendation: plan_only
+    real_probe_status: not_planned
+    missing_metadata: []
+    safety_notes:
+      - "financial/PIT boundary; no execution in this goal"
+
+  - api_name: us_income
+    market: us
+    category: financial_statement
+    doc_url: "https://tushare.pro/document/2?doc_id=394"
+    documented_params: [ts_code, period, ind_name, report_type, start_date, end_date]
+    documented_fields: [ts_code, end_date, ind_type, name, ind_name, ind_value, report_type]
+    documented_row_limit: "single stock history; single request maximum 10000 rows"
+    permission_notes: "separate permission or high points required"
+    update_cadence: "financial reporting"
+    pagination_hints: "code-period loop required"
+    recommended_pagination_strategy: plan_only_code_period
+    recommended_planner_kind: code_period_matrix
+    recommended_partition_template: period_year
+    recommendation: plan_only
+    real_probe_status: not_planned
+    missing_metadata: []
+    safety_notes:
+      - "financial/PIT boundary; no execution in this goal"
+
+  - api_name: us_balancesheet
+    market: us
+    category: financial_statement
+    doc_url: "https://tushare.pro/document/2?doc_id=395"
+    documented_params: [ts_code, period, ind_name, report_type, start_date, end_date]
+    documented_fields: [ts_code, end_date, ind_type, name, ind_name, ind_value, report_type]
+    documented_row_limit: "single stock history; single request maximum 10000 rows"
+    permission_notes: "separate permission or high points required"
+    update_cadence: "financial reporting"
+    pagination_hints: "code-period loop required"
+    recommended_pagination_strategy: plan_only_code_period
+    recommended_planner_kind: code_period_matrix
+    recommended_partition_template: period_year
+    recommendation: plan_only
+    real_probe_status: not_planned
+    missing_metadata: []
+    safety_notes:
+      - "financial/PIT boundary; no execution in this goal"
+
+  - api_name: us_cashflow
+    market: us
+    category: financial_statement
+    doc_url: "https://tushare.pro/document/2?doc_id=396"
+    documented_params: [ts_code, period, ind_name, report_type, start_date, end_date]
+    documented_fields: [ts_code, end_date, ind_type, name, ind_name, ind_value, report_type]
+    documented_row_limit: "single stock history; single request maximum 10000 rows"
+    permission_notes: "separate permission or high points required"
+    update_cadence: "financial reporting"
+    pagination_hints: "code-period loop required"
+    recommended_pagination_strategy: plan_only_code_period
+    recommended_planner_kind: code_period_matrix
+    recommended_partition_template: period_year
+    recommendation: plan_only
+    real_probe_status: not_planned
+    missing_metadata: []
+    safety_notes:
+      - "financial/PIT boundary; no execution in this goal"
+
+  - api_name: us_fina_indicator
+    market: us
+    category: financial_indicator
+    doc_url: "https://tushare.pro/document/2?doc_id=393"
+    documented_params: [ts_code, period, report_type, start_date, end_date]
+    documented_fields: [ts_code, end_date, ind_type, security_name_abbr, accounting_standards, notice_date, start_date, std_report_date, financial_date, currency, report_type]
+    documented_row_limit: "current endpoint page notes small per-request practical limits and single-stock history"
+    permission_notes: "separate permission or high points required"
+    update_cadence: "financial reporting"
+    pagination_hints: "code-period loop required"
+    recommended_pagination_strategy: plan_only_code_period
+    recommended_planner_kind: code_period_matrix
+    recommended_partition_template: period_year
+    recommendation: plan_only
+    real_probe_status: not_planned
+    missing_metadata: []
+    safety_notes:
+      - "financial/PIT boundary; no execution in this goal"
+
