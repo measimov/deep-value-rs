@@ -195,6 +195,36 @@ SUPPORTED_MIRROR_SCOPES = {
 }
 HK_US_SCOPE_MARKETS = {HK_LOW_RISK_SCOPE: "hk", US_LOW_RISK_SCOPE: "us"}
 GLOBAL_EQUITY_CHILD_SCOPES = ["a-share-low-risk", HK_LOW_RISK_SCOPE, US_LOW_RISK_SCOPE]
+HK_LOW_RISK_REFERENCE_FETCHES: dict[str, dict[str, Any]] = {
+    "hk_basic": {"list_status": "L"},
+    "hk_tradecal": {"start_date": "20250101", "end_date": "20250110", "is_open": "1"},
+}
+US_LOW_RISK_REFERENCE_FETCHES: dict[str, dict[str, Any]] = {
+    "us_basic": {"classify": "EQ"},
+    "us_tradecal": {"start_date": "20250101", "end_date": "20250110", "is_open": "1"},
+}
+HK_LOW_RISK_DAILY_LIKE_APIS = ["hk_daily", "hk_daily_adj", "hk_adjfactor"]
+US_LOW_RISK_DAILY_LIKE_APIS = ["us_daily", "us_daily_adj", "us_adjfactor"]
+HK_LOW_RISK_PLAN_ONLY_APIS = [
+    "hk_mins",
+    "rt_hk_k",
+    "hk_income",
+    "hk_balancesheet",
+    "hk_cashflow",
+    "hk_fina_indicator",
+]
+US_LOW_RISK_PLAN_ONLY_APIS = [
+    "us_income",
+    "us_balancesheet",
+    "us_cashflow",
+    "us_fina_indicator",
+]
+HK_US_CALENDAR_API_BY_SCOPE = {HK_LOW_RISK_SCOPE: "hk_tradecal", US_LOW_RISK_SCOPE: "us_tradecal"}
+HK_US_CALENDAR_EXCHANGE_BY_SCOPE = {HK_LOW_RISK_SCOPE: "HKEX", US_LOW_RISK_SCOPE: "NASDAQ"}
+HK_US_REFERENCE_FETCHES_BY_SCOPE = {HK_LOW_RISK_SCOPE: HK_LOW_RISK_REFERENCE_FETCHES, US_LOW_RISK_SCOPE: US_LOW_RISK_REFERENCE_FETCHES}
+HK_US_DAILY_LIKE_APIS_BY_SCOPE = {HK_LOW_RISK_SCOPE: HK_LOW_RISK_DAILY_LIKE_APIS, US_LOW_RISK_SCOPE: US_LOW_RISK_DAILY_LIKE_APIS}
+HK_US_PLAN_ONLY_APIS_BY_SCOPE = {HK_LOW_RISK_SCOPE: HK_LOW_RISK_PLAN_ONLY_APIS, US_LOW_RISK_SCOPE: US_LOW_RISK_PLAN_ONLY_APIS}
+CALENDAR_DEPENDENCY_APIS = {"trade_cal", "hk_tradecal", "us_tradecal"}
 MODE_MAX_JOBS = {"smoke": 3, "pilot": 20}
 
 
@@ -6921,6 +6951,19 @@ class MirrorPlanner:
             raise ValueError(f"{mode} mode max-jobs-per-api cannot exceed {MODE_MAX_JOBS[mode]}")
         if scope == "a-share-low-risk":
             items = self._a_share_smoke_items(max_jobs) if mode == "smoke" else self._a_share_pilot_items(start_date, end_date, max_jobs)
+        elif scope in HK_US_SCOPE_MARKETS:
+            items = self._hk_us_items(scope, mode, start_date, end_date, max_jobs)
+        elif scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+            items = []
+            for child_scope in GLOBAL_EQUITY_CHILD_SCOPES:
+                child_items = self.plan(
+                    scope=child_scope,
+                    mode=mode,
+                    start_date=start_date,
+                    end_date=end_date,
+                    max_jobs_per_api=max_jobs,
+                ).items
+                items.extend(child_items)
         else:
             items = self._smoke_items(max_jobs) if mode == "smoke" else self._pilot_items(start_date, end_date, max_jobs)
         planned_endpoint_count = sum(1 for item in items if item.plan_status in {"planned", "skip_existing"})
@@ -7033,6 +7076,50 @@ class MirrorPlanner:
             items.append(self._plan_only_item(endpoint, "plan_only", "excluded from pilot execution; no stock, concept, or index-code loop execution is allowed"))
         return items
 
+    def _hk_us_items(self, scope: str, mode: str, start_date: str | None, end_date: str | None, max_jobs: int) -> list[MirrorPlanItem]:
+        if mode == "pilot" and (not start_date or not end_date):
+            raise ValueError("pilot mode requires --start-date and --end-date")
+        references = dict(HK_US_REFERENCE_FETCHES_BY_SCOPE[scope])
+        calendar_api = HK_US_CALENDAR_API_BY_SCOPE[scope]
+        calendar_exchange = HK_US_CALENDAR_EXCHANGE_BY_SCOPE[scope]
+        daily_like = HK_US_DAILY_LIKE_APIS_BY_SCOPE[scope]
+        if mode == "pilot":
+            references[calendar_api] = {"start_date": str(start_date), "end_date": str(end_date), "is_open": "1"}
+        items: list[MirrorPlanItem] = []
+        for endpoint, params in references.items():
+            category = "calendar_dependency" if endpoint == calendar_api else "snapshot_reference"
+            items.append(
+                self._fetch_item(
+                    endpoint,
+                    category,
+                    params,
+                    max_jobs=1,
+                    planned_action="fetch_calendar" if endpoint == calendar_api else "fetch",
+                    required_by=daily_like if endpoint == calendar_api else None,
+                )
+            )
+        calendar_ready = bool(self.catalog.latest_snapshot(calendar_api))
+        for endpoint in daily_like:
+            if not calendar_ready:
+                items.append(
+                    self._blocked_item(
+                        endpoint,
+                        "daily_like",
+                        True,
+                        max_jobs,
+                        f"missing_{calendar_api}_snapshot",
+                        plan_status="blocked_until_trade_cal",
+                        notes=f"calendar-aware backfill waits for local {calendar_api} latest snapshot; no natural-day fallback",
+                    )
+                )
+            else:
+                start = str(start_date) if mode == "pilot" else "20250101"
+                end = str(end_date) if mode == "pilot" else "20250110"
+                items.append(self._calendar_backfill_item(endpoint, start, end, max_jobs, calendar_exchange=calendar_exchange))
+        for endpoint in HK_US_PLAN_ONLY_APIS_BY_SCOPE[scope]:
+            items.append(self._plan_only_item(endpoint, "plan_only", "excluded from HK/US low-risk execution; endpoint is plan-only or disabled by safety policy"))
+        return items
+
     def _fetch_item(self, endpoint: str, category: str, params: dict[str, Any], max_jobs: int, *, planned_action: str = "fetch", required_by: list[str] | None = None) -> MirrorPlanItem:
         plan = JobPlanner(self.root, self.catalog).plan_single_fetch(endpoint, params)
         status = "skip_existing" if plan.existing_active_data else "planned"
@@ -7053,12 +7140,12 @@ class MirrorPlanner:
             required_by=required_by,
         )
 
-    def _calendar_backfill_item(self, endpoint: str, start_date: str, end_date: str, max_jobs: int) -> MirrorPlanItem:
+    def _calendar_backfill_item(self, endpoint: str, start_date: str, end_date: str, max_jobs: int, *, calendar_exchange: str = "SSE") -> MirrorPlanItem:
         dates, calendar = DatePlanner(self.root, self.catalog).plan_dates_with_metadata(
             start_date=start_date,
             end_date=end_date,
             trading_days_only=True,
-            calendar_exchange="SSE",
+            calendar_exchange=calendar_exchange,
         )
         plan = BackfillPlanner(self.root, self.catalog).plan_date_backfill(endpoint, dates, max_jobs=max_jobs, calendar_metadata=calendar)
         missing = sum(1 for job in plan.planned_jobs if job.planned_action in {"fetch", "retry_failed"})
@@ -7187,9 +7274,99 @@ class MirrorOrchestrator:
         if max_jobs_per_api > MODE_MAX_JOBS[mode]:
             raise ValueError(f"{mode} mode max-jobs-per-api cannot exceed {MODE_MAX_JOBS[mode]}")
         run_id = self.catalog.create_run("mirror")
-        items: list[dict[str, Any]] = []
         probe_statuses = self._probe_all(scope, mode)
-        trade_cal_status = self._execute_fetch("trade_cal", self._trade_cal_params(mode, start_date, end_date), run_id, probe_statuses)
+        if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+            items = []
+            for child_scope in GLOBAL_EQUITY_CHILD_SCOPES:
+                items.extend(
+                    self._execute_scope_items(
+                        child_scope,
+                        mode,
+                        max_jobs_per_api,
+                        start_date,
+                        end_date,
+                        run_id,
+                        probe_statuses,
+                        allow_quarantined_retry=allow_quarantined_retry,
+                    )
+                )
+        else:
+            items = self._execute_scope_items(
+                scope,
+                mode,
+                max_jobs_per_api,
+                start_date,
+                end_date,
+                run_id,
+                probe_statuses,
+                allow_quarantined_retry=allow_quarantined_retry,
+            )
+        validation_ok, validation_results = Validator(self.root, self.catalog).validate_latest_snapshots(record=True)
+        validation = {
+            "status": "succeeded" if validation_ok else "failed",
+            "results": validation_results,
+        }
+        backup = None
+        restore_check = None
+        if backup_target:
+            plan = BackupPlanner(self.root, self.catalog).plan(backup_target)
+            backup_result = BackupExecutor(self.root, self.catalog).backup(plan, overwrite=backup_overwrite)
+            backup = backup_result.to_dict()
+            restore = RestoreChecker().check(Path(backup_target))
+            restore_check = restore.to_dict()
+        summary = self._summary(scope, mode, max_jobs_per_api, backup_target, items, validation, backup, restore_check)
+        status = "failed" if summary["failed_endpoints"] or summary.get("critical_dependency_failed") else "succeeded"
+        self.catalog.finish_run(run_id, status, None if status == "succeeded" else "mirror had failed endpoints", None, summary)
+        return MirrorRunResult(run_id, status, summary, validation, backup, restore_check)
+
+    def _execute_scope_items(
+        self,
+        scope: str,
+        mode: str,
+        max_jobs_per_api: int,
+        start_date: str | None,
+        end_date: str | None,
+        run_id: str,
+        probe_statuses: Mapping[str, str],
+        *,
+        allow_quarantined_retry: bool = False,
+    ) -> list[dict[str, Any]]:
+        if scope in HK_US_SCOPE_MARKETS:
+            return self._execute_hk_us_scope_items(
+                scope,
+                mode,
+                max_jobs_per_api,
+                start_date,
+                end_date,
+                run_id,
+                probe_statuses,
+                allow_quarantined_retry=allow_quarantined_retry,
+            )
+        return self._execute_a_share_or_legacy_scope_items(
+            scope,
+            mode,
+            max_jobs_per_api,
+            start_date,
+            end_date,
+            run_id,
+            probe_statuses,
+            allow_quarantined_retry=allow_quarantined_retry,
+        )
+
+    def _execute_a_share_or_legacy_scope_items(
+        self,
+        scope: str,
+        mode: str,
+        max_jobs_per_api: int,
+        start_date: str | None,
+        end_date: str | None,
+        run_id: str,
+        probe_statuses: Mapping[str, str],
+        *,
+        allow_quarantined_retry: bool = False,
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        trade_cal_status = self._execute_fetch("trade_cal", self._calendar_params_for_scope(scope, mode, start_date, end_date), run_id, probe_statuses)
         items.append(trade_cal_status)
         if scope == "a-share-low-risk":
             reference_fetches = {
@@ -7238,23 +7415,52 @@ class MirrorOrchestrator:
                 if mode == "smoke" and endpoint in A_SHARE_LOW_RISK_STOCK_CODE_SMOKE_FETCHES:
                     continue
                 items.append(self._excluded_summary(endpoint, "plan_only", "no stock, concept, or index-code loop execution is allowed"))
-        validation_ok, validation_results = Validator(self.root, self.catalog).validate_latest_snapshots(record=True)
-        validation = {
-            "status": "succeeded" if validation_ok else "failed",
-            "results": validation_results,
-        }
-        backup = None
-        restore_check = None
-        if backup_target:
-            plan = BackupPlanner(self.root, self.catalog).plan(backup_target)
-            backup_result = BackupExecutor(self.root, self.catalog).backup(plan, overwrite=backup_overwrite)
-            backup = backup_result.to_dict()
-            restore = RestoreChecker().check(Path(backup_target))
-            restore_check = restore.to_dict()
-        summary = self._summary(scope, mode, max_jobs_per_api, backup_target, items, validation, backup, restore_check)
-        status = "failed" if summary["failed_endpoints"] or summary.get("critical_dependency_failed") else "succeeded"
-        self.catalog.finish_run(run_id, status, None if status == "succeeded" else "mirror had failed endpoints", None, summary)
-        return MirrorRunResult(run_id, status, summary, validation, backup, restore_check)
+        return items
+
+    def _execute_hk_us_scope_items(
+        self,
+        scope: str,
+        mode: str,
+        max_jobs_per_api: int,
+        start_date: str | None,
+        end_date: str | None,
+        run_id: str,
+        probe_statuses: Mapping[str, str],
+        *,
+        allow_quarantined_retry: bool = False,
+    ) -> list[dict[str, Any]]:
+        if mode == "pilot" and (not start_date or not end_date):
+            raise ValueError("pilot mode requires --start-date and --end-date")
+        calendar_api = HK_US_CALENDAR_API_BY_SCOPE[scope]
+        calendar_exchange = HK_US_CALENDAR_EXCHANGE_BY_SCOPE[scope]
+        reference_fetches = dict(HK_US_REFERENCE_FETCHES_BY_SCOPE[scope])
+        if mode == "pilot":
+            reference_fetches[calendar_api] = {"start_date": str(start_date), "end_date": str(end_date), "is_open": "1"}
+        items: list[dict[str, Any]] = []
+        calendar_status = self._execute_fetch(calendar_api, reference_fetches.pop(calendar_api), run_id, probe_statuses)
+        items.append(calendar_status)
+        for endpoint, params in reference_fetches.items():
+            items.append(self._execute_fetch(endpoint, params, run_id, probe_statuses))
+        if self.catalog.latest_snapshot(calendar_api) and calendar_status["status"] not in {"failed", "blocked"}:
+            for endpoint in HK_US_DAILY_LIKE_APIS_BY_SCOPE[scope]:
+                items.append(
+                    self._execute_calendar_backfill(
+                        endpoint,
+                        mode,
+                        max_jobs_per_api,
+                        start_date,
+                        end_date,
+                        probe_statuses,
+                        calendar_exchange=calendar_exchange,
+                        allow_quarantined_retry=allow_quarantined_retry,
+                    )
+                )
+        else:
+            for endpoint in HK_US_DAILY_LIKE_APIS_BY_SCOPE[scope]:
+                items.append(self._blocked(endpoint, "daily_like", f"missing_or_failed_{calendar_api}"))
+        for endpoint in HK_US_PLAN_ONLY_APIS_BY_SCOPE[scope]:
+            items.append(self._excluded_summary(endpoint, "plan_only", "HK/US low-risk scope excludes this plan-only or disabled endpoint"))
+        return items
 
     def _trade_cal_params(self, mode: str, start_date: str | None, end_date: str | None) -> dict[str, Any]:
         if mode == "pilot":
@@ -7262,6 +7468,17 @@ class MirrorOrchestrator:
                 raise ValueError("pilot mode requires --start-date and --end-date")
             return {"exchange": "SSE", "start_date": start_date, "end_date": end_date}
         return SMOKE_REFERENCE_FETCHES["trade_cal"]
+
+    def _calendar_params_for_scope(self, scope: str, mode: str, start_date: str | None, end_date: str | None) -> dict[str, Any]:
+        if scope in HK_US_SCOPE_MARKETS:
+            calendar_api = HK_US_CALENDAR_API_BY_SCOPE[scope]
+            params = dict(HK_US_REFERENCE_FETCHES_BY_SCOPE[scope][calendar_api])
+            if mode == "pilot":
+                if not start_date or not end_date:
+                    raise ValueError("pilot mode requires --start-date and --end-date")
+                params.update({"start_date": start_date, "end_date": end_date})
+            return params
+        return self._trade_cal_params(mode, start_date, end_date)
 
     def _pilot_weekly_dates(self, start_date: str, end_date: str) -> list[str]:
         return _pilot_compatible_period_dates(self.root, self.catalog, start_date, end_date, period="weekly")
@@ -7282,6 +7499,23 @@ class MirrorOrchestrator:
             ]
             if mode == "smoke":
                 endpoints.extend(A_SHARE_LOW_RISK_STOCK_CODE_SMOKE_FETCHES)
+        elif scope in HK_US_SCOPE_MARKETS:
+            endpoints = [
+                *HK_US_REFERENCE_FETCHES_BY_SCOPE[scope],
+                *HK_US_DAILY_LIKE_APIS_BY_SCOPE[scope],
+            ]
+        elif scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+            endpoints = []
+            for child_scope in GLOBAL_EQUITY_CHILD_SCOPES:
+                if child_scope == "a-share-low-risk":
+                    endpoints.extend(A_SHARE_LOW_RISK_REFERENCE_FETCHES)
+                    endpoints.extend(A_SHARE_LOW_RISK_CALENDAR_BACKFILL_APIS)
+                    endpoints.extend(A_SHARE_LOW_RISK_EXPLICIT_DATE_APIS)
+                    if mode == "smoke":
+                        endpoints.extend(A_SHARE_LOW_RISK_STOCK_CODE_SMOKE_FETCHES)
+                else:
+                    endpoints.extend(HK_US_REFERENCE_FETCHES_BY_SCOPE[child_scope])
+                    endpoints.extend(HK_US_DAILY_LIKE_APIS_BY_SCOPE[child_scope])
         for endpoint in dict.fromkeys(endpoints):
             probe = planner.plan_probe(endpoint)
             response, status, error = self._probe(endpoint, probe.params, probe.fields)
@@ -7366,12 +7600,23 @@ class MirrorOrchestrator:
                 "error": str(exc),
             }
 
-    def _execute_calendar_backfill(self, endpoint: str, mode: str, max_jobs: int, start_date: str | None, end_date: str | None, probe_statuses: Mapping[str, str], *, allow_quarantined_retry: bool = False) -> dict[str, Any]:
+    def _execute_calendar_backfill(
+        self,
+        endpoint: str,
+        mode: str,
+        max_jobs: int,
+        start_date: str | None,
+        end_date: str | None,
+        probe_statuses: Mapping[str, str],
+        *,
+        calendar_exchange: str = "SSE",
+        allow_quarantined_retry: bool = False,
+    ) -> dict[str, Any]:
         if self._permission_blocks(endpoint, probe_statuses):
             return self._blocked(endpoint, "daily_like", self._permission_blocks(endpoint, probe_statuses) or "blocked")
         start = start_date if mode == "pilot" else "20250101"
         end = end_date if mode == "pilot" else "20250110"
-        dates, calendar = DatePlanner(self.root, self.catalog).plan_dates_with_metadata(start_date=start, end_date=end, trading_days_only=True, calendar_exchange="SSE")
+        dates, calendar = DatePlanner(self.root, self.catalog).plan_dates_with_metadata(start_date=start, end_date=end, trading_days_only=True, calendar_exchange=calendar_exchange)
         plan = BackfillPlanner(self.root, self.catalog).plan_date_backfill(endpoint, dates, max_jobs=max_jobs, calendar_metadata=calendar, allow_quarantined_retry=allow_quarantined_retry)
         result = BackfillExecutor(self.root, self.catalog).execute(plan, self.client, validate_latest=True)
         return self._backfill_item(endpoint, "daily_like", result)
@@ -7439,7 +7684,7 @@ class MirrorOrchestrator:
     def _summary(self, scope: str, mode: str, max_jobs: int, backup_target: str | None, items: list[dict[str, Any]], validation: dict[str, Any], backup: dict[str, Any] | None, restore_check: dict[str, Any] | None) -> dict[str, Any]:
         failed = [item for item in items if item.get("status") == "failed"]
         blocked = [item for item in items if item.get("status") == "blocked"]
-        critical_dependency_failed = any(item.get("endpoint") == "trade_cal" and item.get("status") in {"failed", "blocked"} for item in items)
+        critical_dependency_failed = any(item.get("endpoint") in CALENDAR_DEPENDENCY_APIS and item.get("status") in {"failed", "blocked"} for item in items)
         succeeded = [item for item in items if item.get("status") == "succeeded"]
         skipped = [item for item in items if item.get("status") == "skipped"]
         return {
