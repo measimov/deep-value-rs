@@ -7,7 +7,7 @@ import re
 import shutil
 import sqlite3
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -24,6 +24,7 @@ from .hashing import token_hash
 from .io_utils import now_utc
 from .planner import JobPlanner
 from .reader import LakeReader
+from .source_metadata import hk_us_low_risk_source_endpoints
 from .store import FileLakeStore
 from .validation import Validator
 
@@ -182,6 +183,18 @@ A_SHARE_LOW_RISK_PLAN_ONLY_APIS = [
     "index_member",
     "ths_member",
 ]
+HK_LOW_RISK_SCOPE = "hk-low-risk"
+US_LOW_RISK_SCOPE = "us-low-risk"
+GLOBAL_EQUITY_LOW_RISK_SCOPE = "global-equity-low-risk"
+SUPPORTED_MIRROR_SCOPES = {
+    "low-risk-a-share",
+    "a-share-low-risk",
+    HK_LOW_RISK_SCOPE,
+    US_LOW_RISK_SCOPE,
+    GLOBAL_EQUITY_LOW_RISK_SCOPE,
+}
+HK_US_SCOPE_MARKETS = {HK_LOW_RISK_SCOPE: "hk", US_LOW_RISK_SCOPE: "us"}
+GLOBAL_EQUITY_CHILD_SCOPES = ["a-share-low-risk", HK_LOW_RISK_SCOPE, US_LOW_RISK_SCOPE]
 MODE_MAX_JOBS = {"smoke": 3, "pilot": 20}
 
 
@@ -1213,6 +1226,9 @@ class MirrorScopeReportResult:
     categories: dict[str, list[str]]
     excluded_high_risk_patterns: list[str]
     warnings: list[str]
+    real_probe_status: dict[str, str] = field(default_factory=dict)
+    pagination_strategy: dict[str, str] = field(default_factory=dict)
+    child_scopes: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -1231,8 +1247,9 @@ class MirrorScopeReportResult:
 
 
 def ensure_mirror_scope(scope: str) -> None:
-    if scope not in {"low-risk-a-share", "a-share-low-risk"}:
-        raise ValueError("unknown mirror scope: %s; supported: low-risk-a-share, a-share-low-risk" % scope)
+    if scope not in SUPPORTED_MIRROR_SCOPES:
+        supported = ", ".join(sorted(SUPPORTED_MIRROR_SCOPES))
+        raise ValueError("unknown mirror scope: %s; supported: %s" % (scope, supported))
 
 
 def ensure_mirror_mode(mode: str) -> None:
@@ -1244,6 +1261,10 @@ def mirror_scope_endpoints(scope: str) -> list[str]:
     ensure_mirror_scope(scope)
     if scope == "a-share-low-risk":
         return list(A_SHARE_LOW_RISK_ENDPOINTS)
+    if scope in HK_US_SCOPE_MARKETS:
+        return [item["api_name"] for item in _hk_us_source_endpoints_for_scope(scope)]
+    if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+        return [*A_SHARE_LOW_RISK_ENDPOINTS, *mirror_scope_endpoints(HK_LOW_RISK_SCOPE), *mirror_scope_endpoints(US_LOW_RISK_SCOPE)]
     return list(LOW_RISK_A_SHARE_ENDPOINTS)
 
 
@@ -1251,6 +1272,14 @@ def daily_like_apis_for_scope(scope: str) -> list[str]:
     ensure_mirror_scope(scope)
     if scope == "a-share-low-risk":
         return list(A_SHARE_LOW_RISK_DAILY_LIKE_APIS)
+    if scope in HK_US_SCOPE_MARKETS:
+        return [
+            item["api_name"]
+            for item in _hk_us_source_endpoints_for_scope(scope)
+            if item.get("category") == "daily_market_data" and item.get("recommendation") == "executable_candidate"
+        ]
+    if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+        return [*A_SHARE_LOW_RISK_DAILY_LIKE_APIS, *daily_like_apis_for_scope(HK_LOW_RISK_SCOPE), *daily_like_apis_for_scope(US_LOW_RISK_SCOPE)]
     return list(DAILY_LIKE_MIRROR_APIS)
 
 
@@ -1258,6 +1287,15 @@ def coverage_matrix_apis_for_scope(scope: str) -> list[str]:
     ensure_mirror_scope(scope)
     if scope == "a-share-low-risk":
         return [*A_SHARE_LOW_RISK_DAILY_LIKE_APIS, *A_SHARE_LOW_RISK_EXPLICIT_PERIODIC_APIS]
+    if scope in HK_US_SCOPE_MARKETS:
+        return daily_like_apis_for_scope(scope)
+    if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+        return [
+            *A_SHARE_LOW_RISK_DAILY_LIKE_APIS,
+            *A_SHARE_LOW_RISK_EXPLICIT_PERIODIC_APIS,
+            *coverage_matrix_apis_for_scope(HK_LOW_RISK_SCOPE),
+            *coverage_matrix_apis_for_scope(US_LOW_RISK_SCOPE),
+        ]
     return [*DAILY_LIKE_MIRROR_APIS, "weekly", "monthly"]
 
 
@@ -1265,7 +1303,24 @@ def reference_refresh_apis_for_scope(scope: str) -> list[str]:
     ensure_mirror_scope(scope)
     if scope == "a-share-low-risk":
         return ["stock_basic", "stock_company", "hs_const", "concept", "index_basic", "ths_index", "index_classify"]
+    if scope in HK_US_SCOPE_MARKETS:
+        return [
+            item["api_name"]
+            for item in _hk_us_source_endpoints_for_scope(scope)
+            if item.get("category") in {"reference_snapshot", "calendar"} and item.get("recommendation") == "executable_candidate"
+        ]
+    if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+        return [
+            *reference_refresh_apis_for_scope("a-share-low-risk"),
+            *reference_refresh_apis_for_scope(HK_LOW_RISK_SCOPE),
+            *reference_refresh_apis_for_scope(US_LOW_RISK_SCOPE),
+        ]
     return ["stock_basic", "hs_const"]
+
+
+def _hk_us_source_endpoints_for_scope(scope: str) -> list[dict[str, Any]]:
+    market = HK_US_SCOPE_MARKETS[scope]
+    return [item for item in hk_us_low_risk_source_endpoints() if item.get("market") == market]
 
 
 class MirrorScopeReporter:
@@ -1275,7 +1330,11 @@ class MirrorScopeReporter:
         ensure_mirror_scope(scope)
         if scope == "low-risk-a-share":
             return self._legacy_low_risk_report(scope)
-        return self._a_share_low_risk_report(scope)
+        if scope == "a-share-low-risk":
+            return self._a_share_low_risk_report(scope)
+        if scope in HK_US_SCOPE_MARKETS:
+            return self._hk_us_low_risk_report(scope)
+        return self._global_equity_low_risk_report(scope)
 
     def _legacy_low_risk_report(self, scope: str) -> MirrorScopeReportResult:
         endpoints = mirror_scope_endpoints(scope)
@@ -1335,6 +1394,118 @@ class MirrorScopeReporter:
             excluded_high_risk_patterns=PROHIBITED_SCOPE_ENDPOINT_PATTERNS,
             warnings=["mirror-scope is read-only and does not fetch, backfill, or write catalog state"],
         )
+
+    def _hk_us_low_risk_report(self, scope: str) -> MirrorScopeReportResult:
+        executable_configs = {cfg["api_name"]: cfg for cfg in load_bundled_endpoint_configs()}
+        endpoints = _hk_us_source_endpoints_for_scope(scope)
+        executable_now: list[str] = []
+        plan_only: list[str] = []
+        disabled: list[str] = []
+        missing_metadata: list[str] = []
+        blocked_reason: dict[str, str] = {}
+        next_enablement_step: dict[str, str] = {}
+        categories: dict[str, list[str]] = {}
+        real_probe_status: dict[str, str] = {}
+        pagination_strategy: dict[str, str] = {}
+
+        for item in endpoints:
+            api_name = str(item["api_name"])
+            category = str(item.get("category") or "uncategorized")
+            categories.setdefault(category, []).append(api_name)
+            real_probe_status[api_name] = str(item.get("real_probe_status") or "pending")
+            pagination_strategy[api_name] = str(item.get("recommended_pagination_strategy") or "unknown")
+            recommendation = str(item.get("recommendation") or "")
+            if recommendation == "disabled":
+                disabled.append(api_name)
+                blocked_reason[api_name] = self._hk_us_blocked_reason(item)
+                next_enablement_step[api_name] = "keep disabled; outside this low-risk historical mirror goal"
+                continue
+            if recommendation == "plan_only":
+                plan_only.append(api_name)
+                blocked_reason[api_name] = self._hk_us_blocked_reason(item)
+                next_enablement_step[api_name] = "keep plan-only until a separate financial/PIT execution goal adds disclosure-safe code-period infrastructure"
+                continue
+
+            cfg = executable_configs.get(api_name)
+            if cfg and cfg.get("execution_status", "enabled") != "disabled":
+                executable_now.append(api_name)
+                continue
+            plan_only.append(api_name)
+            missing_metadata.append(api_name)
+            blocked_reason[api_name] = "real probe passed, but executable endpoint config, fake fixture, planner, and report integration are not complete yet"
+            next_enablement_step[api_name] = "add endpoint config, partition strategy, fake fetch/write/read/validate tests, and guarded command/report integration"
+
+        return MirrorScopeReportResult(
+            report_version=self.REPORT_VERSION,
+            scope=scope,
+            endpoints_in_scope=[str(item["api_name"]) for item in endpoints],
+            executable_now=executable_now,
+            plan_only=plan_only,
+            disabled=disabled,
+            blocked_reason=blocked_reason,
+            missing_metadata=missing_metadata,
+            next_enablement_step=next_enablement_step,
+            categories={key: list(value) for key, value in categories.items()},
+            excluded_high_risk_patterns=PROHIBITED_SCOPE_ENDPOINT_PATTERNS,
+            warnings=[
+                "mirror-scope is read-only and does not fetch, backfill, or write catalog state",
+                "HK/US executable candidates remain plan-only until endpoint configs and fake tests are added",
+            ],
+            real_probe_status=real_probe_status,
+            pagination_strategy=pagination_strategy,
+        )
+
+    def _global_equity_low_risk_report(self, scope: str) -> MirrorScopeReportResult:
+        child_reports = {child: self.report(scope=child) for child in GLOBAL_EQUITY_CHILD_SCOPES}
+        child_payloads = {child: report.to_dict() for child, report in child_reports.items()}
+
+        def combined_list(field: str) -> list[str]:
+            out: list[str] = []
+            for report in child_reports.values():
+                out.extend(list(getattr(report, field)))
+            return out
+
+        blocked_reason: dict[str, str] = {}
+        missing_metadata: list[str] = []
+        next_enablement_step: dict[str, str] = {}
+        real_probe_status: dict[str, str] = {}
+        pagination_strategy: dict[str, str] = {}
+        categories: dict[str, list[str]] = {}
+        warnings: list[str] = [
+            "global-equity-low-risk is explicit composition of a-share-low-risk, hk-low-risk, and us-low-risk; it is not a wildcard over all Tushare APIs"
+        ]
+        for child, report in child_reports.items():
+            blocked_reason.update(report.blocked_reason)
+            missing_metadata.extend(report.missing_metadata)
+            next_enablement_step.update(report.next_enablement_step)
+            real_probe_status.update(report.real_probe_status)
+            pagination_strategy.update(report.pagination_strategy)
+            categories[child] = list(report.endpoints_in_scope)
+            warnings.extend(report.warnings)
+
+        return MirrorScopeReportResult(
+            report_version=self.REPORT_VERSION,
+            scope=scope,
+            endpoints_in_scope=combined_list("endpoints_in_scope"),
+            executable_now=combined_list("executable_now"),
+            plan_only=combined_list("plan_only"),
+            disabled=combined_list("disabled"),
+            blocked_reason=blocked_reason,
+            missing_metadata=missing_metadata,
+            next_enablement_step=next_enablement_step,
+            categories=categories,
+            excluded_high_risk_patterns=PROHIBITED_SCOPE_ENDPOINT_PATTERNS,
+            warnings=sorted(set(warnings)),
+            real_probe_status=real_probe_status,
+            pagination_strategy=pagination_strategy,
+            child_scopes=child_payloads,
+        )
+
+    def _hk_us_blocked_reason(self, item: Mapping[str, Any]) -> str:
+        notes = item.get("safety_notes") or []
+        if notes:
+            return "; ".join(str(note) for note in notes)
+        return str(item.get("recommendation") or "not executable")
 
     def _next_step(self, cfg: Mapping[str, Any]) -> str:
         required = cfg.get("required_infra") or []
