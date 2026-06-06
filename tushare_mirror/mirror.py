@@ -1836,16 +1836,39 @@ def _token_value_from_env() -> str | None:
     return None
 
 
+def _iter_files_tolerant(root: Path) -> Iterable[Path]:
+    try:
+        if root.is_file():
+            yield root
+            return
+        if not root.exists():
+            return
+    except OSError:
+        return
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_file(follow_symlinks=False):
+                            yield Path(entry.path)
+                        elif entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+
+
 def _contains_token_plaintext(paths: list[Path], token: str | None = None) -> bool:
     secret = token if token is not None else _token_value_from_env()
     if not secret or len(secret) < 8:
         return False
     needle = secret.encode()
     for root in paths:
-        if not root.exists():
-            continue
-        files = [root] if root.is_file() else (path for path in root.rglob("*") if path.is_file())
-        for path in files:
+        for path in _iter_files_tolerant(root):
             try:
                 with path.open("rb") as handle:
                     carry = b""

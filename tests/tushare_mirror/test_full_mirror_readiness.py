@@ -8,11 +8,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tushare_mirror.backup import BackupExecutor, BackupPlanner
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
+from tushare_mirror import mirror as mirror_module
 from tushare_mirror.mirror import MirrorBatchPlanner, MirrorOrchestrator, MirrorReadinessReporter, MirrorReviewer
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
@@ -238,6 +240,21 @@ class FullMirrorReadinessReviewTests(unittest.TestCase):
         ]:
             self.assertIn(key, payload)
         self.assertNotIn("fake-review-token", result.stdout)
+
+    def test_token_plaintext_scan_tolerates_concurrent_directory_removal(self):
+        volatile = self.base / "volatile"
+        volatile.mkdir()
+        original_scandir = mirror_module.os.scandir
+
+        def flaky_scandir(path):
+            if Path(path) == volatile:
+                raise FileNotFoundError(str(path))
+            return original_scandir(path)
+
+        with patch.object(mirror_module.os, "scandir", side_effect=flaky_scandir):
+            found = mirror_module._contains_token_plaintext([volatile], token="fake-review-token")
+
+        self.assertFalse(found)
 
 
 class FullMirrorReadinessReportTests(FullMirrorReadinessReviewTests):
