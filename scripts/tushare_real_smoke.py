@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import shutil
@@ -15,8 +16,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tushare_mirror.catalog import CatalogStore
+from tushare_mirror.client import TushareClient, classify_probe_response
 from tushare_mirror.cli import load_dotenv
 from tushare_mirror.endpoints import load_into_catalog
+from tushare_mirror.source_metadata import hk_us_low_risk_source_endpoints
 
 PHASE1_ENDPOINTS: dict[str, dict[str, Any]] = {
     "daily": {"trade_date": "20250102"},
@@ -53,6 +56,42 @@ ENDPOINTS: dict[str, dict[str, Any]] = {**A_SHARE_LOW_RISK_ENDPOINTS}
 
 ACCESSIBLE = {"accessible", "empty_but_accessible"}
 PERMISSION_STATUSES = {"permission_denied", "rate_limited"}
+HK_US_LOW_RISK_PROBE_FIELDS: dict[str, list[str]] = {
+    "hk_basic": ["ts_code", "name", "list_status", "list_date"],
+    "hk_tradecal": ["cal_date", "is_open", "pretrade_date"],
+    "hk_daily": ["ts_code", "trade_date", "open", "close", "vol", "amount"],
+    "hk_daily_adj": ["ts_code", "trade_date", "close", "adj_factor", "total_mv"],
+    "hk_adjfactor": ["ts_code", "trade_date", "cum_adjfactor", "close_price"],
+    "us_basic": ["ts_code", "name", "enname", "classify", "list_date", "delist_date"],
+    "us_tradecal": ["cal_date", "is_open", "pretrade_date"],
+    "us_daily": ["ts_code", "trade_date", "close", "open", "vol", "amount", "vwap"],
+    "us_daily_adj": ["ts_code", "trade_date", "close", "adj_factor", "exchange"],
+    "us_adjfactor": ["ts_code", "trade_date", "exchange", "cum_adjfactor", "close_price"],
+}
+HK_US_LOW_RISK_PROBE_REQUESTS: dict[str, list[dict[str, Any]]] = {
+    "hk_basic": [{"list_status": "L"}],
+    "hk_tradecal": [{"start_date": "20250101", "end_date": "20250110", "is_open": "1"}],
+    "hk_daily": [{"ts_code": "00001.HK", "start_date": "20250102", "end_date": "20250102"}],
+    "hk_daily_adj": [
+        {"trade_date": "20250102", "limit": 2, "offset": 0},
+        {"trade_date": "20250102", "limit": 2, "offset": 2},
+    ],
+    "hk_adjfactor": [{"ts_code": "00001.HK", "start_date": "20250102", "end_date": "20250102"}],
+    "us_basic": [
+        {"classify": "EQ", "limit": 2, "offset": 0},
+        {"classify": "EQ", "limit": 2, "offset": 2},
+    ],
+    "us_tradecal": [{"start_date": "20250101", "end_date": "20250110", "is_open": "1"}],
+    "us_daily": [
+        {"ts_code": "AAPL", "start_date": "20250102", "end_date": "20250102"},
+        {"trade_date": "20250102", "limit": 2, "offset": 0},
+    ],
+    "us_daily_adj": [
+        {"trade_date": "20250102", "exchange": "NAS", "limit": 2, "offset": 0},
+        {"trade_date": "20250102", "exchange": "NAS", "limit": 2, "offset": 2},
+    ],
+    "us_adjfactor": [{"ts_code": "AAPL", "start_date": "20250102", "end_date": "20250102"}],
+}
 
 
 def run_cli(root: Path, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -131,6 +170,168 @@ def print_command_preview(root: Path, endpoints: list[str]) -> None:
         "real_requests_sent": False,
     }
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _ensure_tmp_output_path(output: Path) -> Path:
+    resolved = output.expanduser().resolve()
+    tmp_root = Path("/tmp").resolve()
+    if not _is_relative_to(resolved, tmp_root):
+        raise ValueError("--output for real probes must be under /tmp")
+    if resolved.exists() and resolved.is_dir():
+        raise ValueError("--output must be a file path, not a directory")
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+def _redact_for_probe(value: Any, token: str | None) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, child in value.items():
+            if "token" in str(key).lower():
+                redacted[key] = "<redacted>"
+            else:
+                redacted[key] = _redact_for_probe(child, token)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_for_probe(item, token) for item in value]
+    if isinstance(value, str) and token:
+        return value.replace(token, "<redacted>")
+    return value
+
+
+def _write_probe_report(output: Path, payload: dict[str, Any]) -> None:
+    output.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+
+
+def _probe_report_header(output: Path, max_requests_per_endpoint: int) -> dict[str, Any]:
+    return {
+        "report_version": "hk-us-low-risk-probe/v1",
+        "generated_at": dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "output": str(output),
+        "max_requests_per_endpoint": max_requests_per_endpoint,
+        "real_requests_sent": False,
+        "token_plaintext_found": False,
+        "overall_status": "blocked",
+        "blocking_errors": [],
+        "warnings": [],
+        "endpoints": [],
+    }
+
+
+def _executable_hk_us_source_endpoints() -> list[dict[str, Any]]:
+    return [item for item in hk_us_low_risk_source_endpoints() if item.get("recommendation") == "executable_candidate"]
+
+
+def _probe_endpoint(client: Any, endpoint: dict[str, Any], max_requests_per_endpoint: int, token: str | None) -> dict[str, Any]:
+    api_name = str(endpoint["api_name"])
+    requests = HK_US_LOW_RISK_PROBE_REQUESTS.get(api_name, [])[:max_requests_per_endpoint]
+    fields = HK_US_LOW_RISK_PROBE_FIELDS.get(api_name, list(endpoint.get("documented_fields") or [])[:8])
+    statuses: list[str] = []
+    errors: list[str] = []
+    response_fields: list[str] = []
+    row_count = 0
+    params_used: list[dict[str, Any]] = []
+    successful_offset_request = False
+    offset_request_seen = False
+    for params in requests:
+        params_used.append(_redact_for_probe(dict(params), token))
+        if "offset" in params or "limit" in params:
+            offset_request_seen = True
+        try:
+            response = client.request(api_name, params, fields)
+        except Exception as exc:
+            statuses.append("network_error")
+            errors.append(_redact_for_probe(str(exc), token))
+            continue
+        response = _redact_for_probe(response, token)
+        status, message = classify_probe_response(response)
+        statuses.append(status)
+        if message:
+            errors.append(message)
+        data = response.get("data") or {}
+        items = list(data.get("items") or [])
+        if not response_fields:
+            response_fields = [str(item) for item in (data.get("fields") or [])]
+        row_count += len(items)
+        if status in ACCESSIBLE and ("offset" in params or "limit" in params):
+            successful_offset_request = True
+    status = "not_run"
+    if any(item in ACCESSIBLE for item in statuses):
+        status = "accessible" if row_count else "empty_but_accessible"
+    elif statuses:
+        status = statuses[-1]
+    return {
+        "endpoint": api_name,
+        "market": endpoint.get("market"),
+        "status": status,
+        "request_count": len(requests),
+        "params_used": params_used,
+        "fields": response_fields,
+        "row_count": row_count,
+        "page_count_tested": len(requests),
+        "pagination_supported": bool(successful_offset_request),
+        "pagination_probe_attempted": bool(offset_request_seen),
+        "recommended_planner_kind": endpoint.get("recommended_planner_kind"),
+        "recommended_partition_template": endpoint.get("recommended_partition_template"),
+        "recommended_pagination_strategy": endpoint.get("recommended_pagination_strategy"),
+        "safety_notes": endpoint.get("safety_notes") or [],
+        "errors": errors,
+    }
+
+
+def run_hk_us_low_risk_probe(
+    output: Path,
+    max_requests_per_endpoint: int,
+    *,
+    token: str | None = None,
+    client: Any | None = None,
+) -> int:
+    if max_requests_per_endpoint < 1:
+        raise ValueError("--max-requests-per-endpoint must be positive")
+    if max_requests_per_endpoint > 2:
+        raise ValueError("--max-requests-per-endpoint must be <= 2 for HK/US low-risk probes")
+    output = _ensure_tmp_output_path(output)
+    load_dotenv()
+    token = token if token is not None else os.environ.get("TUSHARE_TOKEN")
+    report = _probe_report_header(output, max_requests_per_endpoint)
+    if not token:
+        report["blocking_errors"].append("TUSHARE_TOKEN is required; no real requests were sent")
+        _write_probe_report(output, report)
+        print(json.dumps({"output": str(output), "overall_status": "blocked", "real_requests_sent": False}, sort_keys=True))
+        return 2
+
+    client = client if client is not None else TushareClient(token)
+    endpoints = _executable_hk_us_source_endpoints()
+    rows = [_probe_endpoint(client, endpoint, max_requests_per_endpoint, token) for endpoint in endpoints]
+    report["endpoints"] = rows
+    report["real_requests_sent"] = True
+    blocked_statuses = {"invalid_params", "invalid_endpoint", "network_error", "server_error", "unknown_error"}
+    permission_statuses = {"permission_denied", "rate_limited"}
+    if any(row["status"] in blocked_statuses for row in rows):
+        report["overall_status"] = "blocked"
+        report["blocking_errors"].append("one or more probes returned blocking errors")
+    elif any(row["status"] in permission_statuses for row in rows):
+        report["overall_status"] = "warning"
+        report["warnings"].append("one or more probes could not confirm data access due to permission or rate status")
+    else:
+        report["overall_status"] = "passed"
+    encoded = json.dumps(report, ensure_ascii=False)
+    report["token_plaintext_found"] = bool(token and token in encoded)
+    if report["token_plaintext_found"]:
+        report["overall_status"] = "blocked"
+        report["blocking_errors"].append("probe report would contain token plaintext")
+        report = _redact_for_probe(report, token)
+    _write_probe_report(output, report)
+    print(json.dumps({"output": str(output), "overall_status": report["overall_status"], "real_requests_sent": True}, sort_keys=True))
+    return 0 if report["overall_status"] in {"passed", "warning"} else 1
 
 
 def run_smoke(root: Path, endpoints: list[str], reset_root: bool) -> int:
@@ -248,6 +449,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--all-phase-1", action="store_true", help="Run daily plus Phase 1.2 low-volume endpoints.")
     parser.add_argument("--phase-2-low-volume", action="store_true", help="Run Phase 2 low-risk endpoints only.")
     parser.add_argument("--a-share-low-risk-smoke", action="store_true", help="Run the bounded A-share low-risk endpoint smoke set.")
+    parser.add_argument("--hk-us-low-risk-probe", action="store_true", help="Run bounded HK/US low-risk interface probes and write redacted diagnostics under /tmp.")
+    parser.add_argument("--output", help="Probe output JSON path. Required for --hk-us-low-risk-probe and must be under /tmp.")
+    parser.add_argument("--max-requests-per-endpoint", type=int, default=2, help="HK/US probe request cap per endpoint; maximum 2.")
     parser.add_argument("--print-commands", action="store_true", help="Print selected smoke commands without sending real requests.")
     parser.add_argument("--calendar-backfill", action="store_true", help="Run the Phase 2.4 calendar-aware daily backfill smoke.")
     parser.add_argument("--reset-root", action="store_true", help="Remove the root before running.")
@@ -256,6 +460,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.hk_us_low_risk_probe:
+        if not args.output:
+            print("--output is required for --hk-us-low-risk-probe", file=sys.stderr)
+            return 2
+        try:
+            return run_hk_us_low_risk_probe(Path(args.output), args.max_requests_per_endpoint)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     endpoints: list[str] = []
     if args.all_phase_1:
         endpoints.extend(PHASE1_ENDPOINTS)
@@ -271,12 +484,12 @@ def main(argv: list[str] | None = None) -> int:
     endpoints = [api for api in endpoints if not (api in seen or seen.add(api))]
     if args.print_commands:
         if not endpoints:
-            print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, or --endpoint.", file=sys.stderr)
+            print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, or --endpoint.", file=sys.stderr)
             return 2
         print_command_preview(Path(args.root), endpoints)
         return 0
     if not endpoints:
-        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --calendar-backfill, or --endpoint.", file=sys.stderr)
+        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --calendar-backfill, or --endpoint.", file=sys.stderr)
         return 2
     return run_smoke(Path(args.root), endpoints, args.reset_root)
 
