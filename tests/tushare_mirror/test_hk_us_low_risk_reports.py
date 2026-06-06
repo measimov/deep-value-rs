@@ -16,6 +16,7 @@ from tushare_mirror.mirror import (
     MirrorCoverageMatrixReporter,
     MirrorNextBatchReporter,
     MirrorReadinessReporter,
+    MirrorReviewer,
     MirrorStatusReporter,
     RequestEstimateReporter,
 )
@@ -63,6 +64,11 @@ class HKUSLowRiskReportIntegrationTests(unittest.TestCase):
         self.assertEqual(us.scope, "us-low-risk")
         self.assertIn("us_tradecal", json.dumps(us.to_dict()))
         self.assertEqual(us.report_version, "mirror-status/v1")
+
+        hk_review = MirrorReviewer().review(root=self.root, backup=self.backup, scope="hk-low-risk")
+        us_review = MirrorReviewer().review(root=self.root, backup=self.backup, scope="us-low-risk")
+        self.assertEqual(hk_review.calendar_exchange, "HKEX")
+        self.assertEqual(us_review.calendar_exchange, "NASDAQ")
 
     def test_batch_plan_stages_market_calendar_dependency(self):
         before = self.counts()

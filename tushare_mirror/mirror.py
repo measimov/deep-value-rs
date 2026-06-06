@@ -1939,6 +1939,7 @@ class MirrorReviewer:
     ) -> MirrorReviewResult:
         ensure_mirror_scope(scope)
         ensure_mirror_mode(mode)
+        effective_calendar_exchange = calendar_exchange_for_scope(scope, calendar_exchange)
         mirror_root = Path(root)
         backup_root = Path(backup)
         warnings: list[str] = []
@@ -1968,7 +1969,7 @@ class MirrorReviewer:
                 validation_status = "succeeded" if ok else "failed"
                 if not ok:
                     blocking_errors.append("validate --snapshot latest --no-record failed")
-                coverage_summary = self._coverage_summary(mirror_root, catalog, scope, start_date, end_date, calendar_exchange, warnings, blocking_errors)
+                coverage_summary = self._coverage_summary(mirror_root, catalog, scope, start_date, end_date, effective_calendar_exchange, warnings, blocking_errors)
             except Exception as exc:
                 blocking_errors.append(f"catalog review failed: {exc}")
 
@@ -2006,7 +2007,7 @@ class MirrorReviewer:
             mode=mode,
             start_date=start_date,
             end_date=end_date,
-            calendar_exchange=calendar_exchange,
+            calendar_exchange=effective_calendar_exchange,
             root_status=root_status,
             backup_status=backup_status,
             catalog_status=catalog_status,
