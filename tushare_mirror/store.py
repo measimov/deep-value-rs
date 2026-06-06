@@ -84,7 +84,7 @@ class FileLakeStore:
         raw_tmp = tmp_dir / "raw" / f"{plan.job_key}.jsonl.zst"
         parquet_tmp = tmp_dir / "lake" / f"{plan.job_key}.parquet"
         try:
-            page_size = cfg.get("page_size") or 5000
+            page_size = self._page_size(cfg)
             result = self._query_with_retry(client, api_name, plan.params, plan.fields, page_size, max_attempts)
             raw_events = [self._raw_event(run_id, plan.job_key, api_name, event, plan.fields) for event in result.events]
             try:
@@ -205,7 +205,13 @@ class FileLakeStore:
                 self.catalog.record_quarantine(run_id, plan.job_key, api_name, error_type.value, str(qdir.relative_to(self.root)), None, None)
             raise
 
-    def _query_with_retry(self, client, api_name: str, params: Mapping[str, Any], fields: list[str], page_size: int, max_attempts: int) -> QueryResult:
+    def _page_size(self, cfg: Mapping[str, Any]) -> int | None:
+        pagination_mode = str(cfg.get("pagination_mode") or "paged")
+        if pagination_mode == "none":
+            return None
+        return int(cfg.get("page_size") or 5000)
+
+    def _query_with_retry(self, client, api_name: str, params: Mapping[str, Any], fields: list[str], page_size: int | None, max_attempts: int) -> QueryResult:
         attempt = 1
         while True:
             try:

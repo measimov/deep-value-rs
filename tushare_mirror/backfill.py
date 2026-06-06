@@ -24,10 +24,39 @@ SUPPORTED_DATE_BACKFILL_APIS = {
     "index_weekly": "trade_date",
     "index_monthly": "trade_date",
     "suspend_d": "trade_date",
+    "hk_daily": "trade_date",
+    "hk_daily_adj": "trade_date",
+    "hk_adjfactor": "trade_date",
+    "us_daily": "trade_date",
+    "us_daily_adj": "trade_date",
+    "us_adjfactor": "trade_date",
 }
 
-TRADING_DAY_BACKFILL_APIS = {"daily", "adj_factor", "daily_basic", "suspend_d", "index_daily"}
-SUPPORTED_CALENDAR_EXCHANGES = {"SSE"}
+TRADING_DAY_BACKFILL_APIS = {
+    "daily",
+    "adj_factor",
+    "daily_basic",
+    "suspend_d",
+    "index_daily",
+    "hk_daily",
+    "hk_daily_adj",
+    "hk_adjfactor",
+    "us_daily",
+    "us_daily_adj",
+    "us_adjfactor",
+}
+SUPPORTED_CALENDAR_EXCHANGES = {"SSE", "HK", "HKEX", "SEHK", "US", "NYSE", "NASDAQ", "NYS", "NAS"}
+CALENDAR_SOURCE_BY_EXCHANGE = {
+    "SSE": {"api_name": "trade_cal", "exchange_field": "exchange", "exchange_value": "SSE"},
+    "HK": {"api_name": "hk_tradecal", "exchange_field": None, "exchange_value": None},
+    "HKEX": {"api_name": "hk_tradecal", "exchange_field": None, "exchange_value": None},
+    "SEHK": {"api_name": "hk_tradecal", "exchange_field": None, "exchange_value": None},
+    "US": {"api_name": "us_tradecal", "exchange_field": None, "exchange_value": None},
+    "NYSE": {"api_name": "us_tradecal", "exchange_field": None, "exchange_value": None},
+    "NASDAQ": {"api_name": "us_tradecal", "exchange_field": None, "exchange_value": None},
+    "NYS": {"api_name": "us_tradecal", "exchange_field": None, "exchange_value": None},
+    "NAS": {"api_name": "us_tradecal", "exchange_field": None, "exchange_value": None},
+}
 PHASE21_EXECUTE_MAX_JOBS = 20
 
 
@@ -165,8 +194,11 @@ class DatePlanner:
         if trading_days_only:
             filtered = self._filter_trading_days(planned, calendar_exchange)
             filtered_out = sorted(set(planned) - set(filtered))
+            source = self._calendar_source(calendar_exchange)
+            api_name = str(source["api_name"])
             metadata = {
-                "calendar_source": "local trade_cal latest snapshot",
+                "calendar_source": f"local {api_name} latest snapshot",
+                "calendar_api": api_name,
                 "exchange": calendar_exchange.upper(),
                 "requested_start_date": planned[0] if planned else None,
                 "requested_end_date": planned[-1] if planned else None,
@@ -180,24 +212,28 @@ class DatePlanner:
 
     def _filter_trading_days(self, dates: list[str], calendar_exchange: str = "SSE") -> list[str]:
         exchange = calendar_exchange.upper()
-        if exchange not in SUPPORTED_CALENDAR_EXCHANGES:
-            supported = ", ".join(sorted(SUPPORTED_CALENDAR_EXCHANGES))
-            raise ValueError(f"unsupported calendar exchange: {calendar_exchange}; supported: {supported}")
-        if not self.catalog.latest_snapshot("trade_cal"):
-            raise ValueError("trading-days-only requires local trade_cal latest snapshot; fetch trade_cal first")
+        source = self._calendar_source(exchange)
+        api_name = str(source["api_name"])
+        exchange_field = source.get("exchange_field")
+        exchange_value = source.get("exchange_value")
+        if not self.catalog.latest_snapshot(api_name):
+            raise ValueError(f"trading-days-only requires local {api_name} latest snapshot; fetch {api_name} first")
         wanted = set(dates)
-        table = LakeReader(self.root, self.catalog).scan_api("trade_cal", columns=["exchange", "cal_date", "is_open"])
+        columns = ["cal_date", "is_open"]
+        if exchange_field:
+            columns.insert(0, str(exchange_field))
+        table = LakeReader(self.root, self.catalog).scan_api(api_name, columns=columns)
         if table.num_rows == 0:
             return []
-        missing = [name for name in ["exchange", "cal_date", "is_open"] if name not in table.column_names]
+        missing = [name for name in columns if name not in table.column_names]
         if missing:
-            raise ValueError(f"trade_cal latest snapshot is missing required columns: {', '.join(missing)}")
-        exchanges = table["exchange"].to_pylist()
+            raise ValueError(f"{api_name} latest snapshot is missing required columns: {', '.join(missing)}")
+        exchanges = table[str(exchange_field)].to_pylist() if exchange_field else [exchange_value] * table.num_rows
         cal_dates = table["cal_date"].to_pylist()
         is_open = table["is_open"].to_pylist()
         open_dates: list[str] = []
         for source_exchange, cal_date, open_flag in zip(exchanges, cal_dates, is_open):
-            if str(source_exchange).upper() != exchange:
+            if exchange_field and str(source_exchange).upper() != str(exchange_value).upper():
                 continue
             try:
                 value = self._normalize_date(str(cal_date))
@@ -206,6 +242,13 @@ class DatePlanner:
             if value in wanted and self._is_open_flag(open_flag):
                 open_dates.append(value)
         return sorted(set(open_dates))
+
+    def _calendar_source(self, calendar_exchange: str) -> dict[str, Any]:
+        exchange = calendar_exchange.upper()
+        if exchange not in SUPPORTED_CALENDAR_EXCHANGES:
+            supported = ", ".join(sorted(SUPPORTED_CALENDAR_EXCHANGES))
+            raise ValueError(f"unsupported calendar exchange: {calendar_exchange}; supported: {supported}")
+        return dict(CALENDAR_SOURCE_BY_EXCHANGE[exchange])
 
     def _is_open_flag(self, value: Any) -> bool:
         if isinstance(value, bool):
