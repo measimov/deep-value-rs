@@ -165,6 +165,62 @@ class AShareAutoSyncTests(unittest.TestCase):
         self.assertIn("--execute requires --state for checkpoint/resume", result.blocking_errors)
         self.assertEqual(before, self.counts())
 
+    def test_hk_us_auto_sync_dry_run_is_planning_only(self):
+        before = self.counts()
+        state = self.base / "hk-state.json"
+        result = self.run_cli(
+            "mirror-auto-sync",
+            "--root",
+            str(self.root),
+            "--backup",
+            str(self.backup),
+            "--scope",
+            "hk-low-risk",
+            "--from-date",
+            "20250201",
+            "--to-date",
+            "20250305",
+            "--window-days",
+            "20",
+            "--max-jobs-per-api",
+            "20",
+            "--state",
+            str(state),
+            "--json",
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "planned")
+        self.assertFalse(payload["execute"])
+        self.assertEqual(payload["planned_window_count"], 2)
+        self.assertFalse(state.exists())
+        self.assertEqual(before, self.counts())
+        first_window = payload["windows"][0]
+        self.assertEqual(first_window["checkpoint_path"], str(state.resolve()))
+        self.assertIn("hk_tradecal", first_window["calendar_dependency_summary"]["calendar_apis"])
+        self.assertIn("hk_daily", first_window["endpoint_list"])
+        self.assertEqual(first_window["retry_policy"]["max_attempts"], 3)
+        self.assertTrue(any("dry-run planning only" in warning for warning in payload["warnings"]))
+
+    def test_hk_us_auto_sync_execute_remains_blocked(self):
+        before = self.counts()
+        result = MirrorAutoSyncReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="us-low-risk",
+            from_date="20250201",
+            to_date="20250220",
+            window_days=20,
+            max_jobs_per_api=20,
+            state=self.base / "us-state.json",
+            execute=True,
+            confirm_auto_sync=True,
+            client=AutoSyncFakeClient(),
+            sleep=lambda _: None,
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("mirror-auto-sync execute currently supports only scope a-share-low-risk; HK/US execution requires a separate guarded goal", result.blocking_errors)
+        self.assertEqual(before, self.counts())
+
     def test_fake_execute_writes_checkpoint_and_excludes_plan_only_endpoints(self):
         state = self.base / "auto-sync-state.json"
         client = AutoSyncFakeClient()

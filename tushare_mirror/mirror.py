@@ -5824,7 +5824,9 @@ class MirrorAutoSyncReporter:
         ]
         blocking_errors: list[str] = []
         if scope != "a-share-low-risk":
-            blocking_errors.append("mirror-auto-sync currently supports only scope a-share-low-risk")
+            warnings.append(f"{scope} auto-sync is dry-run planning only; execute mode remains A-share-only in this goal")
+            if execute:
+                blocking_errors.append("mirror-auto-sync execute currently supports only scope a-share-low-risk; HK/US execution requires a separate guarded goal")
         if window_days <= 0:
             blocking_errors.append("--window-days must be positive")
         if max_jobs_per_api <= 0:
@@ -5867,12 +5869,22 @@ class MirrorAutoSyncReporter:
                 resume_from_state = True
 
         windows = self._planned_windows(effective_start, resolved_to, window_days) if not blocking_errors else []
+        executable_endpoints = MirrorScopeReporter().report(scope=scope).executable_now
+        calendar_summary = MirrorPullCommandReporter()._calendar_dependency_summary(scope, effective_start, resolved_to)
         for window in windows:
             window["command_preview"] = self._mirror_run_command(mirror_root, backup_root, scope, window["start_date"], window["end_date"], max_jobs_per_api)
             window["attempts"] = 0
             window["status"] = "planned"
             window["would_execute_real_requests"] = execute
             window["user_confirmation_required"] = bool(execute)
+            window["checkpoint_path"] = str(state_path) if state_path else None
+            window["calendar_dependency_summary"] = calendar_summary
+            window["endpoint_list"] = executable_endpoints
+            window["retry_policy"] = {
+                "max_attempts": max_attempts,
+                "retry_backoff_seconds": retry_backoff_seconds,
+                "retryable_failures": sorted(self.RETRYABLE_FAILURES),
+            }
 
         executed = 0
         succeeded = 0
@@ -5931,7 +5943,7 @@ class MirrorAutoSyncReporter:
             failed_window_count=failed,
             max_attempts=max_attempts,
             windows=windows,
-            safety_boundaries=self._safety_boundaries(max_jobs_per_api, window_days),
+            safety_boundaries=self._safety_boundaries(scope, max_jobs_per_api, window_days),
             warnings=_dedupe_messages(warnings),
             blocking_errors=_dedupe_messages(blocking_errors),
         )
@@ -6136,19 +6148,22 @@ class MirrorAutoSyncReporter:
     def _next_date(self, date: str) -> str:
         return (datetime.strptime(date, "%Y%m%d") + timedelta(days=1)).strftime("%Y%m%d")
 
-    def _safety_boundaries(self, max_jobs: int, window_days: int) -> list[str]:
-        return [
-            "scope is fixed to a-share-low-risk",
+    def _safety_boundaries(self, scope: str, max_jobs: int, window_days: int) -> list[str]:
+        boundaries = [
+            f"scope is {scope}",
             "each execution window is bounded by start_date/end_date",
             f"window_days={window_days} and max_jobs_per_api={max_jobs}",
             "disabled and plan-only endpoints remain excluded",
-            "trade_cal is fetched per window before daily-like endpoints",
+            "market calendar is fetched per window before daily-like endpoints",
             "daily-like endpoints use trading-days-only with no natural-day fallback",
             "checkpoint state is required for execution and written only to --state",
             "each failed window stops later windows after retry attempts are exhausted",
             "backup and restore-check must pass after each window",
             "auto-sync atomically refreshes the configured backup target after each successful window",
         ]
+        if scope != "a-share-low-risk":
+            boundaries.append("HK/US/global auto-sync execute is not enabled; this command is dry-run planning only")
+        return boundaries
 
 
 class SchemaStatusReporter:
