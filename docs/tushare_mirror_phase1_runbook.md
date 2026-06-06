@@ -2663,3 +2663,57 @@ expand scope: plan-only/disabled endpoints, stock loops, intraday data,
 financial PIT execution, object downloads, remote backup, restore-into,
 compaction execution, PostgreSQL loading, scheduling, and parallel execution
 remain outside the allowed path.
+
+## HK/US Low-risk Mirror Preparation
+
+HK/US low-risk infrastructure is documented in
+`docs/hk_us_low_risk_pull_runbook.md`. The executable scopes are
+`hk-low-risk`, `us-low-risk`, and the explicit composed
+`global-equity-low-risk` scope. They are not all Tushare APIs.
+
+Executable HK/US endpoints are limited to reference snapshots, market
+calendars, daily bars, adjusted daily bars, and adjustment factors:
+`hk_basic`, `hk_tradecal`, `hk_daily`, `hk_daily_adj`, `hk_adjfactor`,
+`us_basic`, `us_tradecal`, `us_daily`, `us_daily_adj`, and `us_adjfactor`.
+Intraday/realtime endpoints and HK/US financial PIT endpoints remain disabled
+or plan-only.
+
+Review scopes and readiness before generating any guarded commands:
+
+```bash
+python3 -m tushare_mirror mirror-scope --scope hk-low-risk --json
+python3 -m tushare_mirror mirror-scope --scope us-low-risk --json
+python3 -m tushare_mirror mirror-scope --scope global-equity-low-risk --json
+python3 -m tushare_mirror mirror-readiness --root "$MIRROR_ROOT" --backup "$MIRROR_BACKUP" --scope hk-low-risk --json
+python3 -m tushare_mirror mirror-readiness --root "$MIRROR_ROOT" --backup "$MIRROR_BACKUP" --scope us-low-risk --json
+```
+
+Generate guarded HK/US command bundles only outside mirror and backup roots:
+
+```bash
+python3 -m tushare_mirror mirror-pull-command \
+  --scope hk-low-risk \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --start-date 19900101 \
+  --end-date latest-trade-date \
+  --max-jobs-per-api 20 \
+  --output /tmp/tushare-hk-low-risk-pull \
+  --json
+
+python3 -m tushare_mirror mirror-pull-command \
+  --scope us-low-risk \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --start-date 19900101 \
+  --end-date latest-trade-date \
+  --max-jobs-per-api 20 \
+  --output /tmp/tushare-us-low-risk-pull \
+  --json
+```
+
+The generated `commands.sh` files are commented and guarded with
+`USER_CONFIRMATION_REQUIRED`. Codex must not run them, must not execute HK/US
+`mirror-run`, and must not start HK/US auto-sync execution. HK/US auto-sync is
+dry-run planning only until a separate guarded execution goal exists. Existing
+A-share auto-sync behavior is unchanged.
