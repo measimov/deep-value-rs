@@ -120,6 +120,14 @@ class HKUSAutoSyncGuardrailTests(unittest.TestCase):
                 "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
             }
 
+    def raw_lake_files(self):
+        found: list[str] = []
+        for name in ("raw", "lake"):
+            directory = self.root / name
+            if directory.exists():
+                found.extend(str(path.relative_to(self.root)) for path in directory.rglob("*") if path.is_file())
+        return sorted(found)
+
     def run_cli(self, *args, check=False):
         return subprocess.run(
             [sys.executable, "-m", "tushare_mirror", *args],
@@ -534,6 +542,137 @@ class HKUSAutoSyncGuardrailTests(unittest.TestCase):
         self.assertEqual(payload["scope"], "us-low-risk")
         self.assertTrue(payload["user_confirmation_required"])
         self.assertIn("--confirm-hk-us-auto-sync", payload["commands"][0]["command_text"])
+
+    def test_auto_sync_cli_dry_run_does_not_write_state_lock_or_catalog(self):
+        before_counts = self.counts()
+        before_files = self.raw_lake_files()
+        state = self.base / "hk-dry-run-state.json"
+        result = self.run_cli(
+            "mirror-auto-sync",
+            "--root", str(self.root),
+            "--backup", str(self.backup),
+            "--scope", "hk-low-risk",
+            "--from-date", "20250101",
+            "--to-date", "20250110",
+            "--window-days", "10",
+            "--max-jobs-per-api", "10",
+            "--state", str(state),
+            "--json",
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "planned")
+        self.assertEqual(payload["lock_status"]["status"], "not_required_dry_run")
+        self.assertFalse(state.exists())
+        self.assertFalse((self.base / "hk-dry-run-state.json.lock").exists())
+        self.assertEqual(before_counts, self.counts())
+        self.assertEqual(before_files, self.raw_lake_files())
+        self.assertNotIn("fake-token", result.stdout)
+        self.assertNotIn("TUSHARE_TOKEN", result.stdout)
+
+    def test_auto_sync_cli_refuses_state_inside_roots_without_writing(self):
+        before_counts = self.counts()
+        inside_root = self.root / "hk-state.json"
+        result = self.run_cli(
+            "mirror-auto-sync",
+            "--root", str(self.root),
+            "--backup", str(self.backup),
+            "--scope", "hk-low-risk",
+            "--from-date", "20250101",
+            "--to-date", "20250110",
+            "--window-days", "10",
+            "--max-jobs-per-api", "10",
+            "--state", str(inside_root),
+            "--json",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["state_path_status"], "blocked")
+        self.assertIn("state path must not be inside mirror root", payload["blocking_errors"])
+        self.assertFalse(inside_root.exists())
+        self.assertFalse((self.root / "hk-state.json.lock").exists())
+        self.assertEqual(before_counts, self.counts())
+
+        inside_backup = self.backup / "us-state.json"
+        result = self.run_cli(
+            "mirror-auto-sync-command",
+            "--root", str(self.root),
+            "--backup", str(self.backup),
+            "--scope", "us-low-risk",
+            "--from-date", "20250101",
+            "--to-date", "20250110",
+            "--window-days", "10",
+            "--max-jobs-per-api", "10",
+            "--state", str(inside_backup),
+            "--json",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertIn("state path must not be inside backup root", payload["blocking_errors"])
+        self.assertFalse(inside_backup.exists())
+        self.assertEqual(before_counts, self.counts())
+
+    def test_auto_sync_command_bundle_writes_only_output_directory(self):
+        before_counts = self.counts()
+        before_root_files = sorted(str(path.relative_to(self.root)) for path in self.root.rglob("*") if path.is_file())
+        before_backup_files = sorted(str(path.relative_to(self.backup)) for path in self.backup.rglob("*") if path.is_file())
+        output = self.base / "us-command-bundle"
+        result = self.run_cli(
+            "mirror-auto-sync-command",
+            "--root", str(self.root),
+            "--backup", str(self.backup),
+            "--scope", "us-low-risk",
+            "--from-date", "19900101",
+            "--to-date", "20250110",
+            "--window-days", "20",
+            "--max-jobs-per-api", "20",
+            "--state", str(self.base / "us-state.json"),
+            "--output", str(output),
+            "--json",
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "created")
+        self.assertEqual(sorted(path.name for path in output.iterdir()), ["README.md", "commands.sh", "readiness.json", "request_estimate.json", "stop_policy.json"])
+        commands = (output / "commands.sh").read_text()
+        self.assertIn("USER_CONFIRMATION_REQUIRED", commands)
+        self.assertNotIn("\npython3 -m tushare_mirror mirror-auto-sync", commands)
+        self.assertFalse((self.base / "us-state.json").exists())
+        self.assertFalse((self.base / "us-state.json.lock").exists())
+        self.assertEqual(before_counts, self.counts())
+        self.assertEqual(before_root_files, sorted(str(path.relative_to(self.root)) for path in self.root.rglob("*") if path.is_file()))
+        self.assertEqual(before_backup_files, sorted(str(path.relative_to(self.backup)) for path in self.backup.rglob("*") if path.is_file()))
+
+    def test_status_and_recovery_reports_do_not_create_locks_or_modify_state(self):
+        state = self.base / "hk-interrupted-state.json"
+        payload = {
+            "state_version": "mirror-auto-sync-state/v2",
+            "root": str(self.root),
+            "backup": str(self.backup),
+            "scope": "hk-low-risk",
+            "completed_windows": [],
+            "failed_windows": [],
+            "in_progress_window": {"start_date": "20250101", "end_date": "20250110"},
+            "next_start_date": "20250111",
+        }
+        state.write_text(json.dumps(payload, sort_keys=True) + "\n")
+        before_text = state.read_text()
+        before_counts = self.counts()
+        status = self.run_cli("mirror-auto-sync-status", "--state", str(state), "--json", check=True)
+        recovery = self.run_cli(
+            "mirror-auto-sync-recovery-plan",
+            "--root", str(self.root),
+            "--backup", str(self.backup),
+            "--scope", "hk-low-risk",
+            "--state", str(state),
+            "--json",
+            check=True,
+        )
+        self.assertEqual(json.loads(status.stdout)["status"], "interrupted")
+        self.assertEqual(json.loads(recovery.stdout)["recovery_action"], "retry_interrupted_window_after_user_confirmation")
+        self.assertEqual(state.read_text(), before_text)
+        self.assertFalse((self.base / "hk-interrupted-state.json.lock").exists())
+        self.assertEqual(before_counts, self.counts())
 
     def test_auto_sync_status_reports_clean_state_read_only(self):
         state = self.base / "clean-state.json"

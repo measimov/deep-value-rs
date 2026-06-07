@@ -6826,8 +6826,10 @@ class MirrorAutoSyncReporter:
             "backup and restore-check must pass after each window",
             "auto-sync atomically refreshes the configured backup target after each successful window",
         ]
-        if scope != "a-share-low-risk":
-            boundaries.append("HK/US/global auto-sync execute is not enabled; this command is dry-run planning only")
+        if scope in HK_US_SCOPE_MARKETS:
+            boundaries.append("HK/US auto-sync execution is guarded by --confirm-auto-sync and --confirm-hk-us-auto-sync")
+        elif scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+            boundaries.append("global-equity-low-risk auto-sync execute is not enabled; run child market scopes separately")
         return boundaries
 
 
