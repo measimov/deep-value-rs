@@ -199,6 +199,110 @@ class HKUSAutoSyncGuardrailTests(unittest.TestCase):
         self.assertEqual(status["status"], "active_writer_possible")
         self.assertTrue(any(signal["path"].endswith("catalog.sqlite") for signal in status["recent_file_signals"]))
 
+    def test_v1_a_share_state_still_resumes_from_next_start_date(self):
+        state = self.base / "a-share-state.json"
+        state.write_text(
+            json.dumps(
+                {
+                    "state_version": "mirror-auto-sync-state/v1",
+                    "root": str(self.root),
+                    "backup": str(self.backup),
+                    "scope": "a-share-low-risk",
+                    "from_date": "20250101",
+                    "to_date": "20250120",
+                    "resolved_to_date": "20250120",
+                    "window_days": 10,
+                    "max_jobs_per_api": 20,
+                    "completed_windows": [],
+                    "next_start_date": "20250111",
+                }
+            )
+        )
+        result = MirrorAutoSyncReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="a-share-low-risk",
+            from_date="20250101",
+            to_date="20250120",
+            window_days=10,
+            max_jobs_per_api=20,
+            state=state,
+            token_available=True,
+        )
+        self.assertTrue(result.resume_from_state)
+        self.assertEqual(result.windows[0]["start_date"], "20250111")
+
+    def test_v2_hk_interrupted_window_is_retried_conservatively(self):
+        state = self.base / "hk-state.json"
+        state.write_text(
+            json.dumps(
+                {
+                    "state_version": "mirror-auto-sync-state/v2",
+                    "root": str(self.root),
+                    "backup": str(self.backup),
+                    "scope": "hk-low-risk",
+                    "from_date": "20250101",
+                    "to_date": "20250120",
+                    "resolved_to_date": "20250120",
+                    "window_days": 10,
+                    "max_jobs_per_api": 20,
+                    "completed_windows": [],
+                    "failed_windows": [],
+                    "in_progress_window": {
+                        "start_date": "20250105",
+                        "end_date": "20250114",
+                        "started_at": "2026-06-07T00:00:00Z",
+                    },
+                    "next_start_date": "20250115",
+                    "attempt_history": [],
+                }
+            )
+        )
+        result = MirrorAutoSyncReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="hk-low-risk",
+            from_date="20250101",
+            to_date="20250120",
+            window_days=10,
+            max_jobs_per_api=20,
+            state=state,
+            token_available=True,
+        )
+        self.assertTrue(result.resume_from_state)
+        self.assertEqual(result.windows[0]["start_date"], "20250105")
+        self.assertEqual(result.next_start_date, "20250105")
+
+    def test_malformed_state_blocks_with_clear_error(self):
+        state = self.base / "bad-state.json"
+        state.write_text(json.dumps({"state_version": "mirror-auto-sync-state/v99"}))
+        result = MirrorAutoSyncReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="hk-low-risk",
+            from_date="20250101",
+            to_date="20250120",
+            window_days=10,
+            max_jobs_per_api=20,
+            state=state,
+            token_available=True,
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertTrue(any("unsupported auto-sync state file version" in error for error in result.blocking_errors))
+        self.assertEqual(result.windows, [])
+
+    def test_atomic_state_write_replaces_file_without_tmp_residue(self):
+        state = self.base / "atomic-state.json"
+        payload = {
+            "state_version": "mirror-auto-sync-state/v2",
+            "scope": "hk-low-risk",
+            "completed_windows": [],
+            "failed_windows": [],
+        }
+        MirrorAutoSyncReporter()._atomic_write_state(state, payload)
+        self.assertEqual(json.loads(state.read_text())["scope"], "hk-low-risk")
+        self.assertFalse((self.base / ".atomic-state.json.tmp").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

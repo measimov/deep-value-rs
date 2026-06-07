@@ -6063,6 +6063,7 @@ class MirrorPullCommandReporter:
 class MirrorAutoSyncReporter:
     REPORT_VERSION = "mirror-auto-sync/v1"
     STATE_VERSION = "mirror-auto-sync-state/v1"
+    STATE_VERSION_V2 = "mirror-auto-sync-state/v2"
     RETRYABLE_FAILURES = {"rate_limited", "network_error", "server_error", "unknown_error"}
 
     def create(
@@ -6138,9 +6139,17 @@ class MirrorAutoSyncReporter:
             blocking_errors.append("from-date must be <= resolved to-date")
 
         resume_from_state = False
-        state_payload = self._read_state(state_path) if state_path and state_path.exists() else {}
+        try:
+            state_payload = self._read_state(state_path) if state_path and state_path.exists() else {}
+        except ValueError as exc:
+            blocking_errors.append(str(exc))
+            state_payload = {}
         effective_start = normalized_from
-        if state_payload.get("next_start_date"):
+        interrupted_window = self._interrupted_window(state_payload)
+        if interrupted_window:
+            effective_start = self._normalize_date(str(interrupted_window["start_date"]))
+            resume_from_state = True
+        elif state_payload.get("next_start_date"):
             candidate = self._normalize_date(str(state_payload["next_start_date"]))
             if candidate > effective_start:
                 effective_start = candidate
@@ -6195,6 +6204,7 @@ class MirrorAutoSyncReporter:
                 state_payload = self._initial_state(state_payload, mirror_root, backup_root, scope, normalized_from, to_date, resolved_to, window_days, max_jobs_per_api)
                 for window in windows:
                     executed += 1
+                    self._write_in_progress_state(state_path, state_payload, window)
                     result = self._execute_window(
                         mirror_root=mirror_root,
                         backup_root=backup_root,
@@ -6214,6 +6224,7 @@ class MirrorAutoSyncReporter:
                         continue
                     failed += 1
                     next_start_date = window["start_date"]
+                    self._write_failed_state(state_path, state_payload, window, result.get("blocking_errors") or [])
                     blocking_errors.extend(result.get("blocking_errors") or [])
                     break
 
@@ -6445,9 +6456,13 @@ class MirrorAutoSyncReporter:
     def _initial_state(self, state: dict[str, Any], root: Path, backup: Path, scope: str, from_date: str, to_date: str, resolved_to_date: str, window_days: int, max_jobs: int) -> dict[str, Any]:
         if state:
             state.setdefault("completed_windows", [])
+            if state.get("state_version") == self.STATE_VERSION_V2:
+                state.setdefault("failed_windows", [])
+                state.setdefault("attempt_history", [])
             return state
-        return {
-            "state_version": self.STATE_VERSION,
+        version = self.STATE_VERSION_V2 if scope in HK_US_SCOPE_MARKETS else self.STATE_VERSION
+        payload: dict[str, Any] = {
+            "state_version": version,
             "root": str(root),
             "backup": str(backup),
             "scope": scope,
@@ -6459,6 +6474,34 @@ class MirrorAutoSyncReporter:
             "completed_windows": [],
             "created_at": now_utc(),
         }
+        if version == self.STATE_VERSION_V2:
+            payload.update(
+                {
+                    "failed_windows": [],
+                    "in_progress_window": None,
+                    "attempt_history": [],
+                    "last_error_type": None,
+                    "last_run_id": None,
+                }
+            )
+        return payload
+
+    def _interrupted_window(self, state: dict[str, Any]) -> dict[str, Any] | None:
+        if state.get("state_version") != self.STATE_VERSION_V2:
+            return None
+        window = state.get("in_progress_window")
+        if not isinstance(window, dict):
+            return None
+        if not window.get("start_date") or not window.get("end_date"):
+            return None
+        completed = {
+            (item.get("start_date"), item.get("end_date"))
+            for item in state.get("completed_windows", [])
+            if isinstance(item, dict)
+        }
+        if (window.get("start_date"), window.get("end_date")) in completed:
+            return None
+        return window
 
     def _read_state(self, state_path: Path | None) -> dict[str, Any]:
         if state_path is None or not state_path.exists():
@@ -6467,9 +6510,21 @@ class MirrorAutoSyncReporter:
             payload = json.loads(state_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ValueError(f"invalid auto-sync state file: {state_path}: {exc}") from exc
-        if payload.get("state_version") != self.STATE_VERSION:
+        if payload.get("state_version") not in {self.STATE_VERSION, self.STATE_VERSION_V2}:
             raise ValueError(f"unsupported auto-sync state file version: {payload.get('state_version')}")
         return payload
+
+    def _write_in_progress_state(self, state_path: Path | None, payload: dict[str, Any], window: dict[str, Any]) -> None:
+        if state_path is None or payload.get("state_version") != self.STATE_VERSION_V2:
+            return
+        payload["in_progress_window"] = {
+            "start_date": window["start_date"],
+            "end_date": window["end_date"],
+            "started_at": now_utc(),
+            "attempts": window.get("attempts", 0),
+        }
+        payload["updated_at"] = now_utc()
+        self._atomic_write_state(state_path, payload)
 
     def _write_state(self, state_path: Path | None, payload: dict[str, Any], window: dict[str, Any], next_start_date: str) -> None:
         if state_path is None:
@@ -6485,10 +6540,69 @@ class MirrorAutoSyncReporter:
                 "status": "succeeded",
             }
         )
+        if payload.get("state_version") == self.STATE_VERSION_V2:
+            payload["in_progress_window"] = None
+            payload["last_run_id"] = window.get("run_id")
+            payload.setdefault("attempt_history", []).append(
+                {
+                    "start_date": window["start_date"],
+                    "end_date": window["end_date"],
+                    "attempts": window.get("attempts"),
+                    "run_id": window.get("run_id"),
+                    "status": "succeeded",
+                    "finished_at": now_utc(),
+                }
+            )
         payload["last_successful_end_date"] = window["end_date"]
         payload["next_start_date"] = next_start_date
         payload["updated_at"] = now_utc()
-        state_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        self._atomic_write_state(state_path, payload)
+
+    def _write_failed_state(self, state_path: Path | None, payload: dict[str, Any], window: dict[str, Any], errors: list[str]) -> None:
+        if state_path is None or payload.get("state_version") != self.STATE_VERSION_V2:
+            return
+        error_type = self._error_type_from_messages(errors)
+        payload["in_progress_window"] = None
+        payload["next_start_date"] = window["start_date"]
+        payload["last_error_type"] = error_type
+        payload["last_run_id"] = window.get("run_id")
+        payload.setdefault("failed_windows", []).append(
+            {
+                "start_date": window["start_date"],
+                "end_date": window["end_date"],
+                "attempts": window.get("attempts"),
+                "run_id": window.get("run_id"),
+                "finished_at": now_utc(),
+                "status": "failed",
+                "error_type": error_type,
+                "errors": list(errors),
+            }
+        )
+        payload.setdefault("attempt_history", []).append(
+            {
+                "start_date": window["start_date"],
+                "end_date": window["end_date"],
+                "attempts": window.get("attempts"),
+                "run_id": window.get("run_id"),
+                "status": "failed",
+                "finished_at": now_utc(),
+                "error_type": error_type,
+            }
+        )
+        payload["updated_at"] = now_utc()
+        self._atomic_write_state(state_path, payload)
+
+    def _atomic_write_state(self, state_path: Path, payload: dict[str, Any]) -> None:
+        tmp = state_path.with_name(f".{state_path.name}.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, state_path)
+
+    def _error_type_from_messages(self, errors: list[str]) -> str | None:
+        text = " ".join(errors)
+        for error_type in ["permission_denied", "invalid_params", "invalid_endpoint", "rate_limited", "network_error", "server_error", "schema_incompatible"]:
+            if error_type in text:
+                return error_type
+        return "unknown_error" if errors else None
 
     def _next_date(self, date: str) -> str:
         return (datetime.strptime(date, "%Y%m%d") + timedelta(days=1)).strftime("%Y%m%d")
