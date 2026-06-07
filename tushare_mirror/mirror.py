@@ -6079,11 +6079,13 @@ class MirrorAutoSyncReporter:
         state: Path | str | None = None,
         execute: bool = False,
         confirm_auto_sync: bool = False,
+        confirm_hk_us_auto_sync: bool = False,
         max_attempts: int = 3,
         retry_backoff_seconds: int = 60,
         client: Any | None = None,
         sleep=time.sleep,
         token_available: bool | None = None,
+        active_writer_detector: MirrorActiveWriterDetector | None = None,
     ) -> MirrorAutoSyncResult:
         ensure_mirror_scope(scope)
         warnings = [
@@ -6102,10 +6104,13 @@ class MirrorAutoSyncReporter:
         mirror_root = _resolve_path(Path(root_text)) if root_text else Path("__invalid_empty_mirror_root__")
         backup_root = _resolve_path(Path(backup_text)) if backup_text else Path("__invalid_empty_backup_root__")
         state_path = _resolve_path(Path(state_text)) if state_text else None
-        if scope != "a-share-low-risk":
-            warnings.append(f"{scope} auto-sync is dry-run planning only; execute mode remains A-share-only in this goal")
+        if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+            warnings.append("global-equity-low-risk auto-sync is read-only planning only; execute each child market separately")
             if execute:
-                blocking_errors.append("mirror-auto-sync execute currently supports only scope a-share-low-risk; HK/US execution requires a separate guarded goal")
+                blocking_errors.append("global-equity-low-risk auto-sync execute is not supported; run HK and US separately")
+        elif scope in HK_US_SCOPE_MARKETS:
+            warnings.append(f"{scope} auto-sync is dry-run planning only unless explicit HK/US execute confirmation is provided")
+            warnings.append(f"{scope} auto-sync execute is guarded and requires explicit HK/US confirmation")
         if window_days <= 0:
             blocking_errors.append("--window-days must be positive")
         if max_jobs_per_api <= 0:
@@ -6155,7 +6160,6 @@ class MirrorAutoSyncReporter:
                 effective_start = candidate
                 resume_from_state = True
 
-        windows = self._planned_windows(effective_start, resolved_to, window_days) if not blocking_errors else []
         scope_report = MirrorScopeReporter().report(scope=scope)
         executable_endpoints = scope_report.executable_now
         excluded_endpoints = sorted(set(scope_report.plan_only + scope_report.disabled))
@@ -6176,6 +6180,29 @@ class MirrorAutoSyncReporter:
             "active_writer_detected": False,
             "blocking_errors": [],
         }
+        if execute:
+            lock_status = self._execute_lock_status(
+                scope=scope,
+                mirror_root=mirror_root,
+                backup_root=backup_root,
+                state_path=state_path,
+                active_writer_detector=active_writer_detector,
+                detect_active_writer=scope in HK_US_SCOPE_MARKETS,
+            )
+            blocking_errors.extend(lock_status.get("blocking_errors") or [])
+            blocking_errors.extend(
+                self._execute_gate_errors(
+                    scope=scope,
+                    confirm_hk_us_auto_sync=confirm_hk_us_auto_sync,
+                    token_available=token_is_available,
+                    state_path_status=state_path_status,
+                    schema_status=schema_status,
+                    executable_endpoints=executable_endpoints,
+                    excluded_endpoints=excluded_endpoints,
+                )
+            )
+
+        windows = self._planned_windows(effective_start, resolved_to, window_days) if not blocking_errors else []
         for window in windows:
             window["command_preview"] = self._mirror_run_command(mirror_root, backup_root, scope, window["start_date"], window["end_date"], max_jobs_per_api)
             window["attempts"] = 0
@@ -6261,7 +6288,7 @@ class MirrorAutoSyncReporter:
             schema_status=schema_status,
             token_available=token_is_available,
             confirmation_phrase=confirmation_phrase,
-            confirmation_reviewed=bool(confirm_auto_sync),
+            confirmation_reviewed=bool(confirm_auto_sync and (scope not in HK_US_SCOPE_MARKETS or confirm_hk_us_auto_sync)),
             do_not_run_automatically=True,
             execute_supported=execute_supported,
             execute_blocked_reason=execute_blocked_reason,
@@ -6287,6 +6314,86 @@ class MirrorAutoSyncReporter:
         if daily_like_apis_for_scope(scope):
             return "required"
         return "not_required"
+
+    def _execute_lock_status(
+        self,
+        *,
+        scope: str,
+        mirror_root: Path,
+        backup_root: Path,
+        state_path: Path | None,
+        active_writer_detector: MirrorActiveWriterDetector | None,
+        detect_active_writer: bool = True,
+    ) -> dict[str, Any]:
+        status: dict[str, Any] = {
+            "required_for_execute": True,
+            "status": "not_checked",
+            "active_writer_detected": False,
+            "blocking_errors": [],
+        }
+        if state_path is None:
+            status["status"] = "missing_state"
+            return status
+        lock = MirrorAutoSyncLock(
+            lock_path=self._lock_path_for_state(state_path),
+            scope=scope,
+            root=mirror_root,
+            backup=backup_root,
+            state_path=state_path,
+        )
+        lock_status = lock.status()
+        writer_status = (
+            (active_writer_detector or MirrorActiveWriterDetector()).report(root=mirror_root)
+            if detect_active_writer
+            else {
+                "status": "not_checked_for_scope",
+                "active_writer_detected": False,
+                "process_matches": [],
+                "recent_file_signals": [],
+                "blocking_errors": [],
+            }
+        )
+        blocking = [*(lock_status.get("blocking_errors") or []), *(writer_status.get("blocking_errors") or [])]
+        status.update(
+            {
+                "status": "blocked" if blocking else "clear",
+                "lock_path": str(lock.lock_path),
+                "lock": lock_status,
+                "active_writer": writer_status,
+                "active_writer_detected": bool(writer_status.get("active_writer_detected")),
+                "blocking_errors": blocking,
+            }
+        )
+        return status
+
+    def _lock_path_for_state(self, state_path: Path) -> Path:
+        return state_path.with_name(f"{state_path.name}.lock")
+
+    def _execute_gate_errors(
+        self,
+        *,
+        scope: str,
+        confirm_hk_us_auto_sync: bool,
+        token_available: bool,
+        state_path_status: str,
+        schema_status: str,
+        executable_endpoints: list[str],
+        excluded_endpoints: list[str],
+    ) -> list[str]:
+        errors: list[str] = []
+        if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+            errors.append("global-equity-low-risk auto-sync execute is not supported; run HK and US separately")
+        if scope in HK_US_SCOPE_MARKETS and not confirm_hk_us_auto_sync:
+            errors.append("--execute for HK/US requires --confirm-hk-us-auto-sync")
+        if not token_available:
+            errors.append("TUSHARE_TOKEN is not available")
+        if state_path_status != "safe":
+            errors.append("state path is not safe for execute")
+        if scope in HK_US_SCOPE_MARKETS and schema_status != "clear":
+            errors.append(f"schema status blocks execute: {schema_status}")
+        if set(executable_endpoints) & set(excluded_endpoints):
+            errors.append("disabled or plan-only endpoints appear in executable set")
+        return errors
 
     def _schema_status(self, root: Path) -> str:
         catalog = CatalogStore(root, read_only=True)

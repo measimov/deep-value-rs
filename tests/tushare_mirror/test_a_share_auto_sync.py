@@ -258,7 +258,7 @@ class AShareAutoSyncTests(unittest.TestCase):
             sleep=lambda _: None,
         )
         self.assertEqual(result.status, "blocked")
-        self.assertIn("mirror-auto-sync execute currently supports only scope a-share-low-risk; HK/US execution requires a separate guarded goal", result.blocking_errors)
+        self.assertIn("--execute for HK/US requires --confirm-hk-us-auto-sync", result.blocking_errors)
         self.assertEqual(before, self.counts())
 
     def test_fake_execute_writes_checkpoint_and_excludes_plan_only_endpoints(self):

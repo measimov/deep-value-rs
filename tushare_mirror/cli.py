@@ -988,6 +988,7 @@ def cmd_mirror_auto_sync(args) -> int:
             state=args.state,
             execute=args.execute,
             confirm_auto_sync=args.confirm_auto_sync,
+            confirm_hk_us_auto_sync=args.confirm_hk_us_auto_sync,
             max_attempts=args.max_attempts,
             retry_backoff_seconds=args.retry_backoff_seconds,
             client=client,
@@ -1980,6 +1981,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--retry-backoff-seconds', type=int, default=60)
     p.add_argument('--execute', action='store_true')
     p.add_argument('--confirm-auto-sync', action='store_true')
+    p.add_argument('--confirm-hk-us-auto-sync', action='store_true')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_auto_sync)
 
