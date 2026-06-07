@@ -1032,6 +1032,8 @@ class MirrorAutoSyncResult:
     report_version: str
     status: str
     execute: bool
+    execute_supported: bool
+    execute_blocked_reason: str | None
     root: str
     backup: str
     scope: str
@@ -1048,6 +1050,20 @@ class MirrorAutoSyncResult:
     succeeded_window_count: int
     failed_window_count: int
     max_attempts: int
+    executable_endpoints: list[str]
+    excluded_endpoints: list[str]
+    calendar_api: str | None
+    calendar_dependency_status: str
+    pagination_summary: dict[str, Any]
+    state_path_status: str
+    lock_status: dict[str, Any]
+    backup_status: str
+    restore_check_status: str
+    schema_status: str
+    token_available: bool
+    confirmation_phrase: str
+    confirmation_reviewed: bool
+    do_not_run_automatically: bool
     windows: list[dict[str, Any]]
     safety_boundaries: list[str]
     warnings: list[str]
@@ -1061,6 +1077,8 @@ class MirrorAutoSyncResult:
             "report_version": self.report_version,
             "status": self.status,
             "execute": self.execute,
+            "execute_supported": self.execute_supported,
+            "execute_blocked_reason": self.execute_blocked_reason,
             "root": self.root,
             "backup": self.backup,
             "scope": self.scope,
@@ -1073,6 +1091,15 @@ class MirrorAutoSyncResult:
             "failed_window_count": self.failed_window_count,
             "next_start_date": self.next_start_date,
             "state_path": self.state_path,
+            "state_path_status": self.state_path_status,
+            "lock_status": self.lock_status,
+            "backup_status": self.backup_status,
+            "restore_check_status": self.restore_check_status,
+            "schema_status": self.schema_status,
+            "token_available": self.token_available,
+            "confirmation_phrase": self.confirmation_phrase,
+            "confirmation_reviewed": self.confirmation_reviewed,
+            "do_not_run_automatically": self.do_not_run_automatically,
             "warnings": self.warnings,
             "blocking_errors": self.blocking_errors,
         }
@@ -5839,6 +5866,7 @@ class MirrorAutoSyncReporter:
         retry_backoff_seconds: int = 60,
         client: Any | None = None,
         sleep=time.sleep,
+        token_available: bool | None = None,
     ) -> MirrorAutoSyncResult:
         ensure_mirror_scope(scope)
         warnings = [
@@ -5903,8 +5931,26 @@ class MirrorAutoSyncReporter:
                 resume_from_state = True
 
         windows = self._planned_windows(effective_start, resolved_to, window_days) if not blocking_errors else []
-        executable_endpoints = MirrorScopeReporter().report(scope=scope).executable_now
+        scope_report = MirrorScopeReporter().report(scope=scope)
+        executable_endpoints = scope_report.executable_now
+        excluded_endpoints = sorted(set(scope_report.plan_only + scope_report.disabled))
         calendar_summary = MirrorPullCommandReporter()._calendar_dependency_summary(scope, effective_start, resolved_to)
+        state_path_errors = self._preflight_state_path(mirror_root, backup_root, state_path) if state_path is not None else []
+        state_path_status = "not_provided" if state_path is None else ("safe" if not state_path_errors else "blocked")
+        token_is_available = _token_available_from_env() if token_available is None else bool(token_available)
+        execute_supported, execute_blocked_reason = self._execute_support(scope)
+        confirmation_phrase = self._confirmation_phrase(scope, normalized_from, to_date, max_jobs_per_api)
+        calendar_api = None if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE else calendar_api_for_scope(scope)
+        calendar_dependency_status = self._calendar_dependency_status(scope)
+        backup_status = "exists" if backup_text and backup_root.exists() else "missing"
+        restore_check_status = "not_checked"
+        schema_status = self._schema_status(mirror_root) if root_text and mirror_root.exists() else "missing_root"
+        lock_status = {
+            "required_for_execute": bool(execute),
+            "status": "not_required_dry_run" if not execute else "not_checked",
+            "active_writer_detected": False,
+            "blocking_errors": [],
+        }
         for window in windows:
             window["command_preview"] = self._mirror_run_command(mirror_root, backup_root, scope, window["start_date"], window["end_date"], max_jobs_per_api)
             window["attempts"] = 0
@@ -5976,11 +6022,60 @@ class MirrorAutoSyncReporter:
             succeeded_window_count=succeeded,
             failed_window_count=failed,
             max_attempts=max_attempts,
+            executable_endpoints=executable_endpoints,
+            excluded_endpoints=excluded_endpoints,
+            calendar_api=calendar_api,
+            calendar_dependency_status=calendar_dependency_status,
+            pagination_summary=dict(scope_report.pagination_strategy),
+            state_path_status=state_path_status,
+            lock_status=lock_status,
+            backup_status=backup_status,
+            restore_check_status=restore_check_status,
+            schema_status=schema_status,
+            token_available=token_is_available,
+            confirmation_phrase=confirmation_phrase,
+            confirmation_reviewed=bool(confirm_auto_sync),
+            do_not_run_automatically=True,
+            execute_supported=execute_supported,
+            execute_blocked_reason=execute_blocked_reason,
             windows=windows,
             safety_boundaries=self._safety_boundaries(scope, max_jobs_per_api, window_days),
             warnings=_dedupe_messages(warnings),
             blocking_errors=_dedupe_messages(blocking_errors),
         )
+
+    def _execute_support(self, scope: str) -> tuple[bool, str | None]:
+        if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+            return False, "global-equity-low-risk is a reporting composition and is not an auto-sync execution scope"
+        if scope in {"a-share-low-risk", HK_LOW_RISK_SCOPE, US_LOW_RISK_SCOPE}:
+            return True, None
+        return False, f"scope is not supported by mirror-auto-sync: {scope}"
+
+    def _confirmation_phrase(self, scope: str, from_date: str, to_date: str, max_jobs: int) -> str:
+        return f"CONFIRM {scope.upper()} AUTO-SYNC {from_date}-{to_date} MAXJOBS{max_jobs}"
+
+    def _calendar_dependency_status(self, scope: str) -> str:
+        if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+            return "composed_scope_read_only"
+        if daily_like_apis_for_scope(scope):
+            return "required"
+        return "not_required"
+
+    def _schema_status(self, root: Path) -> str:
+        catalog = CatalogStore(root, read_only=True)
+        if not catalog.db_path.exists():
+            return "missing_catalog"
+        try:
+            with catalog.connect() as conn:
+                quarantine_count = int(conn.execute("select count(*) from quarantine_files").fetchone()[0])
+                incompatible_count = int(conn.execute("select count(*) from schema_changes where change_type like '%incompatible%'").fetchone()[0])
+        except Exception as exc:
+            return f"error: {exc}"
+        if quarantine_count:
+            return "quarantine_present"
+        if incompatible_count:
+            return "incompatible_schema_present"
+        return "clear"
 
     def _preflight_state_path(self, root: Path, backup: Path, state: Path) -> list[str]:
         errors: list[str] = []
