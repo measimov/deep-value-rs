@@ -1105,6 +1105,33 @@ class MirrorAutoSyncResult:
         }
 
 
+@dataclass(frozen=True)
+class MirrorAutoSyncCommandResult:
+    report_version: str
+    status: str
+    scope: str
+    root: str
+    backup: str
+    from_date: str
+    to_date: str
+    window_days: int
+    max_jobs_per_api: int
+    state_path: str
+    output: str | None
+    files: list[str]
+    commands: list[dict[str, Any]]
+    confirmation_phrase: str
+    user_confirmation_required: bool
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
 class MirrorAutoSyncLock:
     LOCK_VERSION = "mirror-auto-sync-lock/v1"
 
@@ -6753,6 +6780,203 @@ class MirrorAutoSyncReporter:
         if scope != "a-share-low-risk":
             boundaries.append("HK/US/global auto-sync execute is not enabled; this command is dry-run planning only")
         return boundaries
+
+
+class MirrorAutoSyncCommandReporter:
+    REPORT_VERSION = "mirror-auto-sync-command/v1"
+
+    def create(
+        self,
+        *,
+        root: Path | str,
+        backup: Path | str,
+        scope: str,
+        from_date: str,
+        to_date: str,
+        window_days: int,
+        max_jobs_per_api: int,
+        state: Path | str,
+        output: Path | str | None = None,
+        overwrite: bool = False,
+        max_attempts: int = 3,
+        retry_backoff_seconds: int = 60,
+    ) -> MirrorAutoSyncCommandResult:
+        ensure_mirror_scope(scope)
+        mirror_root = _resolve_path(Path(str(root).strip()))
+        backup_root = _resolve_path(Path(str(backup).strip()))
+        state_path = _resolve_path(Path(str(state).strip()))
+        warnings = [
+            "mirror-auto-sync-command is read-only unless --output is provided; it does not execute generated commands",
+            "generated commands are commented and marked USER_CONFIRMATION_REQUIRED",
+        ]
+        blocking_errors: list[str] = []
+        if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
+            blocking_errors.append("global-equity-low-risk auto-sync execute is not supported; generate HK and US commands separately")
+        if not str(state).strip():
+            blocking_errors.append("--state must not be empty")
+        if state_path == mirror_root or _is_relative_to(state_path, mirror_root):
+            blocking_errors.append("state path must not be inside mirror root")
+        if state_path == backup_root or _is_relative_to(state_path, backup_root):
+            blocking_errors.append("state path must not be inside backup root")
+        output_path = _resolve_path(Path(output)) if output else None
+        if output_path is not None:
+            blocking_errors.extend(self._output_errors(output_path, mirror_root, backup_root, overwrite))
+
+        auto_sync = MirrorAutoSyncReporter()
+        normalized_from = auto_sync._normalize_date(from_date)
+        resolved_to_date, _ = auto_sync._resolve_to_date(to_date)
+        command_text = self._execute_command(
+            mirror_root,
+            backup_root,
+            scope,
+            from_date,
+            to_date,
+            window_days,
+            max_jobs_per_api,
+            state_path,
+            max_attempts,
+            retry_backoff_seconds,
+        )
+        confirmation_phrase = auto_sync._confirmation_phrase(scope, normalized_from, to_date, max_jobs_per_api)
+        commands = [
+            {
+                "command_name": "mirror-auto-sync-execute",
+                "command_text": command_text,
+                "would_execute_real_requests": True,
+                "requires_user_confirmation": True,
+                "guarded": True,
+                "allowed_in_bundle": True,
+            }
+        ]
+
+        files: list[str] = []
+        status = "blocked" if blocking_errors else "planned"
+        if output_path is not None and not blocking_errors:
+            if output_path.exists() and overwrite:
+                shutil.rmtree(output_path)
+            output_path.mkdir(parents=True, exist_ok=False)
+            readiness = MirrorAutoSyncReporter().create(
+                root=mirror_root,
+                backup=backup_root,
+                scope=scope,
+                from_date=from_date,
+                to_date=to_date,
+                window_days=window_days,
+                max_jobs_per_api=max_jobs_per_api,
+                state=state_path,
+                execute=False,
+            ).summary()
+            request_estimate = RequestEstimateReporter().report(root=mirror_root, scope=scope, start_date=normalized_from, end_date=resolved_to_date).to_dict()
+            stop_policy = StopPolicyReporter().report(scope=scope).to_dict()
+            self._write_bundle(
+                output_path=output_path,
+                command_text=command_text,
+                readiness=readiness,
+                request_estimate=request_estimate,
+                stop_policy=stop_policy,
+                confirmation_phrase=confirmation_phrase,
+                scope=scope,
+            )
+            files = ["README.md", "commands.sh", "readiness.json", "request_estimate.json", "stop_policy.json"]
+            status = "created"
+
+        return MirrorAutoSyncCommandResult(
+            report_version=self.REPORT_VERSION,
+            status=status,
+            scope=scope,
+            root=str(mirror_root),
+            backup=str(backup_root),
+            from_date=from_date,
+            to_date=to_date,
+            window_days=window_days,
+            max_jobs_per_api=max_jobs_per_api,
+            state_path=str(state_path),
+            output=str(output_path) if output_path else None,
+            files=files,
+            commands=commands,
+            confirmation_phrase=confirmation_phrase,
+            user_confirmation_required=True,
+            warnings=_dedupe_messages(warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
+
+    def _output_errors(self, output: Path, root: Path, backup: Path, overwrite: bool) -> list[str]:
+        errors: list[str] = []
+        if output == root or _is_relative_to(output, root):
+            errors.append("output path must not be inside mirror root")
+        if output == backup or _is_relative_to(output, backup):
+            errors.append("output path must not be inside backup root")
+        if output.exists() and not overwrite:
+            errors.append("output path already exists; rerun with --overwrite or choose another output path")
+        if output.exists() and not output.is_dir():
+            errors.append("output path exists and is not a directory")
+        return errors
+
+    def _execute_command(
+        self,
+        root: Path,
+        backup: Path,
+        scope: str,
+        from_date: str,
+        to_date: str,
+        window_days: int,
+        max_jobs_per_api: int,
+        state_path: Path,
+        max_attempts: int,
+        retry_backoff_seconds: int,
+    ) -> str:
+        extra = " --confirm-hk-us-auto-sync" if scope in HK_US_SCOPE_MARKETS else ""
+        return (
+            f"python3 -m tushare_mirror mirror-auto-sync --root {root} --backup {backup} "
+            f"--scope {scope} --from-date {from_date} --to-date {to_date} "
+            f"--window-days {window_days} --max-jobs-per-api {max_jobs_per_api} "
+            f"--state {state_path} --max-attempts {max_attempts} "
+            f"--retry-backoff-seconds {retry_backoff_seconds} --execute --confirm-auto-sync{extra} --json"
+        )
+
+    def _write_bundle(
+        self,
+        *,
+        output_path: Path,
+        command_text: str,
+        readiness: dict[str, Any],
+        request_estimate: dict[str, Any],
+        stop_policy: dict[str, Any],
+        confirmation_phrase: str,
+        scope: str,
+    ) -> None:
+        (output_path / "README.md").write_text(
+            "\n".join(
+                [
+                    f"# {scope} Auto-sync Command Bundle",
+                    "",
+                    "This bundle is a guarded plan artifact only.",
+                    "No command in this bundle has been executed.",
+                    "Do not run commands.sh automatically.",
+                    "",
+                    f"Confirmation phrase: `{confirmation_phrase}`",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (output_path / "commands.sh").write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env bash",
+                    "set -euo pipefail",
+                    "# USER_CONFIRMATION_REQUIRED",
+                    "# Review readiness.json, request_estimate.json, and stop_policy.json first.",
+                    "# This command sends real Tushare requests and writes the mirror root.",
+                    f"# {command_text}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (output_path / "readiness.json").write_text(json.dumps(readiness, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        (output_path / "request_estimate.json").write_text(json.dumps(request_estimate, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        (output_path / "stop_policy.json").write_text(json.dumps(stop_policy, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
 
 class SchemaStatusReporter:

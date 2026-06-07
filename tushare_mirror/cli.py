@@ -33,7 +33,7 @@ from .errors import ErrorType, classify_exception, retry_delay_seconds, should_r
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
-from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, ExecuteReadinessReporter, ExecuteScriptReporter, FinalGateReporter, MirrorAuditReporter, MirrorAutoSyncReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOpsReportReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorPullCommandReporter, MirrorReadinessReporter, MirrorReviewer, MirrorScopeReporter, MirrorStatusReporter, MonthlyPromotionChecklistReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, TokenHygieneScanner, init_catalog_if_requested
+from .mirror import BackupStatusReporter, CommandSafetyAnalyzer, ExecuteReadinessReporter, ExecuteScriptReporter, FinalGateReporter, MirrorAuditReporter, MirrorAutoSyncCommandReporter, MirrorAutoSyncReporter, MirrorBatchBundleReporter, MirrorBatchBundleVerifier, MirrorBatchCertificateReporter, MirrorBatchLedgerReporter, MirrorBatchPlanner, MirrorBatchRehearsalReporter, MirrorCoverageMatrixReporter, MirrorFailureDrillReporter, MirrorNextBatchReporter, MirrorOperatorChecklistReporter, MirrorOpsReportReporter, MirrorOrchestrator, MirrorPlanner, MirrorPreflightChecker, MirrorPullCommandReporter, MirrorReadinessReporter, MirrorReviewer, MirrorScopeReporter, MirrorStatusReporter, MonthlyPromotionChecklistReporter, PathDiagnosticsReporter, RequestEstimateReporter, SchemaStatusReporter, StopPolicyReporter, TokenHygieneScanner, init_catalog_if_requested
 from .object_plan import ObjectPlanner
 from .period_planner import PeriodPlanner
 from .pit import PITReadinessReporter
@@ -1004,6 +1004,28 @@ def cmd_mirror_auto_sync(args) -> int:
                 result.windows,
                 ["start_date", "end_date", "status", "attempts", "mirror_run_status", "run_id"],
             )
+    return 1 if result.status == "blocked" else 0
+
+
+def cmd_mirror_auto_sync_command(args) -> int:
+    result = MirrorAutoSyncCommandReporter().create(
+        root=args.mirror_root_arg,
+        backup=args.backup,
+        scope=args.scope,
+        from_date=args.from_date,
+        to_date=args.to_date,
+        window_days=args.window_days,
+        max_jobs_per_api=args.max_jobs_per_api,
+        state=args.state,
+        output=args.output,
+        overwrite=args.overwrite,
+        max_attempts=args.max_attempts,
+        retry_backoff_seconds=args.retry_backoff_seconds,
+    )
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        _print_key_values(result.summary())
     return 1 if result.status == "blocked" else 0
 
 
@@ -1984,6 +2006,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--confirm-hk-us-auto-sync', action='store_true')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_auto_sync)
+
+    p = sub.add_parser('mirror-auto-sync-command', description='Read-only/file-output guarded HK/US auto-sync command bundle generator; writes only --output outside mirror and backup roots and does not execute commands.')
+    p.add_argument('--root', dest='mirror_root_arg', required=True)
+    p.add_argument('--backup', required=True)
+    p.add_argument('--scope', required=True)
+    p.add_argument('--from-date', required=True)
+    p.add_argument('--to-date', default='latest-trade-date')
+    p.add_argument('--window-days', type=int, default=20)
+    p.add_argument('--max-jobs-per-api', type=int, default=20)
+    p.add_argument('--state', required=True)
+    p.add_argument('--output')
+    p.add_argument('--overwrite', action='store_true')
+    p.add_argument('--max-attempts', type=int, default=3)
+    p.add_argument('--retry-backoff-seconds', type=int, default=60)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_mirror_auto_sync_command)
 
     p = sub.add_parser('schema-status', description='Read-only schema drift and quarantine status report; does not make real requests or write catalog state.')
     p.add_argument('--root', dest='mirror_root_arg', required=True)

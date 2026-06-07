@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -12,7 +14,7 @@ from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
 from tushare_mirror.errors import ErrorType, MirrorError
-from tushare_mirror.mirror import GLOBAL_EQUITY_LOW_RISK_SCOPE, MirrorAutoSyncReporter, MirrorRunResult
+from tushare_mirror.mirror import CommandSafetyAnalyzer, GLOBAL_EQUITY_LOW_RISK_SCOPE, MirrorAutoSyncCommandReporter, MirrorAutoSyncReporter, MirrorRunResult
 from tushare_mirror.mirror import MirrorActiveWriterDetector, MirrorAutoSyncLock
 
 
@@ -117,6 +119,16 @@ class HKUSAutoSyncGuardrailTests(unittest.TestCase):
                 "snapshots": conn.execute("select count(*) from snapshots").fetchone()[0],
                 "validations": conn.execute("select count(*) from validation_runs").fetchone()[0],
             }
+
+    def run_cli(self, *args, check=False):
+        return subprocess.run(
+            [sys.executable, "-m", "tushare_mirror", *args],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=check,
+        )
 
     def test_hk_auto_sync_readiness_fields_are_stable_and_read_only(self):
         before = self.counts()
@@ -445,6 +457,83 @@ class HKUSAutoSyncGuardrailTests(unittest.TestCase):
         )
         self.assertFalse(reporter._retryable_result(backup_failed))
         self.assertFalse(reporter._retryable_result(validation_failed))
+
+    def test_auto_sync_command_bundle_is_guarded_and_safe(self):
+        before = self.counts()
+        output = self.base / "hk-command"
+        result = MirrorAutoSyncCommandReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="hk-low-risk",
+            from_date="19900101",
+            to_date="20250110",
+            window_days=20,
+            max_jobs_per_api=20,
+            state=self.base / "hk-state.json",
+            output=output,
+        )
+        self.assertEqual(result.status, "created", result.to_dict())
+        self.assertEqual(set(result.files), {"README.md", "commands.sh", "readiness.json", "request_estimate.json", "stop_policy.json"})
+        commands = (output / "commands.sh").read_text()
+        self.assertIn("USER_CONFIRMATION_REQUIRED", commands)
+        self.assertIn("--confirm-hk-us-auto-sync", commands)
+        self.assertNotIn("\npython3 -m tushare_mirror mirror-auto-sync", commands)
+        safety = CommandSafetyAnalyzer().analyze(file=output / "commands.sh")
+        self.assertIn(safety.status, {"passed", "warning"})
+        self.assertFalse(safety.blocking_errors)
+        self.assertEqual(before, self.counts())
+
+    def test_auto_sync_command_blocks_unsafe_output_paths(self):
+        inside_root = self.root / "bundle"
+        result = MirrorAutoSyncCommandReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="hk-low-risk",
+            from_date="19900101",
+            to_date="20250110",
+            window_days=20,
+            max_jobs_per_api=20,
+            state=self.base / "hk-state.json",
+            output=inside_root,
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("output path must not be inside mirror root", result.blocking_errors)
+
+        existing = self.base / "existing-command"
+        existing.mkdir()
+        result = MirrorAutoSyncCommandReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="us-low-risk",
+            from_date="19900101",
+            to_date="20250110",
+            window_days=20,
+            max_jobs_per_api=20,
+            state=self.base / "us-state.json",
+            output=existing,
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("output path already exists", "; ".join(result.blocking_errors))
+
+    def test_auto_sync_command_cli_json_contract(self):
+        result = self.run_cli(
+            "mirror-auto-sync-command",
+            "--root", str(self.root),
+            "--backup", str(self.backup),
+            "--scope", "us-low-risk",
+            "--from-date", "19900101",
+            "--to-date", "20250110",
+            "--window-days", "20",
+            "--max-jobs-per-api", "20",
+            "--state", str(self.base / "us-state.json"),
+            "--json",
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["report_version"], "mirror-auto-sync-command/v1")
+        self.assertEqual(payload["scope"], "us-low-risk")
+        self.assertTrue(payload["user_confirmation_required"])
+        self.assertIn("--confirm-hk-us-auto-sync", payload["commands"][0]["command_text"])
 
     def test_auto_sync_lock_acquire_release_and_second_writer_block(self):
         lock_path = self.base / "auto-sync.lock"
