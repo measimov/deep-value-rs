@@ -108,3 +108,46 @@ class HKUSLowRiskScopeTests(unittest.TestCase):
         self.assertIn("stock_company", payload["executable_now"])
         self.assertIn("top10_holders", payload["disabled"])
         self.assertEqual(payload["missing_metadata"], [])
+
+    def test_low_risk_executable_baselines_are_frozen_before_financial_work(self):
+        expected_a_share = [
+            "stock_basic",
+            "stock_company",
+            "trade_cal",
+            "namechange",
+            "hs_const",
+            "daily",
+            "weekly",
+            "monthly",
+            "adj_factor",
+            "daily_basic",
+            "suspend_d",
+            "stk_managers",
+            "stk_rewards",
+            "index_basic",
+            "index_weekly",
+            "index_monthly",
+            "ths_index",
+            "index_classify",
+        ]
+        expected_hk = ["hk_basic", "hk_tradecal", "hk_daily", "hk_daily_adj", "hk_adjfactor"]
+        expected_us = ["us_basic", "us_tradecal", "us_daily", "us_daily_adj", "us_adjfactor"]
+        self.assertEqual(MirrorScopeReporter().report(scope="a-share-low-risk").executable_now, expected_a_share)
+        self.assertEqual(MirrorScopeReporter().report(scope="hk-low-risk").executable_now, expected_hk)
+        self.assertEqual(MirrorScopeReporter().report(scope="us-low-risk").executable_now, expected_us)
+
+        financial = {
+            "hk_income",
+            "hk_balancesheet",
+            "hk_cashflow",
+            "hk_fina_indicator",
+            "us_income",
+            "us_balancesheet",
+            "us_cashflow",
+            "us_fina_indicator",
+        }
+        low_risk_executable = {
+            *MirrorScopeReporter().report(scope="hk-low-risk").executable_now,
+            *MirrorScopeReporter().report(scope="us-low-risk").executable_now,
+        }
+        self.assertFalse(financial & low_risk_executable)
