@@ -125,8 +125,11 @@ def validate_hk_us_low_risk_source_map() -> list[str]:
                 observed_missing = sorted(field for field in REAL_PROBE_OBSERVED_REQUIRED_FIELDS if field not in observed)
                 if observed_missing:
                     errors.append(f"{api_name} real_probe_observed missing: {', '.join(observed_missing)}")
-                if str(observed.get("artifact_path") or "") != "/tmp/tushare-hk-us-low-risk-probe.json":
-                    errors.append(f"{api_name} real_probe_observed artifact_path must be the redacted /tmp probe artifact")
+                allowed_artifacts = {"/tmp/tushare-hk-us-low-risk-probe.json"}
+                if endpoint.get("category") in {"financial_statement", "financial_indicator"}:
+                    allowed_artifacts.add("/tmp/tushare-hk-us-financial-pit-probe.json")
+                if str(observed.get("artifact_path") or "") not in allowed_artifacts:
+                    errors.append(f"{api_name} real_probe_observed artifact_path must be a redacted /tmp probe artifact")
         if api_name in HIGH_RISK_HK_US_APIS and recommendation == "executable_candidate":
             errors.append(f"{api_name} is high-risk for this goal and cannot be executable_candidate")
         if not endpoint.get("documented_params"):

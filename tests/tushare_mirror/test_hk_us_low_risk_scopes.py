@@ -71,7 +71,7 @@ class HKUSLowRiskScopeTests(unittest.TestCase):
         self.assertIn("us_income", payload["plan_only"])
 
     def test_cli_json_contract_is_stable_for_new_scopes(self):
-        for scope in ["hk-low-risk", "us-low-risk", "global-equity-low-risk"]:
+        for scope in ["hk-low-risk", "us-low-risk", "global-equity-low-risk", "hk-financial-raw", "us-financial-raw"]:
             with self.subTest(scope=scope):
                 result = self.run_cli("mirror-scope", "--scope", scope, "--json")
                 payload = json.loads(result.stdout)
@@ -101,6 +101,26 @@ class HKUSLowRiskScopeTests(unittest.TestCase):
         self.assertIn("hk_daily", mirror_scope_endpoints("global-equity-low-risk"))
         self.assertIn("us_daily", mirror_scope_endpoints("global-equity-low-risk"))
         self.assertNotIn("hk_mins", daily_like_apis_for_scope("global-equity-low-risk"))
+
+    def test_hk_us_financial_raw_scopes_are_separate_from_low_risk_auto_sync(self):
+        hk = MirrorScopeReporter().report(scope="hk-financial-raw").to_dict()
+        us = MirrorScopeReporter().report(scope="us-financial-raw").to_dict()
+
+        self.assertEqual(hk["scope"], "hk-financial-raw")
+        self.assertEqual(us["scope"], "us-financial-raw")
+        self.assertEqual(hk["endpoints_in_scope"], ["hk_income", "hk_balancesheet", "hk_cashflow", "hk_fina_indicator"])
+        self.assertEqual(us["endpoints_in_scope"], ["us_income", "us_balancesheet", "us_cashflow", "us_fina_indicator"])
+        self.assertEqual(hk["raw_executable_now"], ["hk_income", "hk_balancesheet", "hk_cashflow", "hk_fina_indicator"])
+        self.assertEqual(hk["pit_safe_now"], [])
+        self.assertEqual(us["raw_executable_now"], ["us_fina_indicator"])
+        self.assertEqual(us["pit_safe_now"], ["us_fina_indicator"])
+        self.assertEqual(daily_like_apis_for_scope("hk-financial-raw"), [])
+        self.assertEqual(reference_refresh_apis_for_scope("us-financial-raw"), [])
+        self.assertNotIn("hk_income", MirrorScopeReporter().report(scope="hk-low-risk").executable_now)
+        self.assertNotIn("us_fina_indicator", MirrorScopeReporter().report(scope="us-low-risk").executable_now)
+        self.assertEqual(hk["pit_usable_after_status"]["hk_income"], "blocked_without_disclosure_date")
+        self.assertEqual(us["pit_usable_after_status"]["us_income"], "probe_empty_contract_pending")
+        self.assertEqual(us["pit_usable_after_status"]["us_fina_indicator"], "complete")
 
     def test_a_share_scope_contract_remains_unchanged(self):
         payload = MirrorScopeReporter().report(scope="a-share-low-risk").to_dict()

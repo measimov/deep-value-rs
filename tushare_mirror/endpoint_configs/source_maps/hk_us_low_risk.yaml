@@ -337,8 +337,8 @@ endpoints:
     pit_disclosure_fields_in_documented_output: []
     pit_disclosure_availability: uncertain
     pit_disclosure_concern: "Documented output fields are long-format financial values and do not include ann_date, f_ann_date, or notice_date."
-    pagination_verification_status: pending_financial_probe
-    raw_mirror_candidate: false
+    pagination_verification_status: single_request_contract_passed
+    raw_mirror_candidate: true
     pit_safe_candidate: false
     documented_row_limit: "single stock history; single request maximum 10000 rows"
     permission_notes: "separate permission required"
@@ -348,7 +348,16 @@ endpoints:
     recommended_planner_kind: code_period_matrix
     recommended_partition_template: period_year
     recommendation: plan_only
-    real_probe_status: not_planned
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-07T11:13:59Z"
+      artifact_path: "/tmp/tushare-hk-us-financial-pit-probe.json"
+      status: accessible
+      request_count: 1
+      row_count: 27
+      fields: [ts_code, end_date, name, ind_name, ind_value]
+      pagination_probe_attempted: false
+      pagination_supported: false
     missing_metadata: []
     safety_notes:
       - "financial/PIT boundary; no execution in this goal"
@@ -364,8 +373,8 @@ endpoints:
     pit_disclosure_fields_in_documented_output: []
     pit_disclosure_availability: uncertain
     pit_disclosure_concern: "Documented output fields are long-format financial values and do not include ann_date, f_ann_date, or notice_date."
-    pagination_verification_status: pending_financial_probe
-    raw_mirror_candidate: false
+    pagination_verification_status: single_request_contract_passed
+    raw_mirror_candidate: true
     pit_safe_candidate: false
     documented_row_limit: "single stock history; single request maximum 10000 rows"
     permission_notes: "separate permission or high points required"
@@ -375,7 +384,16 @@ endpoints:
     recommended_planner_kind: code_period_matrix
     recommended_partition_template: period_year
     recommendation: plan_only
-    real_probe_status: not_planned
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-07T11:13:59Z"
+      artifact_path: "/tmp/tushare-hk-us-financial-pit-probe.json"
+      status: accessible
+      request_count: 1
+      row_count: 55
+      fields: [ts_code, name, end_date, ind_name, ind_value]
+      pagination_probe_attempted: false
+      pagination_supported: false
     missing_metadata: []
     safety_notes:
       - "financial/PIT boundary; no execution in this goal"
@@ -391,8 +409,8 @@ endpoints:
     pit_disclosure_fields_in_documented_output: []
     pit_disclosure_availability: uncertain
     pit_disclosure_concern: "Documented output fields are long-format financial values and do not include ann_date, f_ann_date, or notice_date."
-    pagination_verification_status: pending_financial_probe
-    raw_mirror_candidate: false
+    pagination_verification_status: single_request_contract_passed
+    raw_mirror_candidate: true
     pit_safe_candidate: false
     documented_row_limit: "single stock history; single request maximum 10000 rows"
     permission_notes: "separate permission required"
@@ -402,7 +420,16 @@ endpoints:
     recommended_planner_kind: code_period_matrix
     recommended_partition_template: period_year
     recommendation: plan_only
-    real_probe_status: not_planned
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-07T11:13:59Z"
+      artifact_path: "/tmp/tushare-hk-us-financial-pit-probe.json"
+      status: accessible
+      request_count: 1
+      row_count: 50
+      fields: [ts_code, end_date, name, ind_name, ind_value]
+      pagination_probe_attempted: false
+      pagination_supported: false
     missing_metadata: []
     safety_notes:
       - "financial/PIT boundary; no execution in this goal"
@@ -416,10 +443,10 @@ endpoints:
     documented_output_fields: [ts_code, end_date, ind_type, security_name_abbr, notice_date, start_date, std_report_date, currency, report_type]
     assumed_pit_fields: [ann_date]
     pit_disclosure_fields_in_documented_output: [notice_date]
-    pit_disclosure_availability: notice_date_possible
-    pit_disclosure_concern: "Documented output includes notice_date, but real probe must confirm it is returned for bounded requests before PIT-safe use."
-    pagination_verification_status: pending_financial_probe
-    raw_mirror_candidate: false
+    pit_disclosure_availability: observed_missing
+    pit_disclosure_concern: "Documented output includes notice_date, but the bounded real probe for 00700.HK period 20241231 did not return notice_date."
+    pagination_verification_status: single_request_contract_passed
+    raw_mirror_candidate: true
     pit_safe_candidate: false
     documented_row_limit: "financial indicator endpoint; documented fields are broad and must be narrowed by fields"
     permission_notes: "separate permission or high points required"
@@ -429,7 +456,16 @@ endpoints:
     recommended_planner_kind: code_period_matrix
     recommended_partition_template: period_year
     recommendation: plan_only
-    real_probe_status: not_planned
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-07T11:13:59Z"
+      artifact_path: "/tmp/tushare-hk-us-financial-pit-probe.json"
+      status: accessible
+      request_count: 1
+      row_count: 1
+      fields: [ts_code, end_date, start_date, std_report_date, currency, report_type]
+      pagination_probe_attempted: false
+      pagination_supported: false
     missing_metadata: []
     safety_notes:
       - "financial/PIT boundary; no execution in this goal"
@@ -445,7 +481,7 @@ endpoints:
     pit_disclosure_fields_in_documented_output: []
     pit_disclosure_availability: uncertain
     pit_disclosure_concern: "Documented output fields are long-format financial values and do not include ann_date, f_ann_date, or notice_date."
-    pagination_verification_status: pending_financial_probe
+    pagination_verification_status: authorized_empty_probe_pending
     raw_mirror_candidate: false
     pit_safe_candidate: false
     documented_row_limit: "single stock history; single request maximum 10000 rows"
@@ -456,7 +492,7 @@ endpoints:
     recommended_planner_kind: code_period_matrix
     recommended_partition_template: period_year
     recommendation: plan_only
-    real_probe_status: not_planned
+    real_probe_status: empty_but_accessible
     missing_metadata: []
     safety_notes:
       - "financial/PIT boundary; no execution in this goal"
@@ -472,7 +508,7 @@ endpoints:
     pit_disclosure_fields_in_documented_output: []
     pit_disclosure_availability: uncertain
     pit_disclosure_concern: "Documented output fields are long-format financial values and do not include ann_date, f_ann_date, or notice_date."
-    pagination_verification_status: pending_financial_probe
+    pagination_verification_status: authorized_empty_probe_pending
     raw_mirror_candidate: false
     pit_safe_candidate: false
     documented_row_limit: "single stock history; single request maximum 10000 rows"
@@ -483,7 +519,7 @@ endpoints:
     recommended_planner_kind: code_period_matrix
     recommended_partition_template: period_year
     recommendation: plan_only
-    real_probe_status: not_planned
+    real_probe_status: empty_but_accessible
     missing_metadata: []
     safety_notes:
       - "financial/PIT boundary; no execution in this goal"
@@ -499,7 +535,7 @@ endpoints:
     pit_disclosure_fields_in_documented_output: []
     pit_disclosure_availability: uncertain
     pit_disclosure_concern: "Documented output fields are long-format financial values and do not include ann_date, f_ann_date, or notice_date."
-    pagination_verification_status: pending_financial_probe
+    pagination_verification_status: authorized_empty_probe_pending
     raw_mirror_candidate: false
     pit_safe_candidate: false
     documented_row_limit: "single stock history; single request maximum 10000 rows"
@@ -510,7 +546,7 @@ endpoints:
     recommended_planner_kind: code_period_matrix
     recommended_partition_template: period_year
     recommendation: plan_only
-    real_probe_status: not_planned
+    real_probe_status: empty_but_accessible
     missing_metadata: []
     safety_notes:
       - "financial/PIT boundary; no execution in this goal"
@@ -524,11 +560,11 @@ endpoints:
     documented_output_fields: [ts_code, end_date, ind_type, security_name_abbr, accounting_standards, notice_date, start_date, std_report_date, financial_date, currency, report_type]
     assumed_pit_fields: [ann_date]
     pit_disclosure_fields_in_documented_output: [notice_date]
-    pit_disclosure_availability: notice_date_possible
-    pit_disclosure_concern: "Documented output includes notice_date, but real probe must confirm it is returned for bounded requests before PIT-safe use."
-    pagination_verification_status: pending_financial_probe
-    raw_mirror_candidate: false
-    pit_safe_candidate: false
+    pit_disclosure_availability: observed_notice_date
+    pit_disclosure_concern: "Bounded real probe for NVDA period 20241231 returned notice_date; endpoint can be a PIT-safe candidate after fixture and gate tests."
+    pagination_verification_status: single_request_contract_passed
+    raw_mirror_candidate: true
+    pit_safe_candidate: true
     documented_row_limit: "current endpoint page notes small per-request practical limits and single-stock history"
     permission_notes: "separate permission or high points required"
     update_cadence: "financial reporting"
@@ -537,7 +573,16 @@ endpoints:
     recommended_planner_kind: code_period_matrix
     recommended_partition_template: period_year
     recommendation: plan_only
-    real_probe_status: not_planned
+    real_probe_status: passed
+    real_probe_observed:
+      observed_at: "2026-06-07T11:13:59Z"
+      artifact_path: "/tmp/tushare-hk-us-financial-pit-probe.json"
+      status: accessible
+      request_count: 1
+      row_count: 1
+      fields: [ts_code, end_date, ind_type, security_name_abbr, accounting_standards, notice_date, start_date, std_report_date, financial_date, currency, report_type]
+      pagination_probe_attempted: false
+      pagination_supported: false
     missing_metadata: []
     safety_notes:
       - "financial/PIT boundary; no execution in this goal"

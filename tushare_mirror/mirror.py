@@ -186,15 +186,20 @@ A_SHARE_LOW_RISK_PLAN_ONLY_APIS = [
 ]
 HK_LOW_RISK_SCOPE = "hk-low-risk"
 US_LOW_RISK_SCOPE = "us-low-risk"
+HK_FINANCIAL_RAW_SCOPE = "hk-financial-raw"
+US_FINANCIAL_RAW_SCOPE = "us-financial-raw"
 GLOBAL_EQUITY_LOW_RISK_SCOPE = "global-equity-low-risk"
 SUPPORTED_MIRROR_SCOPES = {
     "low-risk-a-share",
     "a-share-low-risk",
     HK_LOW_RISK_SCOPE,
     US_LOW_RISK_SCOPE,
+    HK_FINANCIAL_RAW_SCOPE,
+    US_FINANCIAL_RAW_SCOPE,
     GLOBAL_EQUITY_LOW_RISK_SCOPE,
 }
 HK_US_SCOPE_MARKETS = {HK_LOW_RISK_SCOPE: "hk", US_LOW_RISK_SCOPE: "us"}
+HK_US_FINANCIAL_RAW_SCOPE_MARKETS = {HK_FINANCIAL_RAW_SCOPE: "hk", US_FINANCIAL_RAW_SCOPE: "us"}
 GLOBAL_EQUITY_CHILD_SCOPES = ["a-share-low-risk", HK_LOW_RISK_SCOPE, US_LOW_RISK_SCOPE]
 HK_LOW_RISK_REFERENCE_FETCHES: dict[str, dict[str, Any]] = {
     "hk_basic": {"list_status": "L"},
@@ -1581,6 +1586,11 @@ class MirrorScopeReportResult:
     real_probe_status: dict[str, str] = field(default_factory=dict)
     pagination_strategy: dict[str, str] = field(default_factory=dict)
     child_scopes: dict[str, Any] = field(default_factory=dict)
+    raw_executable_now: list[str] = field(default_factory=list)
+    pit_safe_now: list[str] = field(default_factory=list)
+    permission_blocked: list[str] = field(default_factory=list)
+    contract_blocked: list[str] = field(default_factory=list)
+    pit_usable_after_status: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -1615,6 +1625,8 @@ def mirror_scope_endpoints(scope: str) -> list[str]:
         return list(A_SHARE_LOW_RISK_ENDPOINTS)
     if scope in HK_US_SCOPE_MARKETS:
         return [item["api_name"] for item in _hk_us_source_endpoints_for_scope(scope)]
+    if scope in HK_US_FINANCIAL_RAW_SCOPE_MARKETS:
+        return [item["api_name"] for item in _hk_us_financial_source_endpoints_for_scope(scope)]
     if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
         return [*A_SHARE_LOW_RISK_ENDPOINTS, *mirror_scope_endpoints(HK_LOW_RISK_SCOPE), *mirror_scope_endpoints(US_LOW_RISK_SCOPE)]
     return list(LOW_RISK_A_SHARE_ENDPOINTS)
@@ -1624,6 +1636,8 @@ def daily_like_apis_for_scope(scope: str) -> list[str]:
     ensure_mirror_scope(scope)
     if scope == "a-share-low-risk":
         return list(A_SHARE_LOW_RISK_DAILY_LIKE_APIS)
+    if scope in HK_US_FINANCIAL_RAW_SCOPE_MARKETS:
+        return []
     if scope in HK_US_SCOPE_MARKETS:
         return [
             item["api_name"]
@@ -1639,6 +1653,8 @@ def coverage_matrix_apis_for_scope(scope: str) -> list[str]:
     ensure_mirror_scope(scope)
     if scope == "a-share-low-risk":
         return [*A_SHARE_LOW_RISK_DAILY_LIKE_APIS, *A_SHARE_LOW_RISK_EXPLICIT_PERIODIC_APIS]
+    if scope in HK_US_FINANCIAL_RAW_SCOPE_MARKETS:
+        return []
     if scope in HK_US_SCOPE_MARKETS:
         return daily_like_apis_for_scope(scope)
     if scope == GLOBAL_EQUITY_LOW_RISK_SCOPE:
@@ -1655,6 +1671,8 @@ def reference_refresh_apis_for_scope(scope: str) -> list[str]:
     ensure_mirror_scope(scope)
     if scope == "a-share-low-risk":
         return ["stock_basic", "stock_company", "hs_const", "concept", "index_basic", "ths_index", "index_classify"]
+    if scope in HK_US_FINANCIAL_RAW_SCOPE_MARKETS:
+        return []
     if scope in HK_US_SCOPE_MARKETS:
         return [
             item["api_name"]
@@ -1674,6 +1692,8 @@ def calendar_api_for_scope(scope: str) -> str:
     ensure_mirror_scope(scope)
     if scope in HK_US_SCOPE_MARKETS:
         return HK_US_CALENDAR_API_BY_SCOPE[scope]
+    if scope in HK_US_FINANCIAL_RAW_SCOPE_MARKETS:
+        return "hk_tradecal" if scope == HK_FINANCIAL_RAW_SCOPE else "us_tradecal"
     return "trade_cal"
 
 
@@ -1681,6 +1701,8 @@ def calendar_exchange_for_scope(scope: str, requested: str = "SSE") -> str:
     ensure_mirror_scope(scope)
     if scope in HK_US_SCOPE_MARKETS:
         return HK_US_CALENDAR_EXCHANGE_BY_SCOPE[scope]
+    if scope in HK_US_FINANCIAL_RAW_SCOPE_MARKETS:
+        return "HKEX" if scope == HK_FINANCIAL_RAW_SCOPE else "NASDAQ"
     return requested.upper()
 
 
@@ -1716,6 +1738,15 @@ def _hk_us_source_endpoints_for_scope(scope: str) -> list[dict[str, Any]]:
     return [item for item in hk_us_low_risk_source_endpoints() if item.get("market") == market]
 
 
+def _hk_us_financial_source_endpoints_for_scope(scope: str) -> list[dict[str, Any]]:
+    market = HK_US_FINANCIAL_RAW_SCOPE_MARKETS[scope]
+    return [
+        item
+        for item in hk_us_low_risk_source_endpoints()
+        if item.get("market") == market and item.get("category") in {"financial_statement", "financial_indicator"}
+    ]
+
+
 class MirrorScopeReporter:
     REPORT_VERSION = "mirror-scope/v1"
 
@@ -1727,6 +1758,8 @@ class MirrorScopeReporter:
             return self._a_share_low_risk_report(scope)
         if scope in HK_US_SCOPE_MARKETS:
             return self._hk_us_low_risk_report(scope)
+        if scope in HK_US_FINANCIAL_RAW_SCOPE_MARKETS:
+            return self._hk_us_financial_raw_report(scope)
         return self._global_equity_low_risk_report(scope)
 
     def _legacy_low_risk_report(self, scope: str) -> MirrorScopeReportResult:
@@ -1892,6 +1925,88 @@ class MirrorScopeReporter:
             real_probe_status=real_probe_status,
             pagination_strategy=pagination_strategy,
             child_scopes=child_payloads,
+        )
+
+    def _hk_us_financial_raw_report(self, scope: str) -> MirrorScopeReportResult:
+        endpoints = _hk_us_financial_source_endpoints_for_scope(scope)
+        raw_executable_now: list[str] = []
+        pit_safe_now: list[str] = []
+        plan_only: list[str] = []
+        permission_blocked: list[str] = []
+        contract_blocked: list[str] = []
+        blocked_reason: dict[str, str] = {}
+        next_enablement_step: dict[str, str] = {}
+        categories: dict[str, list[str]] = {}
+        real_probe_status: dict[str, str] = {}
+        pagination_strategy: dict[str, str] = {}
+        pit_usable_after_status: dict[str, str] = {}
+
+        for item in endpoints:
+            api_name = str(item["api_name"])
+            categories.setdefault(str(item.get("category") or "financial"), []).append(api_name)
+            probe_status = str(item.get("real_probe_status") or "pending")
+            real_probe_status[api_name] = probe_status
+            pagination_strategy[api_name] = str(item.get("recommended_pagination_strategy") or "unknown")
+            raw_candidate = bool(item.get("raw_mirror_candidate"))
+            pit_candidate = bool(item.get("pit_safe_candidate"))
+            disclosure_fields = [str(field) for field in (item.get("pit_disclosure_fields_in_documented_output") or [])]
+            if probe_status == "blocked_by_permission":
+                permission_blocked.append(api_name)
+                status = "permission_blocked"
+            elif probe_status in {"invalid_endpoint", "invalid_params"}:
+                contract_blocked.append(api_name)
+                status = "contract_blocked"
+            elif pit_candidate and disclosure_fields:
+                status = "complete"
+            elif raw_candidate:
+                status = "blocked_without_disclosure_date"
+            elif probe_status == "empty_but_accessible":
+                status = "probe_empty_contract_pending"
+            else:
+                status = "probe_pending"
+            pit_usable_after_status[api_name] = status
+            if raw_candidate:
+                raw_executable_now.append(api_name)
+                if pit_candidate:
+                    pit_safe_now.append(api_name)
+                    next_enablement_step[api_name] = "eligible for guarded raw financial execution and PIT-safe derived status after fake execution coverage"
+                else:
+                    next_enablement_step[api_name] = "eligible for guarded raw financial execution only; do not mark PIT-safe until disclosure date is observed"
+            else:
+                plan_only.append(api_name)
+                next_enablement_step[api_name] = "keep plan-only until a non-empty bounded probe proves raw financial contract and fixture coverage"
+            if status == "complete":
+                blocked_reason[api_name] = ""
+            elif status == "probe_empty_contract_pending":
+                blocked_reason[api_name] = "bounded real probe was authorized but returned no rows"
+            else:
+                blocked_reason[api_name] = str(item.get("pit_disclosure_concern") or self._hk_us_blocked_reason(item))
+
+        blocked_reason = {key: value for key, value in blocked_reason.items() if value}
+        return MirrorScopeReportResult(
+            report_version=self.REPORT_VERSION,
+            scope=scope,
+            endpoints_in_scope=[str(item["api_name"]) for item in endpoints],
+            executable_now=raw_executable_now,
+            plan_only=plan_only,
+            disabled=[],
+            blocked_reason=blocked_reason,
+            missing_metadata=[],
+            next_enablement_step=next_enablement_step,
+            categories={key: list(value) for key, value in categories.items()},
+            excluded_high_risk_patterns=PROHIBITED_SCOPE_ENDPOINT_PATTERNS,
+            warnings=[
+                "financial raw scopes are separate from hk-low-risk and us-low-risk auto-sync",
+                "raw_executable_now does not imply PIT-safe readiness",
+                "mirror-scope is read-only and does not fetch, backfill, or write catalog state",
+            ],
+            real_probe_status=real_probe_status,
+            pagination_strategy=pagination_strategy,
+            raw_executable_now=raw_executable_now,
+            pit_safe_now=pit_safe_now,
+            permission_blocked=permission_blocked,
+            contract_blocked=contract_blocked,
+            pit_usable_after_status=pit_usable_after_status,
         )
 
     def _hk_us_blocked_reason(self, item: Mapping[str, Any]) -> str:

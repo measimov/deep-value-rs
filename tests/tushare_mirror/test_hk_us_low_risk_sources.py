@@ -76,17 +76,22 @@ class HKUSLowRiskSourceMapTests(unittest.TestCase):
                 self.assertEqual(item["pit_disclosure_fields_in_documented_output"], [])
                 self.assertEqual(item["pit_disclosure_availability"], "uncertain")
                 self.assertIn("ann_date", item["assumed_pit_fields"])
-                self.assertFalse(item["raw_mirror_candidate"])
                 self.assertFalse(item["pit_safe_candidate"])
                 self.assertIn("do not include ann_date", item["pit_disclosure_concern"])
 
-        for api_name in ["hk_fina_indicator", "us_fina_indicator"]:
-            with self.subTest(api_name=api_name):
-                item = endpoints[api_name]
-                self.assertIn("notice_date", item["documented_output_fields"])
-                self.assertEqual(item["pit_disclosure_fields_in_documented_output"], ["notice_date"])
-                self.assertEqual(item["pit_disclosure_availability"], "notice_date_possible")
-                self.assertEqual(item["pagination_verification_status"], "pending_financial_probe")
+        hk_indicator = endpoints["hk_fina_indicator"]
+        self.assertIn("notice_date", hk_indicator["documented_output_fields"])
+        self.assertEqual(hk_indicator["pit_disclosure_fields_in_documented_output"], ["notice_date"])
+        self.assertEqual(hk_indicator["pit_disclosure_availability"], "observed_missing")
+        self.assertTrue(hk_indicator["raw_mirror_candidate"])
+        self.assertFalse(hk_indicator["pit_safe_candidate"])
+
+        us_indicator = endpoints["us_fina_indicator"]
+        self.assertIn("notice_date", us_indicator["documented_output_fields"])
+        self.assertEqual(us_indicator["pit_disclosure_fields_in_documented_output"], ["notice_date"])
+        self.assertEqual(us_indicator["pit_disclosure_availability"], "observed_notice_date")
+        self.assertTrue(us_indicator["raw_mirror_candidate"])
+        self.assertTrue(us_indicator["pit_safe_candidate"])
 
     def test_pagination_findings_are_recorded_for_doc_ambiguous_endpoints(self):
         endpoints = {item["api_name"]: item for item in hk_us_low_risk_source_endpoints()}
