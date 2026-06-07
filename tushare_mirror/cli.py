@@ -30,6 +30,7 @@ from .coverage import CoverageReporter
 from .enablement import EndpointEnablementChecklistReporter
 from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
+from .financial_probe import HKUSFinancialProbeReporter
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
 from .missing_backfill import MissingBackfillPlanner
@@ -595,6 +596,30 @@ def cmd_mirror_scope(args) -> int:
             ["status", "endpoint"],
         )
     return 0
+
+
+def cmd_hk_us_financial_probe_report(args) -> int:
+    report = HKUSFinancialProbeReporter().report(input_path=args.input)
+    payload = report.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        summary = dict(payload)
+        endpoints = summary.pop("endpoints", [])
+        _print_key_values(summary)
+        if endpoints:
+            _print_table(
+                endpoints,
+                [
+                    "api_name",
+                    "probe_status",
+                    "raw_executable_candidate",
+                    "pit_safe_candidate",
+                    "pit_usable_after_status",
+                    "recommended_execution_status",
+                ],
+            )
+    return 1 if report.blocking_errors else 0
 
 
 def cmd_mirror_review(args) -> int:
@@ -1825,6 +1850,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--scope', required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_mirror_scope)
+
+    p = sub.add_parser('hk-us-financial-probe-report', description='Read-only HK/US financial probe contract report; compares source-map fields, observed probe fields, and PIT assumptions without fetching or writing catalog state.')
+    p.add_argument('--input', required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_hk_us_financial_probe_report)
 
     p = sub.add_parser('mirror-review')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
