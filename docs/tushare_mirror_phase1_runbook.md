@@ -2779,3 +2779,104 @@ at its launch time, so new lock code can only coordinate with A-share after a
 future A-share restart under the updated code. `global-equity-low-risk` remains
 a reporting composition only; run `hk-low-risk` and `us-low-risk` separately.
 Existing A-share auto-sync behavior is unchanged.
+
+## HK/US Financial PIT And Raw Readiness
+
+HK/US financial statements and financial indicators are separate from
+`hk-low-risk` and `us-low-risk` market-data auto-sync. They use code-period
+planning, not trading-day windows. Raw financial readiness means the endpoint
+contract and permission probe are good enough for a guarded raw mirror candidate.
+It does not mean the data is strategy-safe or PIT-safe.
+
+The current raw financial scopes are:
+
+- `hk-financial-raw`: `hk_income`, `hk_balancesheet`, `hk_cashflow`,
+  `hk_fina_indicator`
+- `us-financial-raw`: `us_fina_indicator`
+
+US statement endpoints `us_income`, `us_balancesheet`, and `us_cashflow` remain
+plan-only because the bounded probe was authorized but returned no rows. HK
+financial raw candidates remain not PIT-safe because observed output does not
+include a disclosure date such as `ann_date`, `f_ann_date`, or `notice_date`.
+`us_fina_indicator` is the only current PIT-safe candidate because the bounded
+probe observed `notice_date`.
+
+Probe and contract reports:
+
+```bash
+python3 scripts/tushare_real_smoke.py \
+  --hk-us-financial-pit-probe \
+  --output /tmp/tushare-hk-us-financial-pit-probe.json
+
+python3 -m tushare_mirror hk-us-financial-probe-report \
+  --input /tmp/tushare-hk-us-financial-pit-probe.json \
+  --json
+```
+
+The probe is opt-in and bounded. It must write only under `/tmp`, must not print
+token plaintext, and must not loop over a stock universe.
+
+Readiness, estimate, and coverage reports:
+
+```bash
+python3 -m tushare_mirror financial-readiness \
+  --scope hk-financial-raw \
+  --root "$MIRROR_ROOT" \
+  --json
+
+python3 -m tushare_mirror financial-request-estimate \
+  --scope hk-financial-raw \
+  --from-period 1990Q1 \
+  --to-period latest \
+  --limit-codes 20 \
+  --max-periods 20 \
+  --json
+
+python3 -m tushare_mirror financial-coverage-matrix \
+  --root "$MIRROR_ROOT" \
+  --scope hk-financial-raw \
+  --periods 20241231 \
+  --limit-codes 20 \
+  --json
+```
+
+Coverage is by `ts_code x period`, not by trading day. Request estimates are not
+quota guarantees.
+
+Generate a guarded command bundle only outside mirror and backup roots:
+
+```bash
+python3 -m tushare_mirror financial-pull-command \
+  --scope hk-financial-raw \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --from-period 1990Q1 \
+  --to-period latest \
+  --limit-codes 20 \
+  --max-periods 20 \
+  --output /tmp/tushare-hk-financial-raw-command \
+  --json
+```
+
+The bundle contains `README.md`, `plan.json`, `readiness.json`,
+`probe_contract.json`, and `commands.sh`. The script is commented and marked
+`USER_CONFIRMATION_REQUIRED`. It is still a plan artifact: it does not execute
+HK/US financial full pull, does not run stock loops, and does not backfill
+financial data. Codex must not run the generated script automatically.
+
+Recommended operator flow:
+
+1. Confirm A-share auto-sync, if running, is left untouched.
+2. Run `financial-readiness`.
+3. Run `hk-us-financial-probe-report` against the latest `/tmp` probe artifact.
+4. Run `financial-request-estimate` with bounded `--limit-codes` and
+   `--max-periods`.
+5. Run `financial-coverage-matrix` for the candidate periods.
+6. Generate a `financial-pull-command` bundle under `/tmp`.
+7. Run `command-safety-check` on the generated `commands.sh`.
+8. Only after a future dedicated financial raw executor exists and the user
+   explicitly confirms, execute a bounded financial raw run.
+
+This is still not a full financial mirror. A full financial/PIT system still
+needs a dedicated executor, durable checkpointing for code-period jobs, PIT-safe
+derived-layer handling, and an explicit user confirmation step.
