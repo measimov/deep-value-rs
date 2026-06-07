@@ -1132,6 +1132,55 @@ class MirrorAutoSyncCommandResult:
         return self.to_dict()
 
 
+@dataclass(frozen=True)
+class MirrorAutoSyncStatusResult:
+    report_version: str
+    status: str
+    state_path: str
+    state_present: bool
+    state_valid: bool
+    state_version: str | None
+    scope: str | None
+    root: str | None
+    backup: str | None
+    next_window: dict[str, Any] | None
+    completed_window_count: int
+    failed_window_count: int
+    in_progress_window: dict[str, Any] | None
+    last_run_id: str | None
+    last_error_type: str | None
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+@dataclass(frozen=True)
+class MirrorAutoSyncRecoveryPlanResult:
+    report_version: str
+    status: str
+    scope: str
+    root: str
+    backup: str
+    state_path: str
+    may_resume_after_user_confirmation: bool
+    recovery_action: str
+    next_window: dict[str, Any] | None
+    status_report: dict[str, Any]
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
 class MirrorAutoSyncLock:
     LOCK_VERSION = "mirror-auto-sync-lock/v1"
 
@@ -6977,6 +7026,135 @@ class MirrorAutoSyncCommandReporter:
         (output_path / "readiness.json").write_text(json.dumps(readiness, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         (output_path / "request_estimate.json").write_text(json.dumps(request_estimate, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         (output_path / "stop_policy.json").write_text(json.dumps(stop_policy, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+
+class MirrorAutoSyncStatusReporter:
+    REPORT_VERSION = "mirror-auto-sync-status/v1"
+
+    def report(self, *, state: Path | str) -> MirrorAutoSyncStatusResult:
+        state_path = _resolve_path(Path(state))
+        warnings = ["mirror-auto-sync-status is read-only and does not acquire locks or execute commands"]
+        blocking_errors: list[str] = []
+        if not state_path.exists():
+            return MirrorAutoSyncStatusResult(
+                report_version=self.REPORT_VERSION,
+                status="missing",
+                state_path=str(state_path),
+                state_present=False,
+                state_valid=False,
+                state_version=None,
+                scope=None,
+                root=None,
+                backup=None,
+                next_window=None,
+                completed_window_count=0,
+                failed_window_count=0,
+                in_progress_window=None,
+                last_run_id=None,
+                last_error_type=None,
+                warnings=warnings,
+                blocking_errors=[f"state file not found: {state_path}"],
+            )
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return self._invalid(state_path, warnings, f"invalid auto-sync state file: {exc}")
+        if not isinstance(payload, dict):
+            return self._invalid(state_path, warnings, "invalid auto-sync state file: expected object")
+        version = payload.get("state_version")
+        if version not in {MirrorAutoSyncReporter.STATE_VERSION, MirrorAutoSyncReporter.STATE_VERSION_V2}:
+            return self._invalid(state_path, warnings, f"unsupported auto-sync state file version: {version}")
+        completed = [item for item in payload.get("completed_windows", []) if isinstance(item, dict)]
+        failed = [item for item in payload.get("failed_windows", []) if isinstance(item, dict)]
+        in_progress = payload.get("in_progress_window") if isinstance(payload.get("in_progress_window"), dict) else None
+        next_window = in_progress or ({"start_date": payload.get("next_start_date")} if payload.get("next_start_date") else None)
+        status = "interrupted" if in_progress else ("failed" if failed else "ready")
+        return MirrorAutoSyncStatusResult(
+            report_version=self.REPORT_VERSION,
+            status=status,
+            state_path=str(state_path),
+            state_present=True,
+            state_valid=True,
+            state_version=str(version),
+            scope=payload.get("scope"),
+            root=payload.get("root"),
+            backup=payload.get("backup"),
+            next_window=next_window,
+            completed_window_count=len(completed),
+            failed_window_count=len(failed),
+            in_progress_window=in_progress,
+            last_run_id=payload.get("last_run_id"),
+            last_error_type=payload.get("last_error_type"),
+            warnings=warnings,
+            blocking_errors=blocking_errors,
+        )
+
+    def _invalid(self, state_path: Path, warnings: list[str], error: str) -> MirrorAutoSyncStatusResult:
+        return MirrorAutoSyncStatusResult(
+            report_version=self.REPORT_VERSION,
+            status="blocked",
+            state_path=str(state_path),
+            state_present=state_path.exists(),
+            state_valid=False,
+            state_version=None,
+            scope=None,
+            root=None,
+            backup=None,
+            next_window=None,
+            completed_window_count=0,
+            failed_window_count=0,
+            in_progress_window=None,
+            last_run_id=None,
+            last_error_type=None,
+            warnings=warnings,
+            blocking_errors=[error],
+        )
+
+
+class MirrorAutoSyncRecoveryPlanReporter:
+    REPORT_VERSION = "mirror-auto-sync-recovery-plan/v1"
+    NON_RETRYABLE = {"permission_denied", "invalid_params", "invalid_endpoint", "schema_incompatible", "validation_failed", "backup_failed", "restore_check_failed"}
+
+    def report(self, *, root: Path | str, backup: Path | str, scope: str, state: Path | str) -> MirrorAutoSyncRecoveryPlanResult:
+        ensure_mirror_scope(scope)
+        mirror_root = str(_resolve_path(Path(root)))
+        backup_root = str(_resolve_path(Path(backup)))
+        state_path = str(_resolve_path(Path(state)))
+        warnings = ["mirror-auto-sync-recovery-plan is read-only and does not modify checkpoint state"]
+        blocking_errors: list[str] = []
+        status = MirrorAutoSyncStatusReporter().report(state=state)
+        status_dict = status.to_dict()
+        if status.blocking_errors:
+            blocking_errors.extend(status.blocking_errors)
+        if status.scope and status.scope != scope:
+            blocking_errors.append(f"state scope {status.scope} does not match requested scope {scope}")
+        if status.root and status.root != mirror_root:
+            blocking_errors.append("state root does not match requested root")
+        if status.backup and status.backup != backup_root:
+            blocking_errors.append("state backup does not match requested backup")
+        action = "create_new_state"
+        if status.in_progress_window:
+            action = "retry_interrupted_window_after_user_confirmation"
+        elif status.last_error_type in self.NON_RETRYABLE:
+            action = "manual_intervention_required"
+            blocking_errors.append(f"last error is non-retryable: {status.last_error_type}")
+        elif status.next_window:
+            action = "resume_from_next_window_after_user_confirmation"
+        may_resume = not blocking_errors and action != "manual_intervention_required"
+        return MirrorAutoSyncRecoveryPlanResult(
+            report_version=self.REPORT_VERSION,
+            status="ready" if may_resume else "blocked",
+            scope=scope,
+            root=mirror_root,
+            backup=backup_root,
+            state_path=state_path,
+            may_resume_after_user_confirmation=may_resume,
+            recovery_action=action,
+            next_window=status.next_window,
+            status_report=status_dict,
+            warnings=_dedupe_messages(warnings + status.warnings),
+            blocking_errors=_dedupe_messages(blocking_errors),
+        )
 
 
 class SchemaStatusReporter:

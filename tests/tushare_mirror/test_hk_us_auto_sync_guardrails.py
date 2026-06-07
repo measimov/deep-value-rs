@@ -14,7 +14,7 @@ from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
 from tushare_mirror.errors import ErrorType, MirrorError
-from tushare_mirror.mirror import CommandSafetyAnalyzer, GLOBAL_EQUITY_LOW_RISK_SCOPE, MirrorAutoSyncCommandReporter, MirrorAutoSyncReporter, MirrorRunResult
+from tushare_mirror.mirror import CommandSafetyAnalyzer, GLOBAL_EQUITY_LOW_RISK_SCOPE, MirrorAutoSyncCommandReporter, MirrorAutoSyncRecoveryPlanReporter, MirrorAutoSyncReporter, MirrorAutoSyncStatusReporter, MirrorRunResult
 from tushare_mirror.mirror import MirrorActiveWriterDetector, MirrorAutoSyncLock
 
 
@@ -534,6 +534,95 @@ class HKUSAutoSyncGuardrailTests(unittest.TestCase):
         self.assertEqual(payload["scope"], "us-low-risk")
         self.assertTrue(payload["user_confirmation_required"])
         self.assertIn("--confirm-hk-us-auto-sync", payload["commands"][0]["command_text"])
+
+    def test_auto_sync_status_reports_clean_state_read_only(self):
+        state = self.base / "clean-state.json"
+        state.write_text(
+            json.dumps(
+                {
+                    "state_version": "mirror-auto-sync-state/v2",
+                    "root": str(self.root),
+                    "backup": str(self.backup),
+                    "scope": "hk-low-risk",
+                    "completed_windows": [{"start_date": "20250101", "end_date": "20250110"}],
+                    "failed_windows": [],
+                    "in_progress_window": None,
+                    "next_start_date": "20250111",
+                    "last_run_id": "run-1",
+                    "last_error_type": None,
+                }
+            )
+        )
+        before = state.read_text()
+        result = MirrorAutoSyncStatusReporter().report(state=state)
+        self.assertEqual(result.report_version, "mirror-auto-sync-status/v1")
+        self.assertEqual(result.status, "ready")
+        self.assertEqual(result.completed_window_count, 1)
+        self.assertEqual(result.next_window, {"start_date": "20250111"})
+        self.assertEqual(state.read_text(), before)
+
+    def test_recovery_plan_retries_interrupted_window(self):
+        state = self.base / "interrupted-state.json"
+        state.write_text(
+            json.dumps(
+                {
+                    "state_version": "mirror-auto-sync-state/v2",
+                    "root": str(self.root),
+                    "backup": str(self.backup),
+                    "scope": "hk-low-risk",
+                    "completed_windows": [],
+                    "failed_windows": [],
+                    "in_progress_window": {"start_date": "20250101", "end_date": "20250110"},
+                    "next_start_date": "20250111",
+                }
+            )
+        )
+        result = MirrorAutoSyncRecoveryPlanReporter().report(
+            root=self.root,
+            backup=self.backup,
+            scope="hk-low-risk",
+            state=state,
+        )
+        self.assertEqual(result.status, "ready")
+        self.assertTrue(result.may_resume_after_user_confirmation)
+        self.assertEqual(result.recovery_action, "retry_interrupted_window_after_user_confirmation")
+        self.assertEqual(result.next_window, {"start_date": "20250101", "end_date": "20250110"})
+
+    def test_recovery_plan_blocks_non_retryable_failure(self):
+        state = self.base / "failed-state.json"
+        state.write_text(
+            json.dumps(
+                {
+                    "state_version": "mirror-auto-sync-state/v2",
+                    "root": str(self.root),
+                    "backup": str(self.backup),
+                    "scope": "us-low-risk",
+                    "completed_windows": [],
+                    "failed_windows": [{"start_date": "20250101", "end_date": "20250110", "error_type": "permission_denied"}],
+                    "in_progress_window": None,
+                    "next_start_date": "20250101",
+                    "last_error_type": "permission_denied",
+                }
+            )
+        )
+        result = MirrorAutoSyncRecoveryPlanReporter().report(
+            root=self.root,
+            backup=self.backup,
+            scope="us-low-risk",
+            state=state,
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertFalse(result.may_resume_after_user_confirmation)
+        self.assertEqual(result.recovery_action, "manual_intervention_required")
+
+    def test_status_cli_blocks_malformed_state(self):
+        state = self.base / "malformed-state.json"
+        state.write_text("{not-json")
+        result = self.run_cli("mirror-auto-sync-status", "--state", str(state), "--json")
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertFalse(payload["state_valid"])
 
     def test_auto_sync_lock_acquire_release_and_second_writer_block(self):
         lock_path = self.base / "auto-sync.lock"
