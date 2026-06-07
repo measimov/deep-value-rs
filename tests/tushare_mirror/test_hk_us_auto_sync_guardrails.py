@@ -9,6 +9,7 @@ from pathlib import Path
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.endpoints import load_into_catalog
 from tushare_mirror.mirror import GLOBAL_EQUITY_LOW_RISK_SCOPE, MirrorAutoSyncReporter
+from tushare_mirror.mirror import MirrorActiveWriterDetector, MirrorAutoSyncLock
 
 
 class HKUSAutoSyncGuardrailTests(unittest.TestCase):
@@ -108,6 +109,95 @@ class HKUSAutoSyncGuardrailTests(unittest.TestCase):
         self.assertFalse(payload["execute_supported"])
         self.assertIn("not an auto-sync execution scope", payload["execute_blocked_reason"])
         self.assertEqual(payload["calendar_dependency_status"], "composed_scope_read_only")
+
+    def test_auto_sync_lock_acquire_release_and_second_writer_block(self):
+        lock_path = self.base / "auto-sync.lock"
+        first = MirrorAutoSyncLock(
+            lock_path=lock_path,
+            scope="hk-low-risk",
+            root=self.root,
+            backup=self.backup,
+            state_path=self.base / "hk-state.json",
+            pid=123,
+            hostname="host-a",
+            pid_alive=lambda pid: pid == 123,
+        )
+        acquired = first.acquire()
+        self.assertEqual(acquired["status"], "acquired")
+        self.assertTrue(lock_path.exists())
+
+        second = MirrorAutoSyncLock(
+            lock_path=lock_path,
+            scope="us-low-risk",
+            root=self.root,
+            backup=self.backup,
+            state_path=self.base / "us-state.json",
+            pid=456,
+            hostname="host-a",
+            pid_alive=lambda pid: pid == 123,
+        )
+        blocked = second.acquire()
+        self.assertEqual(blocked["status"], "locked")
+        self.assertIn("active auto-sync lock exists", blocked["blocking_errors"])
+
+        released = first.release()
+        self.assertEqual(released["status"], "released")
+        self.assertFalse(lock_path.exists())
+
+    def test_stale_or_unknown_lock_blocks_by_default(self):
+        lock_path = self.base / "stale.lock"
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "lock_version": "mirror-auto-sync-lock/v1",
+                    "scope": "hk-low-risk",
+                    "root": str(self.root),
+                    "backup": str(self.backup),
+                    "pid": 999999,
+                    "hostname": "host-a",
+                    "started_at": "2026-06-07T00:00:00Z",
+                    "command_kind": "mirror-auto-sync",
+                    "state_path": str(self.base / "hk-state.json"),
+                }
+            )
+        )
+        lock = MirrorAutoSyncLock(
+            lock_path=lock_path,
+            scope="us-low-risk",
+            root=self.root,
+            backup=self.backup,
+            state_path=self.base / "us-state.json",
+            hostname="host-a",
+            pid_alive=lambda pid: False,
+        )
+        status = lock.status()
+        self.assertEqual(status["status"], "stale_or_unknown")
+        self.assertIn("stale or unknown", status["blocking_errors"][0])
+
+    def test_legacy_active_writer_detection_blocks_same_root_execute_process(self):
+        detector = MirrorActiveWriterDetector(
+            process_entries=[
+                {
+                    "pid": 778009,
+                    "cmdline": (
+                        f"python3 -m tushare_mirror mirror-auto-sync --root {self.root} "
+                        "--backup /tmp/backup --scope a-share-low-risk --execute"
+                    ),
+                },
+                {"pid": 1, "cmdline": "python3 -m tushare_mirror mirror-auto-sync --root /other --execute"},
+            ],
+            now=lambda: 1000.0,
+        )
+        status = detector.report(root=self.root)
+        self.assertEqual(status["status"], "active_writer_possible")
+        self.assertTrue(status["active_writer_detected"])
+        self.assertEqual(status["process_matches"][0]["pid"], 778009)
+
+    def test_recent_catalog_write_is_reported_as_active_writer_signal(self):
+        detector = MirrorActiveWriterDetector(process_entries=[], now=lambda: self.catalog.db_path.stat().st_mtime + 1)
+        status = detector.report(root=self.root)
+        self.assertEqual(status["status"], "active_writer_possible")
+        self.assertTrue(any(signal["path"].endswith("catalog.sqlite") for signal in status["recent_file_signals"]))
 
 
 if __name__ == "__main__":

@@ -1105,6 +1105,222 @@ class MirrorAutoSyncResult:
         }
 
 
+class MirrorAutoSyncLock:
+    LOCK_VERSION = "mirror-auto-sync-lock/v1"
+
+    def __init__(
+        self,
+        *,
+        lock_path: Path | str,
+        scope: str,
+        root: Path | str,
+        backup: Path | str,
+        state_path: Path | str | None,
+        command_kind: str = "mirror-auto-sync",
+        pid: int | None = None,
+        hostname: str | None = None,
+        pid_alive=None,
+    ):
+        self.lock_path = _resolve_path(Path(lock_path))
+        self.scope = scope
+        self.root = str(_resolve_path(Path(root)))
+        self.backup = str(_resolve_path(Path(backup)))
+        self.state_path = str(_resolve_path(Path(state_path))) if state_path is not None else None
+        self.command_kind = command_kind
+        self.pid = int(pid if pid is not None else os.getpid())
+        self.hostname = hostname or (os.uname().nodename if hasattr(os, "uname") else "unknown")
+        self.pid_alive = pid_alive or self._pid_alive
+        self.acquired = False
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "lock_version": self.LOCK_VERSION,
+            "scope": self.scope,
+            "root": self.root,
+            "backup": self.backup,
+            "pid": self.pid,
+            "hostname": self.hostname,
+            "started_at": now_utc(),
+            "command_kind": self.command_kind,
+            "state_path": self.state_path,
+        }
+
+    def status(self) -> dict[str, Any]:
+        if not self.lock_path.exists():
+            return {
+                "status": "unlocked",
+                "lock_path": str(self.lock_path),
+                "metadata": None,
+                "blocking_errors": [],
+            }
+        metadata = self._read_metadata()
+        lock_hostname = metadata.get("hostname")
+        lock_pid = metadata.get("pid")
+        same_host = bool(lock_hostname and lock_hostname == self.hostname)
+        live = bool(same_host and isinstance(lock_pid, int) and self.pid_alive(lock_pid))
+        status = "locked" if live else "stale_or_unknown"
+        reason = "active auto-sync lock exists" if live else "auto-sync lock exists but liveness is stale or unknown"
+        return {
+            "status": status,
+            "lock_path": str(self.lock_path),
+            "metadata": metadata,
+            "same_host": same_host,
+            "pid_alive": live,
+            "blocking_errors": [reason],
+        }
+
+    def acquire(self) -> dict[str, Any]:
+        existing = self.status()
+        if existing["blocking_errors"]:
+            return existing
+        metadata = self.metadata()
+        try:
+            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.lock_path.open("x", encoding="utf-8") as fh:
+                fh.write(json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+        except FileExistsError:
+            return self.status()
+        self.acquired = True
+        return {
+            "status": "acquired",
+            "lock_path": str(self.lock_path),
+            "metadata": metadata,
+            "blocking_errors": [],
+        }
+
+    def release(self) -> dict[str, Any]:
+        if self.acquired and self.lock_path.exists():
+            self.lock_path.unlink()
+        self.acquired = False
+        return {
+            "status": "released",
+            "lock_path": str(self.lock_path),
+            "blocking_errors": [],
+        }
+
+    def __enter__(self):
+        status = self.acquire()
+        if status["blocking_errors"]:
+            raise RuntimeError("; ".join(status["blocking_errors"]))
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release()
+        return False
+
+    def _read_metadata(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.lock_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {"lock_version": "unreadable", "error": str(exc)}
+        return payload if isinstance(payload, dict) else {"lock_version": "invalid", "value_type": type(payload).__name__}
+
+    def _pid_alive(self, pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+
+class MirrorActiveWriterDetector:
+    PROCESS_PATTERNS = ("mirror-auto-sync", "mirror-run")
+
+    def __init__(self, *, process_entries: list[dict[str, Any]] | None = None, now=None, recent_seconds: int = 300):
+        self.process_entries = process_entries
+        self.now = now or time.time
+        self.recent_seconds = recent_seconds
+
+    def report(self, *, root: Path | str) -> dict[str, Any]:
+        mirror_root = _resolve_path(Path(root))
+        process_matches = self._process_matches(mirror_root)
+        file_signals = self._recent_file_signals(mirror_root)
+        active = bool(process_matches or file_signals)
+        return {
+            "status": "active_writer_possible" if active else "clear",
+            "root": str(mirror_root),
+            "active_writer_detected": active,
+            "process_matches": process_matches,
+            "recent_file_signals": file_signals,
+            "blocking_errors": ["possible active mirror writer detected"] if active else [],
+        }
+
+    def _process_matches(self, root: Path) -> list[dict[str, Any]]:
+        root_text = str(root)
+        matches: list[dict[str, Any]] = []
+        for entry in self._iter_process_entries():
+            cmdline = str(entry.get("cmdline") or "")
+            if "--execute" not in cmdline:
+                continue
+            if root_text not in cmdline:
+                continue
+            if "tushare_mirror" not in cmdline:
+                continue
+            if not any(pattern in cmdline for pattern in self.PROCESS_PATTERNS):
+                continue
+            matches.append({"pid": entry.get("pid"), "cmdline": cmdline})
+        return matches
+
+    def _iter_process_entries(self) -> list[dict[str, Any]]:
+        if self.process_entries is not None:
+            return list(self.process_entries)
+        proc = Path("/proc")
+        if not proc.exists():
+            return []
+        entries: list[dict[str, Any]] = []
+        for child in proc.iterdir():
+            if not child.name.isdigit():
+                continue
+            try:
+                raw = (child / "cmdline").read_bytes()
+            except OSError:
+                continue
+            if not raw:
+                continue
+            cmdline = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+            entries.append({"pid": int(child.name), "cmdline": cmdline})
+        return entries
+
+    def _recent_file_signals(self, root: Path) -> list[dict[str, Any]]:
+        now = float(self.now())
+        signals: list[dict[str, Any]] = []
+        catalog = root / "_catalog"
+        candidates: list[Path] = [
+            catalog / "catalog.sqlite",
+            catalog / "catalog.sqlite-wal",
+            catalog / "catalog.sqlite-shm",
+        ]
+        for base in [root / "raw", root / "lake"]:
+            if base.exists():
+                candidates.extend(self._sample_files(base, limit=25))
+        for path in candidates:
+            try:
+                age = now - path.stat().st_mtime
+            except OSError:
+                continue
+            if age <= self.recent_seconds:
+                signals.append({"path": str(path), "age_seconds": max(0, int(age))})
+            if len(signals) >= 25:
+                break
+        return signals
+
+    def _sample_files(self, root: Path, *, limit: int) -> list[Path]:
+        files: list[Path] = []
+        try:
+            for path in root.rglob("*"):
+                if path.is_file():
+                    files.append(path)
+                if len(files) >= limit:
+                    break
+        except OSError:
+            return files
+        return files
+
+
 @dataclass(frozen=True)
 class BackupStatusResult:
     report_version: str
