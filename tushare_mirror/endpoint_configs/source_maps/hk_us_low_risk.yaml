@@ -332,6 +332,14 @@ endpoints:
     doc_url: "https://tushare.pro/document/2?doc_id=389"
     documented_params: [ts_code, period, ind_name, start_date, end_date]
     documented_fields: [ts_code, end_date, name, ind_name, ind_value]
+    documented_output_fields: [ts_code, end_date, name, ind_name, ind_value]
+    assumed_pit_fields: [ann_date, f_ann_date]
+    pit_disclosure_fields_in_documented_output: []
+    pit_disclosure_availability: uncertain
+    pit_disclosure_concern: "Documented output fields are long-format financial values and do not include ann_date, f_ann_date, or notice_date."
+    pagination_verification_status: pending_financial_probe
+    raw_mirror_candidate: false
+    pit_safe_candidate: false
     documented_row_limit: "single stock history; single request maximum 10000 rows"
     permission_notes: "separate permission required"
     update_cadence: "financial reporting"
@@ -351,6 +359,14 @@ endpoints:
     doc_url: "https://tushare.pro/document/2?doc_id=390"
     documented_params: [ts_code, period, ind_name, start_date, end_date]
     documented_fields: [ts_code, name, end_date, ind_name, ind_value]
+    documented_output_fields: [ts_code, name, end_date, ind_name, ind_value]
+    assumed_pit_fields: [ann_date, f_ann_date]
+    pit_disclosure_fields_in_documented_output: []
+    pit_disclosure_availability: uncertain
+    pit_disclosure_concern: "Documented output fields are long-format financial values and do not include ann_date, f_ann_date, or notice_date."
+    pagination_verification_status: pending_financial_probe
+    raw_mirror_candidate: false
+    pit_safe_candidate: false
     documented_row_limit: "single stock history; single request maximum 10000 rows"
     permission_notes: "separate permission or high points required"
     update_cadence: "financial reporting"
@@ -370,6 +386,14 @@ endpoints:
     doc_url: "https://tushare.pro/document/2?doc_id=391"
     documented_params: [ts_code, period, ind_name, start_date, end_date]
     documented_fields: [ts_code, end_date, name, ind_name, ind_value]
+    documented_output_fields: [ts_code, end_date, name, ind_name, ind_value]
+    assumed_pit_fields: [ann_date, f_ann_date]
+    pit_disclosure_fields_in_documented_output: []
+    pit_disclosure_availability: uncertain
+    pit_disclosure_concern: "Documented output fields are long-format financial values and do not include ann_date, f_ann_date, or notice_date."
+    pagination_verification_status: pending_financial_probe
+    raw_mirror_candidate: false
+    pit_safe_candidate: false
     documented_row_limit: "single stock history; single request maximum 10000 rows"
     permission_notes: "separate permission required"
     update_cadence: "financial reporting"
@@ -389,6 +413,14 @@ endpoints:
     doc_url: "https://tushare.pro/document/2?doc_id=388"
     documented_params: [ts_code, period, report_type, start_date, end_date]
     documented_fields: [ts_code, end_date, ind_type, security_name_abbr, notice_date, start_date, std_report_date, currency, report_type]
+    documented_output_fields: [ts_code, end_date, ind_type, security_name_abbr, notice_date, start_date, std_report_date, currency, report_type]
+    assumed_pit_fields: [ann_date]
+    pit_disclosure_fields_in_documented_output: [notice_date]
+    pit_disclosure_availability: notice_date_possible
+    pit_disclosure_concern: "Documented output includes notice_date, but real probe must confirm it is returned for bounded requests before PIT-safe use."
+    pagination_verification_status: pending_financial_probe
+    raw_mirror_candidate: false
+    pit_safe_candidate: false
     documented_row_limit: "financial indicator endpoint; documented fields are broad and must be narrowed by fields"
     permission_notes: "separate permission or high points required"
     update_cadence: "financial reporting"
@@ -408,6 +440,14 @@ endpoints:
     doc_url: "https://tushare.pro/document/2?doc_id=394"
     documented_params: [ts_code, period, ind_name, report_type, start_date, end_date]
     documented_fields: [ts_code, end_date, ind_type, name, ind_name, ind_value, report_type]
+    documented_output_fields: [ts_code, end_date, ind_type, name, ind_name, ind_value, report_type]
+    assumed_pit_fields: [ann_date, f_ann_date]
+    pit_disclosure_fields_in_documented_output: []
+    pit_disclosure_availability: uncertain
+    pit_disclosure_concern: "Documented output fields are long-format financial values and do not include ann_date, f_ann_date, or notice_date."
+    pagination_verification_status: pending_financial_probe
+    raw_mirror_candidate: false
+    pit_safe_candidate: false
     documented_row_limit: "single stock history; single request maximum 10000 rows"
     permission_notes: "separate permission or high points required"
     update_cadence: "financial reporting"
@@ -427,6 +467,14 @@ endpoints:
     doc_url: "https://tushare.pro/document/2?doc_id=395"
     documented_params: [ts_code, period, ind_name, report_type, start_date, end_date]
     documented_fields: [ts_code, end_date, ind_type, name, ind_name, ind_value, report_type]
+    documented_output_fields: [ts_code, end_date, ind_type, name, ind_name, ind_value, report_type]
+    assumed_pit_fields: [ann_date, f_ann_date]
+    pit_disclosure_fields_in_documented_output: []
+    pit_disclosure_availability: uncertain
+    pit_disclosure_concern: "Documented output fields are long-format financial values and do not include ann_date, f_ann_date, or notice_date."
+    pagination_verification_status: pending_financial_probe
+    raw_mirror_candidate: false
+    pit_safe_candidate: false
     documented_row_limit: "single stock history; single request maximum 10000 rows"
     permission_notes: "separate permission or high points required"
     update_cadence: "financial reporting"
@@ -446,6 +494,14 @@ endpoints:
     doc_url: "https://tushare.pro/document/2?doc_id=396"
     documented_params: [ts_code, period, ind_name, report_type, start_date, end_date]
     documented_fields: [ts_code, end_date, ind_type, name, ind_name, ind_value, report_type]
+    documented_output_fields: [ts_code, end_date, ind_type, name, ind_name, ind_value, report_type]
+    assumed_pit_fields: [ann_date, f_ann_date]
+    pit_disclosure_fields_in_documented_output: []
+    pit_disclosure_availability: uncertain
+    pit_disclosure_concern: "Documented output fields are long-format financial values and do not include ann_date, f_ann_date, or notice_date."
+    pagination_verification_status: pending_financial_probe
+    raw_mirror_candidate: false
+    pit_safe_candidate: false
     documented_row_limit: "single stock history; single request maximum 10000 rows"
     permission_notes: "separate permission or high points required"
     update_cadence: "financial reporting"
@@ -465,6 +521,14 @@ endpoints:
     doc_url: "https://tushare.pro/document/2?doc_id=393"
     documented_params: [ts_code, period, report_type, start_date, end_date]
     documented_fields: [ts_code, end_date, ind_type, security_name_abbr, accounting_standards, notice_date, start_date, std_report_date, financial_date, currency, report_type]
+    documented_output_fields: [ts_code, end_date, ind_type, security_name_abbr, accounting_standards, notice_date, start_date, std_report_date, financial_date, currency, report_type]
+    assumed_pit_fields: [ann_date]
+    pit_disclosure_fields_in_documented_output: [notice_date]
+    pit_disclosure_availability: notice_date_possible
+    pit_disclosure_concern: "Documented output includes notice_date, but real probe must confirm it is returned for bounded requests before PIT-safe use."
+    pagination_verification_status: pending_financial_probe
+    raw_mirror_candidate: false
+    pit_safe_candidate: false
     documented_row_limit: "current endpoint page notes small per-request practical limits and single-stock history"
     permission_notes: "separate permission or high points required"
     update_cadence: "financial reporting"

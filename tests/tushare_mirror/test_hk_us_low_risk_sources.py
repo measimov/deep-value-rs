@@ -59,6 +59,35 @@ class HKUSLowRiskSourceMapTests(unittest.TestCase):
                 joined_notes = " ".join(endpoints[api_name]["safety_notes"])
                 self.assertTrue("outside this goal" in joined_notes or "no execution in this goal" in joined_notes)
 
+    def test_financial_source_map_distinguishes_documented_fields_from_pit_assumptions(self):
+        endpoints = {item["api_name"]: item for item in hk_us_low_risk_source_endpoints()}
+        statement_apis = [
+            "hk_income",
+            "hk_balancesheet",
+            "hk_cashflow",
+            "us_income",
+            "us_balancesheet",
+            "us_cashflow",
+        ]
+        for api_name in statement_apis:
+            with self.subTest(api_name=api_name):
+                item = endpoints[api_name]
+                self.assertEqual(item["documented_output_fields"], item["documented_fields"])
+                self.assertEqual(item["pit_disclosure_fields_in_documented_output"], [])
+                self.assertEqual(item["pit_disclosure_availability"], "uncertain")
+                self.assertIn("ann_date", item["assumed_pit_fields"])
+                self.assertFalse(item["raw_mirror_candidate"])
+                self.assertFalse(item["pit_safe_candidate"])
+                self.assertIn("do not include ann_date", item["pit_disclosure_concern"])
+
+        for api_name in ["hk_fina_indicator", "us_fina_indicator"]:
+            with self.subTest(api_name=api_name):
+                item = endpoints[api_name]
+                self.assertIn("notice_date", item["documented_output_fields"])
+                self.assertEqual(item["pit_disclosure_fields_in_documented_output"], ["notice_date"])
+                self.assertEqual(item["pit_disclosure_availability"], "notice_date_possible")
+                self.assertEqual(item["pagination_verification_status"], "pending_financial_probe")
+
     def test_pagination_findings_are_recorded_for_doc_ambiguous_endpoints(self):
         endpoints = {item["api_name"]: item for item in hk_us_low_risk_source_endpoints()}
         for api_name in ["hk_daily_adj", "us_daily"]:
