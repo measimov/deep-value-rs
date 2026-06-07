@@ -194,6 +194,55 @@ class PITSafetyMetadataTests(unittest.TestCase):
         self.assertIn("missing_announcement_date_fields", result.errors)
         self.assertIn("missing_usable_after_strategy", result.errors)
 
+    def test_observed_financial_fields_without_disclosure_date_block_distinctly(self):
+        cfg = {
+            "api_name": "hk_income",
+            "endpoint_kind": "financial_statement",
+            "pit_safety": {
+                "pit_required": True,
+                "period_field": "period",
+                "announcement_date_fields": ["ann_date", "f_ann_date"],
+                "usable_after_field": "ann_date",
+                "fallback_usable_after_policy": "block_without_disclosure_date",
+                "allow_without_disclosure_date": False,
+            },
+        }
+        result = validate_pit_safety(cfg, observed_fields=["ts_code", "end_date", "name", "ind_name", "ind_value"])
+        self.assertTrue(result.blocked)
+        self.assertEqual(result.status, "blocked_without_disclosure_date")
+        self.assertEqual(result.usable_after_status, "blocked_without_disclosure_date")
+        self.assertIn("observed_disclosure_date_missing", result.errors)
+        self.assertEqual(result.observed_disclosure_fields, [])
+
+    def test_observed_notice_date_can_satisfy_alternate_disclosure_field(self):
+        cfg = {
+            "api_name": "us_fina_indicator",
+            "endpoint_kind": "financial_indicator",
+            "pit_safety": {
+                "pit_required": True,
+                "period_field": "period",
+                "announcement_date_fields": ["ann_date"],
+                "usable_after_field": "ann_date",
+                "fallback_usable_after_policy": "block_without_disclosure_date",
+                "allow_without_disclosure_date": False,
+            },
+        }
+        result = validate_pit_safety(
+            cfg,
+            observed_fields=[
+                "ts_code",
+                "end_date",
+                "notice_date",
+                "financial_date",
+                "currency",
+            ],
+        )
+        self.assertFalse(result.blocked)
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(result.usable_after_status, "observed_alternate_disclosure_field")
+        self.assertEqual(result.observed_disclosure_fields, ["notice_date"])
+        self.assertIn("usable_after_field_not_observed:ann_date", result.warnings)
+
 
 class PeriodPlannerCliTests(unittest.TestCase):
     def setUp(self):

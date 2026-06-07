@@ -7,6 +7,7 @@ from .endpoints import load_inventory_configs
 
 
 PIT_ENDPOINT_KINDS = {"financial_statement", "financial_indicator"}
+COMMON_DISCLOSURE_DATE_FIELDS = ("ann_date", "f_ann_date", "notice_date", "disclosure_date", "publish_date")
 
 
 @dataclass(frozen=True)
@@ -32,10 +33,13 @@ class PITSafetyValidationResult:
     metadata: PITSafetyMetadata
     errors: list[str]
     warnings: list[str]
+    observed_fields: list[str]
+    observed_disclosure_fields: list[str]
+    usable_after_status: str
 
     @property
     def blocked(self) -> bool:
-        return self.status == "blocked"
+        return self.status.startswith("blocked")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -168,12 +172,15 @@ def pit_metadata_from_config(endpoint_config: Mapping[str, Any]) -> PITSafetyMet
     )
 
 
-def validate_pit_safety(endpoint_config: Mapping[str, Any]) -> PITSafetyValidationResult:
+def validate_pit_safety(endpoint_config: Mapping[str, Any], observed_fields: list[str] | None = None) -> PITSafetyValidationResult:
     metadata = pit_metadata_from_config(endpoint_config)
     errors: list[str] = []
     warnings: list[str] = []
     pit_safety_raw = endpoint_config.get("pit_safety")
     endpoint_kind = str(endpoint_config.get("endpoint_kind") or "")
+    observed = _normalize_fields(observed_fields)
+    observed_disclosure_fields: list[str] = []
+    usable_after_status = "not_checked" if observed_fields is None else "not_required"
 
     if not metadata.pit_required:
         return PITSafetyValidationResult(
@@ -182,7 +189,28 @@ def validate_pit_safety(endpoint_config: Mapping[str, Any]) -> PITSafetyValidati
             metadata=metadata,
             errors=[],
             warnings=[],
+            observed_fields=observed,
+            observed_disclosure_fields=[],
+            usable_after_status="not_required",
         )
+
+    if observed_fields is not None:
+        observed_disclosure_fields = _observed_disclosure_fields(metadata, observed)
+        if metadata.usable_after_field and metadata.usable_after_field in observed:
+            usable_after_status = "observed_usable_after_field"
+        elif observed_disclosure_fields:
+            usable_after_status = "observed_alternate_disclosure_field"
+            if metadata.usable_after_field:
+                warnings.append(f"usable_after_field_not_observed:{metadata.usable_after_field}")
+        elif metadata.allow_without_disclosure_date:
+            usable_after_status = "allowed_without_disclosure_date"
+            warnings.append("observed_disclosure_date_missing_but_allowed")
+        elif metadata.fallback_usable_after_policy == "block_without_disclosure_date":
+            usable_after_status = "blocked_without_disclosure_date"
+            errors.append("observed_disclosure_date_missing")
+        else:
+            usable_after_status = "blocked_without_usable_after_policy"
+            errors.append("observed_disclosure_date_missing")
 
     if endpoint_kind in PIT_ENDPOINT_KINDS and not isinstance(pit_safety_raw, Mapping):
         errors.append("unknown_pit_safety")
@@ -196,11 +224,39 @@ def validate_pit_safety(endpoint_config: Mapping[str, Any]) -> PITSafetyValidati
         warnings.append("allow_without_disclosure_date=true increases lookahead risk")
     if metadata.strategy_safe_default:
         warnings.append("strategy_safe_default=true must be backed by endpoint-specific tests")
-    status = "blocked" if errors else "complete"
+    if "observed_disclosure_date_missing" in errors:
+        status = "blocked_without_disclosure_date"
+    else:
+        status = "blocked" if errors else "complete"
     return PITSafetyValidationResult(
         status=status,
         pit_required=True,
         metadata=metadata,
         errors=errors,
         warnings=warnings,
+        observed_fields=observed,
+        observed_disclosure_fields=observed_disclosure_fields,
+        usable_after_status=usable_after_status,
     )
+
+
+def _normalize_fields(fields: list[str] | None) -> list[str]:
+    if fields is None:
+        return []
+    return [str(field) for field in fields if str(field)]
+
+
+def _observed_disclosure_fields(metadata: PITSafetyMetadata, observed: list[str]) -> list[str]:
+    candidates: list[str] = []
+    if metadata.usable_after_field:
+        candidates.append(metadata.usable_after_field)
+    candidates.extend(metadata.announcement_date_fields)
+    candidates.extend(COMMON_DISCLOSURE_DATE_FIELDS)
+    seen: set[str] = set()
+    out: list[str] = []
+    observed_set = set(observed)
+    for candidate in candidates:
+        if candidate in observed_set and candidate not in seen:
+            seen.add(candidate)
+            out.append(candidate)
+    return out
