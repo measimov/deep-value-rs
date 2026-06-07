@@ -262,6 +262,7 @@ def _endpoint_readiness_item(item: dict[str, Any]) -> dict[str, Any]:
         pit_status = "permission_blocked"
     else:
         pit_status = "probe_or_contract_pending"
+    observed_fields = list((item.get("real_probe_observed") or {}).get("fields") or [])
     return {
         "api_name": api_name,
         "probe_status": probe_status,
@@ -270,10 +271,15 @@ def _endpoint_readiness_item(item: dict[str, Any]) -> dict[str, Any]:
         "permission_blocked": permission_blocked,
         "contract_blocked": contract_blocked,
         "pit_usable_after_status": pit_status,
-        "observed_fields": list((item.get("real_probe_observed") or {}).get("fields") or []),
-        "observed_disclosure_fields": list(item.get("pit_disclosure_fields_in_documented_output") or []),
+        "observed_fields": observed_fields,
+        "observed_disclosure_fields": _observed_disclosure_fields(observed_fields),
         "recommended_execution_status": "guarded_raw" if raw_ready else "plan_only",
     }
+
+
+def _observed_disclosure_fields(fields: list[str]) -> list[str]:
+    disclosure = {"ann_date", "f_ann_date", "notice_date", "disclosure_date", "publish_date"}
+    return [field for field in fields if field in disclosure]
 
 
 def _default_universe_for_scope(scope: str) -> str:

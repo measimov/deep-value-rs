@@ -146,7 +146,11 @@ class HKUSFinancialReportTests(unittest.TestCase):
         self.assertEqual(us["raw_ready_count"], 1)
         self.assertEqual(us["pit_safe_ready"], ["us_fina_indicator"])
         self.assertEqual(us["contract_blocked_count"], 3)
+        hk_by_api = {item["api_name"]: item for item in hk["items"]}
+        self.assertEqual(hk_by_api["hk_fina_indicator"]["observed_disclosure_fields"], [])
+        self.assertEqual(hk_by_api["hk_fina_indicator"]["pit_usable_after_status"], "blocked_without_disclosure_date")
         by_api = {item["api_name"]: item for item in us["items"]}
+        self.assertEqual(by_api["us_fina_indicator"]["observed_disclosure_fields"], ["notice_date"])
         self.assertTrue(by_api["us_fina_indicator"]["pit_safe_ready"])
         self.assertTrue(by_api["us_income"]["contract_blocked"])
 
