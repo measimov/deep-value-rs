@@ -59,14 +59,20 @@ class FileLakeStore:
         run_id: str | None = None,
         finish_run: bool = True,
         run_type: str = "fetch",
+        scope: str | None = None,
+        max_codes_required: int | None = None,
+        requires_pit_handling: bool | None = None,
     ) -> FetchResult:
         cfg = self.catalog.get_endpoint_config(api_name)
         policy = EndpointExecutionPolicy().decide(
             ExecutionPolicyRequest(
                 endpoint_config=cfg,
+                scope=scope,
                 user_command=run_type,
                 max_jobs=1,
                 requires_real_requests=True,
+                requires_pit_handling=requires_pit_handling,
+                max_codes_required=max_codes_required,
             )
         )
         if not policy.allowed:

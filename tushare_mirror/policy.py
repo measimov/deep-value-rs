@@ -11,6 +11,10 @@ SUPPORTED_EXECUTABLE_PLANNER_KINDS = {
     "calendar_backfill",
     "explicit_dates",
 }
+GUARDED_FINANCIAL_RAW_COMMANDS = {"financial-raw-fetch"}
+FINANCIAL_RAW_SCOPES = {"hk-financial-raw", "us-financial-raw"}
+MAX_GUARDED_FINANCIAL_RAW_CODES = 20
+MAX_GUARDED_FINANCIAL_RAW_JOBS = 100
 
 BLOCKED_ENDPOINT_KINDS = {
     "financial_statement": "financial PIT infrastructure is required before financial statement execution",
@@ -202,6 +206,17 @@ class EndpointExecutionPolicy:
                 max_codes_required=request.max_codes_required,
             )
 
+        if request.user_command in GUARDED_FINANCIAL_RAW_COMMANDS:
+            return self._financial_raw_decision(
+                request,
+                api_name,
+                endpoint_kind,
+                planner_kind,
+                requires_code_loop=bool(requires_code_loop),
+                requires_period_loop=bool(requires_period_loop),
+                requires_compaction_execution=bool(requires_compaction_execution),
+            )
+
         if endpoint_kind in BLOCKED_ENDPOINT_KINDS:
             missing.append(BLOCKED_ENDPOINT_KINDS[str(endpoint_kind)])
         if planner_kind in BLOCKED_PLANNER_KINDS:
@@ -261,6 +276,72 @@ class EndpointExecutionPolicy:
             requires_date_loop=bool(requires_date_loop),
             requires_period_loop=bool(requires_period_loop),
             requires_compaction_execution=bool(requires_compaction_execution),
+            max_codes_required=request.max_codes_required,
+            execution_allowed=True,
+            blocked_reason=None,
+            missing_infrastructure=[],
+            warnings=warnings,
+        )
+
+    def _financial_raw_decision(
+        self,
+        request: ExecutionPolicyRequest,
+        api_name: str,
+        endpoint_kind: Any,
+        planner_kind: Any,
+        *,
+        requires_code_loop: bool,
+        requires_period_loop: bool,
+        requires_compaction_execution: bool,
+    ) -> ExecutionPolicyDecision:
+        missing: list[str] = []
+        warnings = [
+            "financial raw execution requires an explicit guarded command",
+            "raw financial output is not strategy-safe unless PIT usable-after fields are present",
+        ]
+        if request.scope not in FINANCIAL_RAW_SCOPES:
+            missing.append(f"financial raw scope required: {', '.join(sorted(FINANCIAL_RAW_SCOPES))}")
+        if endpoint_kind not in {"financial_statement", "financial_indicator"}:
+            missing.append(f"financial endpoint kind required: {endpoint_kind}")
+        if planner_kind != "code_period_matrix":
+            missing.append(f"code_period_matrix planner required: {planner_kind}")
+        if request.max_codes_required is None:
+            missing.append("max_codes_required is required for guarded financial raw execution")
+        elif request.max_codes_required > MAX_GUARDED_FINANCIAL_RAW_CODES:
+            missing.append(f"max_codes_required exceeds guarded limit: {MAX_GUARDED_FINANCIAL_RAW_CODES}")
+        if request.max_jobs is not None and request.max_jobs > MAX_GUARDED_FINANCIAL_RAW_JOBS:
+            missing.append(f"max_jobs exceeds guarded financial raw limit: {MAX_GUARDED_FINANCIAL_RAW_JOBS}")
+        if requires_compaction_execution:
+            missing.append("compaction execution is not allowed for guarded financial raw execution")
+        if missing:
+            return self._decision(
+                "blocked",
+                api_name,
+                endpoint_kind,
+                planner_kind,
+                "financial_raw_guardrails_not_satisfied",
+                request.requires_real_requests,
+                sorted(set(missing)),
+                warnings,
+                requires_code_loop=requires_code_loop,
+                requires_date_loop=False,
+                requires_period_loop=requires_period_loop,
+                requires_compaction_execution=requires_compaction_execution,
+                max_codes_required=request.max_codes_required,
+            )
+        return ExecutionPolicyDecision(
+            decision="allow",
+            api_name=api_name,
+            endpoint_kind=str(endpoint_kind) if endpoint_kind else None,
+            planner_kind=str(planner_kind) if planner_kind else None,
+            reason="guarded_financial_raw_execution",
+            requires_real_requests=request.requires_real_requests,
+            requires_user_confirmation=request.requires_real_requests,
+            user_confirmation_required=request.requires_real_requests,
+            requires_code_loop=requires_code_loop,
+            requires_date_loop=False,
+            requires_period_loop=requires_period_loop,
+            requires_compaction_execution=requires_compaction_execution,
             max_codes_required=request.max_codes_required,
             execution_allowed=True,
             blocked_reason=None,

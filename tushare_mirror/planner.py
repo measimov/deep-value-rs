@@ -137,7 +137,7 @@ class JobPlanner:
             snapshot_date = self._date_value(params, ["snapshot_date"])
             return {**base, "hs_type": hs_type, "snapshot_date": snapshot_date}
         if template == "period_year":
-            date_value = self._date_value(params, ["end_date", "ann_date", "start_date"])
+            date_value = self._date_value(params, ["period", "end_date", "ann_date", "start_date"])
             return {**base, "period_year": self._year(date_value), "period_date": date_value}
         date_field = self._primary_date_field(cfg) or "trade_date"
         date_value = self._date_value(params, [date_field])
