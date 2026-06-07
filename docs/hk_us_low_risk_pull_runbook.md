@@ -130,9 +130,21 @@ Bundle contents:
 marked `USER_CONFIRMATION_REQUIRED`. Do not run generated commands
 automatically.
 
-## Auto-sync
+## Guarded Auto-sync
 
-HK/US auto-sync is dry-run planning only in this goal:
+HK/US auto-sync supports read-only planning, command bundle generation, status
+inspection, and recovery planning. Real HK/US execution is guarded and must not
+be run by Codex or automation in this goal. It requires both
+`--confirm-auto-sync` and `--confirm-hk-us-auto-sync`, plus a user-selected
+state file outside mirror and backup roots.
+
+The active A-share auto-sync process, if already running, was launched from the
+code loaded at its start time. New HK/US lock code cannot coordinate with that
+already-running process until it is restarted under code that also uses the new
+lock path. While A-share is active, do not stop, restart, or signal it as part
+of HK/US preparation.
+
+Preview HK windows without writing state:
 
 ```bash
 python3 -m tushare_mirror mirror-auto-sync \
@@ -143,13 +155,57 @@ python3 -m tushare_mirror mirror-auto-sync \
   --to-date latest-trade-date \
   --window-days 20 \
   --max-jobs-per-api 20 \
-  --state /tmp/tushare-hk-low-risk-auto-sync-state.json \
+  --state /mnt/gw/TuShare-hk-auto-sync-state.json \
   --json
 ```
 
-`--execute` remains blocked for HK/US/global scopes. Existing A-share
-`mirror-auto-sync` behavior is unchanged and continues to be the only
-auto-sync execute path.
+Recommended future state paths:
+
+- HK: `/mnt/gw/TuShare-hk-auto-sync-state.json`
+- US: `/mnt/gw/TuShare-us-auto-sync-state.json`
+
+Generate a guarded HK auto-sync command bundle in `/tmp` only:
+
+```bash
+python3 -m tushare_mirror mirror-auto-sync-command \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope hk-low-risk \
+  --from-date 19900101 \
+  --to-date latest-trade-date \
+  --window-days 20 \
+  --max-jobs-per-api 20 \
+  --state /mnt/gw/TuShare-hk-auto-sync-state.json \
+  --output /tmp/tushare-hk-auto-sync-command \
+  --json
+```
+
+The generated `commands.sh` is commented, contains
+`USER_CONFIRMATION_REQUIRED`, and must not be run automatically. The generated
+confirmation phrase is operator friction, not a secret.
+
+If a future user-confirmed HK/US auto-sync is interrupted, inspect state and
+generate a recovery plan before retrying:
+
+```bash
+python3 -m tushare_mirror mirror-auto-sync-status \
+  --state /mnt/gw/TuShare-hk-auto-sync-state.json \
+  --json
+
+python3 -m tushare_mirror mirror-auto-sync-recovery-plan \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope hk-low-risk \
+  --state /mnt/gw/TuShare-hk-auto-sync-state.json \
+  --json
+```
+
+Retryable window failures include rate limits, network errors, server errors,
+and unknown transient errors after the configured backoff. Permission denied,
+invalid params, invalid endpoint, schema incompatible, validation failed,
+backup failed, and restore-check failed are stop conditions requiring operator
+review. `global-equity-low-risk` remains a reporting composition only; run HK
+and US child scopes separately.
 
 ## Future Bounded HK/US Smoke
 
@@ -188,6 +244,7 @@ next batch.
 Codex leaves HK/US execution to a user-confirmed command because the historical
 range can be large, HK/US calendar dependencies must be staged locally before
 daily-like jobs, pagination behavior was characterized but still needs guarded
-operator review under real quotas, and HK/US auto-sync execute mode is not
-enabled by this goal. This work prepares infrastructure and command bundles; it
-does not authorize automation to run `mirror-run --execute`.
+operator review under real quotas, and any active A-share writer must not be
+disturbed by HK/US preparation. This work prepares infrastructure, status
+reports, recovery reports, and command bundles; it does not authorize automation
+to run HK/US `mirror-run --execute` or HK/US `mirror-auto-sync --execute`.

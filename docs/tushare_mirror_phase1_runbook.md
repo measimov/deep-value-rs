@@ -2714,6 +2714,68 @@ python3 -m tushare_mirror mirror-pull-command \
 
 The generated `commands.sh` files are commented and guarded with
 `USER_CONFIRMATION_REQUIRED`. Codex must not run them, must not execute HK/US
-`mirror-run`, and must not start HK/US auto-sync execution. HK/US auto-sync is
-dry-run planning only until a separate guarded execution goal exists. Existing
-A-share auto-sync behavior is unchanged.
+`mirror-run`, and must not start HK/US auto-sync execution.
+
+HK/US auto-sync now has a guarded execution gate, but this runbook still treats
+it as user-confirmed only. The user must review read-only reports first, then
+copy the generated command manually if they want to execute. The extra
+confirmation flag is operator friction:
+
+```bash
+python3 -m tushare_mirror mirror-auto-sync \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope hk-low-risk \
+  --from-date 19900101 \
+  --to-date latest-trade-date \
+  --window-days 20 \
+  --max-jobs-per-api 20 \
+  --state /mnt/gw/TuShare-hk-auto-sync-state.json \
+  --max-attempts 3 \
+  --retry-backoff-seconds 60 \
+  --execute \
+  --confirm-auto-sync \
+  --confirm-hk-us-auto-sync \
+  --json
+```
+
+Do not run that command automatically. Generate and review a guarded bundle
+instead:
+
+```bash
+python3 -m tushare_mirror mirror-auto-sync-command \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope hk-low-risk \
+  --from-date 19900101 \
+  --to-date latest-trade-date \
+  --window-days 20 \
+  --max-jobs-per-api 20 \
+  --state /mnt/gw/TuShare-hk-auto-sync-state.json \
+  --output /tmp/tushare-hk-auto-sync-command \
+  --json
+```
+
+Recommended state files are `/mnt/gw/TuShare-hk-auto-sync-state.json` and
+`/mnt/gw/TuShare-us-auto-sync-state.json`; state paths must stay outside mirror
+and backup roots. To inspect or recover a future interrupted run:
+
+```bash
+python3 -m tushare_mirror mirror-auto-sync-status \
+  --state /mnt/gw/TuShare-hk-auto-sync-state.json \
+  --json
+
+python3 -m tushare_mirror mirror-auto-sync-recovery-plan \
+  --root "$MIRROR_ROOT" \
+  --backup "$MIRROR_BACKUP" \
+  --scope hk-low-risk \
+  --state /mnt/gw/TuShare-hk-auto-sync-state.json \
+  --json
+```
+
+If an A-share auto-sync process is already running, do not stop, restart, or
+signal it while preparing HK/US. That existing process loaded the code present
+at its launch time, so new lock code can only coordinate with A-share after a
+future A-share restart under the updated code. `global-equity-low-risk` remains
+a reporting composition only; run `hk-low-risk` and `us-low-risk` separately.
+Existing A-share auto-sync behavior is unchanged.
