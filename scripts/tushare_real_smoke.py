@@ -90,6 +90,49 @@ HK_US_LOW_RISK_PROBE_REQUESTS: dict[str, list[dict[str, Any]]] = {
     ],
     "us_adjfactor": [{"ts_code": "AAPL", "start_date": "20250102", "end_date": "20250102"}],
 }
+HK_US_FINANCIAL_DISCLOSURE_FIELDS = {"ann_date", "f_ann_date", "notice_date", "disclosure_date", "publish_date"}
+HK_US_FINANCIAL_PROBE_FIELDS: dict[str, list[str]] = {
+    "hk_income": ["ts_code", "end_date", "name", "ind_name", "ind_value"],
+    "hk_balancesheet": ["ts_code", "name", "end_date", "ind_name", "ind_value"],
+    "hk_cashflow": ["ts_code", "end_date", "name", "ind_name", "ind_value"],
+    "hk_fina_indicator": [
+        "ts_code",
+        "end_date",
+        "ind_type",
+        "security_name_abbr",
+        "notice_date",
+        "start_date",
+        "std_report_date",
+        "currency",
+        "report_type",
+    ],
+    "us_income": ["ts_code", "end_date", "ind_type", "name", "ind_name", "ind_value", "report_type"],
+    "us_balancesheet": ["ts_code", "end_date", "ind_type", "name", "ind_name", "ind_value", "report_type"],
+    "us_cashflow": ["ts_code", "end_date", "ind_type", "name", "ind_name", "ind_value", "report_type"],
+    "us_fina_indicator": [
+        "ts_code",
+        "end_date",
+        "ind_type",
+        "security_name_abbr",
+        "accounting_standards",
+        "notice_date",
+        "start_date",
+        "std_report_date",
+        "financial_date",
+        "currency",
+        "report_type",
+    ],
+}
+HK_US_FINANCIAL_PROBE_REQUESTS: dict[str, list[dict[str, Any]]] = {
+    "hk_income": [{"ts_code": "00700.HK", "period": "20241231"}],
+    "hk_balancesheet": [{"ts_code": "00700.HK", "period": "20241231"}],
+    "hk_cashflow": [{"ts_code": "00700.HK", "period": "20241231"}],
+    "hk_fina_indicator": [{"ts_code": "00700.HK", "period": "20241231"}],
+    "us_income": [{"ts_code": "NVDA", "period": "20241231"}],
+    "us_balancesheet": [{"ts_code": "NVDA", "period": "20241231"}],
+    "us_cashflow": [{"ts_code": "NVDA", "period": "20241231"}],
+    "us_fina_indicator": [{"ts_code": "NVDA", "period": "20241231"}],
+}
 
 
 def run_cli(root: Path, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -228,6 +271,14 @@ def _executable_hk_us_source_endpoints() -> list[dict[str, Any]]:
     return [item for item in hk_us_low_risk_source_endpoints() if item.get("recommendation") == "executable_candidate"]
 
 
+def _financial_hk_us_source_endpoints() -> list[dict[str, Any]]:
+    return [
+        item
+        for item in hk_us_low_risk_source_endpoints()
+        if item.get("api_name") in HK_US_FINANCIAL_PROBE_REQUESTS
+    ]
+
+
 def _probe_endpoint(client: Any, endpoint: dict[str, Any], max_requests_per_endpoint: int, token: str | None) -> dict[str, Any]:
     api_name = str(endpoint["api_name"])
     requests = HK_US_LOW_RISK_PROBE_REQUESTS.get(api_name, [])[:max_requests_per_endpoint]
@@ -285,6 +336,93 @@ def _probe_endpoint(client: Any, endpoint: dict[str, Any], max_requests_per_endp
     }
 
 
+def _financial_probe_report_header(output: Path, max_requests_per_endpoint: int) -> dict[str, Any]:
+    return {
+        "report_version": "hk-us-financial-pit-probe/v1",
+        "generated_at": dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "output": str(output),
+        "max_requests_per_endpoint": max_requests_per_endpoint,
+        "global_max_requests": len(HK_US_FINANCIAL_PROBE_REQUESTS) * max_requests_per_endpoint,
+        "real_requests_sent": False,
+        "token_plaintext_found": False,
+        "overall_status": "blocked",
+        "blocking_errors": [],
+        "warnings": [],
+        "endpoints": [],
+    }
+
+
+def _financial_probe_status(status: str, row_count: int) -> str:
+    if status in ACCESSIBLE:
+        return "passed" if row_count else "empty_but_authorized"
+    if status == "permission_denied":
+        return "permission_denied"
+    if status in {"invalid_params", "invalid_endpoint"}:
+        return "contract_changed"
+    return "failed"
+
+
+def _params_shape(params: dict[str, Any]) -> dict[str, str]:
+    return {str(key): type(value).__name__ for key, value in sorted(params.items())}
+
+
+def _probe_financial_endpoint(client: Any, endpoint: dict[str, Any], max_requests_per_endpoint: int, token: str | None) -> dict[str, Any]:
+    api_name = str(endpoint["api_name"])
+    requests = HK_US_FINANCIAL_PROBE_REQUESTS.get(api_name, [])[:max_requests_per_endpoint]
+    fields = HK_US_FINANCIAL_PROBE_FIELDS.get(api_name, list(endpoint.get("documented_output_fields") or endpoint.get("documented_fields") or [])[:12])
+    statuses: list[str] = []
+    errors: list[str] = []
+    observed_fields: list[str] = []
+    row_count = 0
+    params_shapes: list[dict[str, str]] = []
+    request_count = 0
+    for params in requests:
+        request_count += 1
+        params_shapes.append(_params_shape(params))
+        try:
+            response = client.request(api_name, params, fields)
+        except Exception as exc:
+            statuses.append("unknown_error")
+            errors.append(_redact_for_probe(str(exc), token))
+            continue
+        response = _redact_for_probe(response, token)
+        status, message = classify_probe_response(response)
+        statuses.append(status)
+        if message:
+            errors.append(message)
+        data = response.get("data") or {}
+        current_fields = [str(item) for item in (data.get("fields") or [])]
+        if current_fields:
+            for field in current_fields:
+                if field not in observed_fields:
+                    observed_fields.append(field)
+        row_count += len(list(data.get("items") or []))
+    classified = "not_run"
+    if statuses:
+        if any(item in ACCESSIBLE for item in statuses):
+            classified = "accessible" if row_count else "empty_but_accessible"
+        else:
+            classified = statuses[-1]
+    observed_disclosure = [field for field in observed_fields if field in HK_US_FINANCIAL_DISCLOSURE_FIELDS]
+    return {
+        "api_name": api_name,
+        "market": endpoint.get("market"),
+        "category": endpoint.get("category"),
+        "probe_status": _financial_probe_status(classified, row_count),
+        "request_count": request_count,
+        "params_shape": params_shapes,
+        "observed_fields": observed_fields,
+        "observed_row_count": row_count,
+        "observed_disclosure_fields": observed_disclosure,
+        "observed_pagination_behavior": "not_tested" if request_count <= 1 else "bounded_multi_request",
+        "recommended_planner_kind": endpoint.get("recommended_planner_kind"),
+        "recommended_pagination_strategy": endpoint.get("recommended_pagination_strategy"),
+        "error_type": None if classified in ACCESSIBLE else classified,
+        "errors": errors,
+        "redaction_status": "redacted",
+    }
+
+
 def run_hk_us_low_risk_probe(
     output: Path,
     max_requests_per_endpoint: int,
@@ -319,6 +457,52 @@ def run_hk_us_low_risk_probe(
     elif any(row["status"] in permission_statuses for row in rows):
         report["overall_status"] = "warning"
         report["warnings"].append("one or more probes could not confirm data access due to permission or rate status")
+    else:
+        report["overall_status"] = "passed"
+    encoded = json.dumps(report, ensure_ascii=False)
+    report["token_plaintext_found"] = bool(token and token in encoded)
+    if report["token_plaintext_found"]:
+        report["overall_status"] = "blocked"
+        report["blocking_errors"].append("probe report would contain token plaintext")
+        report = _redact_for_probe(report, token)
+    _write_probe_report(output, report)
+    print(json.dumps({"output": str(output), "overall_status": report["overall_status"], "real_requests_sent": True}, sort_keys=True))
+    return 0 if report["overall_status"] in {"passed", "warning"} else 1
+
+
+def run_hk_us_financial_pit_probe(
+    output: Path,
+    max_requests_per_endpoint: int,
+    *,
+    token: str | None = None,
+    client: Any | None = None,
+) -> int:
+    if max_requests_per_endpoint < 1:
+        raise ValueError("--max-requests-per-endpoint must be positive")
+    if max_requests_per_endpoint > 2:
+        raise ValueError("--max-requests-per-endpoint must be <= 2 for HK/US financial PIT probes")
+    output = _ensure_tmp_output_path(output)
+    load_dotenv()
+    token = token if token is not None else os.environ.get("TUSHARE_TOKEN")
+    report = _financial_probe_report_header(output, max_requests_per_endpoint)
+    if not token:
+        report["blocking_errors"].append("TUSHARE_TOKEN is required; no real requests were sent")
+        _write_probe_report(output, report)
+        print(json.dumps({"output": str(output), "overall_status": "blocked", "real_requests_sent": False}, sort_keys=True))
+        return 2
+
+    client = client if client is not None else TushareClient(token)
+    endpoints = _financial_hk_us_source_endpoints()
+    rows = [_probe_financial_endpoint(client, endpoint, max_requests_per_endpoint, token) for endpoint in endpoints]
+    report["endpoints"] = rows
+    report["real_requests_sent"] = True
+    blocked_statuses = {"contract_changed", "failed"}
+    if any(row["probe_status"] in blocked_statuses for row in rows):
+        report["overall_status"] = "blocked"
+        report["blocking_errors"].append("one or more financial probes returned blocking errors")
+    elif any(row["probe_status"] == "permission_denied" for row in rows):
+        report["overall_status"] = "warning"
+        report["warnings"].append("one or more financial probes could not confirm access due to permission status")
     else:
         report["overall_status"] = "passed"
     encoded = json.dumps(report, ensure_ascii=False)
@@ -448,7 +632,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phase-2-low-volume", action="store_true", help="Run Phase 2 low-risk endpoints only.")
     parser.add_argument("--a-share-low-risk-smoke", action="store_true", help="Run the bounded A-share low-risk endpoint smoke set.")
     parser.add_argument("--hk-us-low-risk-probe", action="store_true", help="Run bounded HK/US low-risk interface probes and write redacted diagnostics under /tmp.")
-    parser.add_argument("--output", help="Probe output JSON path. Required for --hk-us-low-risk-probe and must be under /tmp.")
+    parser.add_argument("--hk-us-financial-pit-probe", action="store_true", help="Run bounded HK/US financial PIT contract probes and write redacted diagnostics under /tmp.")
+    parser.add_argument("--output", help="Probe output JSON path. Required for HK/US probes and must be under /tmp.")
     parser.add_argument("--max-requests-per-endpoint", type=int, default=2, help="HK/US probe request cap per endpoint; maximum 2.")
     parser.add_argument("--print-commands", action="store_true", help="Print selected smoke commands without sending real requests.")
     parser.add_argument("--calendar-backfill", action="store_true", help="Run the Phase 2.4 calendar-aware daily backfill smoke.")
@@ -467,6 +652,15 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
+    if args.hk_us_financial_pit_probe:
+        if not args.output:
+            print("--output is required for --hk-us-financial-pit-probe", file=sys.stderr)
+            return 2
+        try:
+            return run_hk_us_financial_pit_probe(Path(args.output), args.max_requests_per_endpoint)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     endpoints: list[str] = []
     if args.all_phase_1:
         endpoints.extend(PHASE1_ENDPOINTS)
@@ -482,12 +676,12 @@ def main(argv: list[str] | None = None) -> int:
     endpoints = [api for api in endpoints if not (api in seen or seen.add(api))]
     if args.print_commands:
         if not endpoints:
-            print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, or --endpoint.", file=sys.stderr)
+            print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --hk-us-financial-pit-probe, or --endpoint.", file=sys.stderr)
             return 2
         print_command_preview(Path(args.root), endpoints)
         return 0
     if not endpoints:
-        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --calendar-backfill, or --endpoint.", file=sys.stderr)
+        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --hk-us-financial-pit-probe, --calendar-backfill, or --endpoint.", file=sys.stderr)
         return 2
     return run_smoke(Path(args.root), endpoints, args.reset_root)
 
