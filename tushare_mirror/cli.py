@@ -30,6 +30,7 @@ from .coverage import CoverageReporter
 from .enablement import EndpointEnablementChecklistReporter
 from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
+from .financial_command import FinancialPullCommandReporter
 from .financial_reports import FinancialCoverageMatrixReporter, FinancialReadinessReporter, FinancialRequestEstimateReporter
 from .financial_probe import HKUSFinancialProbeReporter
 from .hashing import token_hash
@@ -668,6 +669,25 @@ def cmd_financial_coverage_matrix(args) -> int:
         _print_key_values(report.summary())
         if report.items:
             _print_table(report.items, ["api_name", "coverage_class", "total_code_periods", "covered_code_periods", "missing_code_periods", "coverage_ratio", "status"])
+    return 1 if report.blocking_errors else 0
+
+
+def cmd_financial_pull_command(args) -> int:
+    report = FinancialPullCommandReporter().create(
+        scope=args.scope,
+        root=args.root_arg,
+        backup=args.backup,
+        from_period=args.from_period,
+        to_period=args.to_period,
+        limit_codes=args.limit_codes,
+        max_periods=args.max_periods,
+        output=args.output,
+        overwrite=args.overwrite,
+    )
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        _print_key_values(report.summary())
     return 1 if report.blocking_errors else 0
 
 
@@ -1929,6 +1949,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--universe')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_financial_coverage_matrix)
+
+    p = sub.add_parser('financial-pull-command', description='Read-only/file-output guarded HK/US financial pull command bundle generator; does not execute or fetch.')
+    p.add_argument('--scope', required=True)
+    p.add_argument('--root', dest='root_arg', required=True)
+    p.add_argument('--backup', required=True)
+    p.add_argument('--from-period', required=True)
+    p.add_argument('--to-period', required=True)
+    p.add_argument('--limit-codes', type=int, required=True)
+    p.add_argument('--max-periods', type=int, default=20)
+    p.add_argument('--output')
+    p.add_argument('--overwrite', action='store_true')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_financial_pull_command)
 
     p = sub.add_parser('mirror-review')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
