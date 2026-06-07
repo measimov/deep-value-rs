@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -255,6 +256,7 @@ class HKUSAutoSyncGuardrailTests(unittest.TestCase):
 
     def test_fake_hk_execute_gate_passes_with_explicit_confirmation(self):
         state = self.base / "hk-execute-state.json"
+        client = HKUSAutoSyncFakeClient()
         result = MirrorAutoSyncReporter().create(
             root=self.root,
             backup=self.backup,
@@ -267,7 +269,7 @@ class HKUSAutoSyncGuardrailTests(unittest.TestCase):
             execute=True,
             confirm_auto_sync=True,
             confirm_hk_us_auto_sync=True,
-            client=HKUSAutoSyncFakeClient(),
+            client=client,
             token_available=True,
             active_writer_detector=MirrorActiveWriterDetector(process_entries=[], now=lambda: self.catalog.db_path.stat().st_mtime + 999999),
             retry_backoff_seconds=0,
@@ -277,6 +279,53 @@ class HKUSAutoSyncGuardrailTests(unittest.TestCase):
         self.assertTrue(result.confirmation_reviewed)
         self.assertEqual(json.loads(state.read_text())["state_version"], "mirror-auto-sync-state/v2")
         self.assertEqual(result.next_start_date, "20250111")
+        self.assertFalse((self.base / "hk-execute-state.json.lock").exists())
+        called = [api for api, _ in client.query_calls] + client.request_calls
+        self.assertIn("hk_tradecal", called)
+        self.assertIn("hk_daily", called)
+        self.assertLess(called.index("hk_tradecal"), called.index("hk_daily"))
+        self.assertFalse({"hk_income", "hk_mins", "rt_hk_k"} & set(called))
+
+    def test_existing_lock_blocks_hk_execute_without_client_calls(self):
+        state = self.base / "hk-locked-state.json"
+        lock_path = self.base / "hk-locked-state.json.lock"
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "lock_version": "mirror-auto-sync-lock/v1",
+                    "scope": "a-share-low-risk",
+                    "root": str(self.root),
+                    "backup": str(self.backup),
+                    "pid": os.getpid(),
+                    "hostname": os.uname().nodename if hasattr(os, "uname") else "unknown",
+                    "started_at": "2026-06-07T00:00:00Z",
+                    "command_kind": "mirror-auto-sync",
+                    "state_path": str(self.base / "a-share-state.json"),
+                }
+            )
+        )
+        client = HKUSAutoSyncFakeClient()
+        result = MirrorAutoSyncReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="hk-low-risk",
+            from_date="20250101",
+            to_date="20250110",
+            window_days=10,
+            max_jobs_per_api=20,
+            state=state,
+            execute=True,
+            confirm_auto_sync=True,
+            confirm_hk_us_auto_sync=True,
+            client=client,
+            token_available=True,
+            active_writer_detector=MirrorActiveWriterDetector(process_entries=[], now=lambda: self.catalog.db_path.stat().st_mtime + 999999),
+            sleep=lambda _: None,
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("active auto-sync lock exists", result.blocking_errors)
+        self.assertEqual(client.query_calls, [])
+        self.assertEqual(client.request_calls, [])
 
     def test_global_execute_is_blocked(self):
         result = MirrorAutoSyncReporter().create(

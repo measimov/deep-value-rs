@@ -6230,20 +6230,32 @@ class MirrorAutoSyncReporter:
                 load_into_catalog(mirror_root, catalog)
                 state_payload = self._initial_state(state_payload, mirror_root, backup_root, scope, normalized_from, to_date, resolved_to, window_days, max_jobs_per_api)
                 for window in windows:
-                    executed += 1
-                    self._write_in_progress_state(state_path, state_payload, window)
-                    result = self._execute_window(
-                        mirror_root=mirror_root,
-                        backup_root=backup_root,
-                        catalog=catalog,
-                        client=client,
-                        scope=scope,
-                        window=window,
-                        max_jobs_per_api=max_jobs_per_api,
-                        max_attempts=max_attempts,
-                        retry_backoff_seconds=retry_backoff_seconds,
-                        sleep=sleep,
-                    )
+                    lock = self._window_lock(scope=scope, mirror_root=mirror_root, backup_root=backup_root, state_path=state_path)
+                    lock_acquire = lock.acquire() if lock is not None else {"blocking_errors": []}
+                    if lock_acquire.get("blocking_errors"):
+                        window["status"] = "blocked"
+                        failed += 1
+                        next_start_date = window["start_date"]
+                        blocking_errors.extend(lock_acquire["blocking_errors"])
+                        break
+                    try:
+                        executed += 1
+                        self._write_in_progress_state(state_path, state_payload, window)
+                        result = self._execute_window(
+                            mirror_root=mirror_root,
+                            backup_root=backup_root,
+                            catalog=catalog,
+                            client=client,
+                            scope=scope,
+                            window=window,
+                            max_jobs_per_api=max_jobs_per_api,
+                            max_attempts=max_attempts,
+                            retry_backoff_seconds=retry_backoff_seconds,
+                            sleep=sleep,
+                        )
+                    finally:
+                        if lock is not None:
+                            lock.release()
                     if result["status"] == "succeeded":
                         succeeded += 1
                         next_start_date = self._next_date(window["end_date"])
@@ -6368,6 +6380,17 @@ class MirrorAutoSyncReporter:
 
     def _lock_path_for_state(self, state_path: Path) -> Path:
         return state_path.with_name(f"{state_path.name}.lock")
+
+    def _window_lock(self, *, scope: str, mirror_root: Path, backup_root: Path, state_path: Path | None) -> MirrorAutoSyncLock | None:
+        if state_path is None:
+            return None
+        return MirrorAutoSyncLock(
+            lock_path=self._lock_path_for_state(state_path),
+            scope=scope,
+            root=mirror_root,
+            backup=backup_root,
+            state_path=state_path,
+        )
 
     def _execute_gate_errors(
         self,
