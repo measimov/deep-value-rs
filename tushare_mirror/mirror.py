@@ -136,7 +136,6 @@ A_SHARE_LOW_RISK_REFERENCE_FETCHES: dict[str, dict[str, Any]] = {
     "stock_company": {"exchange": "SSE"},
     "trade_cal": {"exchange": "SSE", "start_date": "20250101", "end_date": "20250110"},
     "hs_const": {"hs_type": "SH", "is_new": "1"},
-    "concept": {"src": "ts"},
     "index_basic": {"market": "SSE"},
     "ths_index": {"exchange": "A", "type": "N"},
     "index_classify": {"src": "SW2021", "level": "L1"},
@@ -149,7 +148,7 @@ A_SHARE_LOW_RISK_STOCK_CODE_SMOKE_FETCHES: dict[str, dict[str, Any]] = {
 }
 
 SMOKE_CALENDAR_BACKFILL_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d"]
-A_SHARE_LOW_RISK_CALENDAR_BACKFILL_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d", "index_daily"]
+A_SHARE_LOW_RISK_CALENDAR_BACKFILL_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d"]
 SMOKE_EXPLICIT_DATE_APIS: dict[str, list[str]] = {
     "weekly": ["20250103", "20250110"],
     "monthly": ["20250127", "20250228"],
@@ -165,7 +164,7 @@ PILOT_JAN_2025_MONTHLY_DATES = ["20250127"]
 
 PILOT_BACKFILL_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d", "weekly", "monthly"]
 DAILY_LIKE_MIRROR_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d"]
-A_SHARE_LOW_RISK_DAILY_LIKE_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d", "index_daily"]
+A_SHARE_LOW_RISK_DAILY_LIKE_APIS = ["daily", "adj_factor", "daily_basic", "suspend_d"]
 A_SHARE_LOW_RISK_EXPLICIT_PERIODIC_APIS = ["weekly", "monthly", "index_weekly", "index_monthly"]
 A_SHARE_LOW_RISK_PLAN_ONLY_APIS = [
     "namechange",
@@ -178,7 +177,9 @@ A_SHARE_LOW_RISK_PLAN_ONLY_APIS = [
     "pledge_stat",
     "pledge_detail",
     "repurchase",
+    "concept",
     "concept_detail",
+    "index_daily",
     "index_weight",
     "index_member",
     "ths_member",
@@ -7271,7 +7272,6 @@ class MirrorPlanner:
                 required_by=A_SHARE_LOW_RISK_DAILY_LIKE_APIS,
             ),
             self._fetch_item("hs_const", "snapshot_reference", {"hs_type": "SH", "is_new": "1"}, max_jobs=1),
-            self._fetch_item("concept", "snapshot_reference", {"src": "ts"}, max_jobs=1),
             self._fetch_item("index_basic", "snapshot_reference", {"market": "SSE"}, max_jobs=1),
             self._fetch_item("ths_index", "snapshot_reference", {"exchange": "A", "type": "N"}, max_jobs=1),
             self._fetch_item("index_classify", "snapshot_reference", {"src": "SW2021", "level": "L1"}, max_jobs=1),

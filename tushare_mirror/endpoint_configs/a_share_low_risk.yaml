@@ -47,41 +47,6 @@ endpoints:
     notes: "Bounded exchange snapshot; future full pull may fan out over reviewed exchanges only."
     enabled: true
 
-  - api_name: concept
-    family: concept_metadata
-    market: a
-    domain: stock
-    permission_class: regular
-    volume_class: S0_STATIC
-    endpoint_kind: reference_snapshot
-    planner_kind: single_snapshot
-    execution_status: enabled
-    partition_template: snapshot_date
-    primary_date_field: null
-    supported_params:
-      - src
-    default_params:
-      src: ts
-    default_fields:
-      - code
-      - name
-      - src
-    probe:
-      params:
-        src: ts
-      fields:
-        - code
-        - name
-        - src
-      allow_empty_probe: false
-    page_size: 5000
-    risk_level: low
-    required_infra:
-      - single snapshot fetch
-      - fake fixture validation
-    notes: "Concept list metadata only; concept_detail remains disabled because it requires concept-code traversal."
-    enabled: true
-
   - api_name: index_basic
     family: index_metadata
     market: a
@@ -128,50 +93,6 @@ endpoints:
       - single snapshot fetch
       - fake fixture validation
     notes: "Bounded index metadata snapshot; no constituent or weight traversal."
-    enabled: true
-
-  - api_name: index_daily
-    family: index_market_data
-    market: a
-    domain: index
-    permission_class: regular
-    volume_class: D1_DAILY_NARROW
-    endpoint_kind: index
-    planner_kind: calendar_backfill
-    execution_status: enabled
-    partition_template: year_month
-    primary_date_field: trade_date
-    supported_params:
-      - ts_code
-      - trade_date
-      - start_date
-      - end_date
-    default_fields:
-      - ts_code
-      - trade_date
-      - open
-      - high
-      - low
-      - close
-      - pre_close
-      - change
-      - pct_chg
-      - vol
-      - amount
-    probe:
-      params:
-        trade_date: '20250102'
-      fields:
-        - ts_code
-        - trade_date
-        - close
-      allow_empty_probe: false
-    page_size: 5000
-    risk_level: medium
-    required_infra:
-      - calendar-aware date planner
-      - fake fixture validation
-    notes: "Date-bounded index bars; no index-code loop is required for trade_date probes."
     enabled: true
 
   - api_name: index_weekly

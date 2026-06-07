@@ -55,9 +55,7 @@ LOW_RISK_A_SHARE_EXECUTABLE_APIS = {
 
 A_SHARE_LOW_RISK_EXECUTABLE_APIS = LOW_RISK_A_SHARE_EXECUTABLE_APIS | {
     "stock_company",
-    "concept",
     "index_basic",
-    "index_daily",
     "index_weekly",
     "index_monthly",
     "ths_index",
@@ -72,7 +70,9 @@ A_SHARE_LOW_RISK_PLAN_ONLY_APIS = {
     "pledge_stat",
     "pledge_detail",
     "repurchase",
+    "concept",
     "concept_detail",
+    "index_daily",
     "index_weight",
     "index_member",
     "ths_member",

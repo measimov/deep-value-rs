@@ -12,6 +12,7 @@ from pathlib import Path
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult, TushareError, TUSHARE_API_URL
 from tushare_mirror.endpoints import load_into_catalog
+from tushare_mirror.errors import classify_tushare_response
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
 from tushare_mirror.reader import LakeReader
@@ -113,6 +114,15 @@ class Phase11HardeningTests(unittest.TestCase):
     def test_default_tushare_api_url_uses_https(self):
         self.assertEqual(TUSHARE_API_URL, "https://api.tushare.pro")
 
+    def test_real_tushare_error_texts_classify_as_non_retryable(self):
+        status, message = classify_tushare_response({"code": 40101, "msg": "您的token不对，请确认。"})
+        self.assertEqual(status, "permission_denied")
+        self.assertEqual(message, "您的token不对，请确认。")
+
+        status, message = classify_tushare_response({"code": -1, "msg": "请指定正确的接口名"})
+        self.assertEqual(status, "invalid_endpoint")
+        self.assertEqual(message, "请指定正确的接口名")
+
     def test_catalog_cli_dry_run_version_and_backup(self):
         self.catalog.record_probe(
             "daily",
@@ -134,12 +144,12 @@ class Phase11HardeningTests(unittest.TestCase):
 
         inspect = json.loads(self.run_cli("catalog-inspect", "--json").stdout)
         self.assertEqual(inspect["schema_version"], 2)
-        self.assertEqual(inspect["endpoint_count"], 30)
+        self.assertEqual(inspect["endpoint_count"], 28)
         self.assertEqual(self.run_cli("catalog-version").stdout.strip(), "2")
         backup_path = self.root / "catalog-copy.sqlite"
         self.run_cli("catalog-backup", "--output", str(backup_path))
         with sqlite3.connect(backup_path) as conn:
-            self.assertEqual(conn.execute("select count(*) from endpoints").fetchone()[0], 30)
+            self.assertEqual(conn.execute("select count(*) from endpoints").fetchone()[0], 28)
             self.assertEqual(conn.execute("select value from catalog_meta where key='catalog_schema_version'").fetchone()[0], "2")
         permissions = json.loads(self.run_cli("show-permissions", "--api", "daily", "--json").stdout)
         self.assertEqual(permissions[0]["row_count"], 1)

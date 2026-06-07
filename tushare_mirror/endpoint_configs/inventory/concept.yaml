@@ -1,4 +1,23 @@
 endpoints:
+  - api_name: concept
+    family: concept_metadata
+    domain: stock
+    volume_class: S0_STATIC
+    partition_template: snapshot_date
+    primary_date_field: null
+    supported_params:
+      - src
+    endpoint_kind: reference_snapshot
+    planner_kind: single_snapshot
+    execution_status: disabled
+    reason_disabled: "real Tushare probe rejected api_name concept; current low-risk execution uses ths_index and index_classify instead"
+    required_infra:
+      - confirmed current Tushare Pro endpoint name
+      - real probe contract with non-error response
+      - explicit replacement mapping if this moved to dc_concept or another concept endpoint
+    risk_level: medium
+    notes: "Disabled after real probe returned invalid endpoint text; do not auto-fetch during unattended A-share sync."
+
   - api_name: concept_detail
     family: concept_metadata
     domain: stock
@@ -17,4 +36,4 @@ endpoints:
       - max-code policy
       - concept membership diff policy
     risk_level: medium
-    notes: "Inventory only; concept list is executable, but concept_detail traversal is not."
+    notes: "Inventory only; concept membership traversal is not executable."

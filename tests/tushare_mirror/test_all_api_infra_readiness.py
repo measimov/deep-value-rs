@@ -51,7 +51,7 @@ class EndpointCapabilityTaxonomyTests(unittest.TestCase):
     def test_enabled_endpoint_configs_are_normalized_with_allowed_capabilities(self):
         load_into_catalog(self.root, self.catalog)
         endpoints = self.catalog.list_endpoints()
-        self.assertEqual(len(endpoints), 30)
+        self.assertEqual(len(endpoints), 28)
         for row in endpoints:
             cfg = self.catalog.get_endpoint_config(row["api_name"])
             capability = capability_from_config(cfg)
@@ -239,7 +239,7 @@ class DisabledEndpointInventoryTests(unittest.TestCase):
         executable = {row["api_name"] for row in self.catalog.list_endpoints()}
         inventory = {item["api_name"] for item in load_inventory_configs()}
         self.assertTrue(inventory.isdisjoint(executable))
-        self.assertEqual(len(executable), 30)
+        self.assertEqual(len(executable), 28)
         plan = MirrorPlanner(self.root, self.catalog).plan(scope="low-risk-a-share", mode="smoke", max_jobs_per_api=3)
         planned = {item.endpoint for item in plan.items}
         self.assertTrue(inventory.isdisjoint(planned))
@@ -554,7 +554,7 @@ class ApiInfraReadinessReportTests(unittest.TestCase):
         report = ApiInfrastructureReadinessReporter().report()
         payload = report.to_dict()
         self.assertEqual(payload["scope"], "all")
-        self.assertEqual(payload["enabled_executable_endpoint_count"], 30)
+        self.assertEqual(payload["enabled_executable_endpoint_count"], 28)
         self.assertGreaterEqual(payload["disabled_inventory_endpoint_count"], 10)
         self.assertIn("calendar_backfill", payload["supported_planner_kinds"])
         self.assertIn("code_date_matrix", payload["supported_planner_kinds"])
@@ -610,7 +610,7 @@ class ApiInfraReadinessReportTests(unittest.TestCase):
         report = ApiInfrastructureReadinessReporter().report(scope="a-share-low-risk")
         payload = report.to_dict()
         self.assertEqual(payload["scope"], "a-share-low-risk")
-        self.assertEqual(payload["enabled_executable_endpoint_count"], 20)
+        self.assertEqual(payload["enabled_executable_endpoint_count"], 18)
         self.assertEqual(
             set(payload["plan_only_api_names"]),
             {
@@ -621,14 +621,18 @@ class ApiInfraReadinessReportTests(unittest.TestCase):
                 "pledge_stat",
                 "pledge_detail",
                 "repurchase",
+                "concept",
                 "concept_detail",
+                "index_daily",
                 "index_weight",
                 "index_member",
                 "ths_member",
             },
         )
         self.assertIn("stock_company", payload["executable_api_names"])
-        self.assertIn("index_daily", payload["executable_api_names"])
+        self.assertNotIn("index_daily", payload["executable_api_names"])
+        self.assertIn("index_daily", payload["plan_only_api_names"])
+        self.assertIn("concept", payload["plan_only_api_names"])
         self.assertIn("top10_holders", payload["disabled_inventory_api_names"])
         self.assertNotIn("income", payload["disabled_inventory_api_names"])
         self.assertIn("top10_holders", payload["missing_infrastructure_by_category"]["needs_period_planner"])

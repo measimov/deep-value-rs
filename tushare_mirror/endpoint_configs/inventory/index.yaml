@@ -1,4 +1,27 @@
 endpoints:
+  - api_name: index_daily
+    family: index_market_data
+    domain: index
+    volume_class: D1_DAILY_NARROW
+    endpoint_kind: index
+    planner_kind: code_date_matrix
+    execution_status: disabled
+    reason_disabled: "real Tushare probe rejected trade_date-only calls with required ts_code; executing complete coverage requires bounded index-code traversal"
+    required_infra:
+      - index code-list source
+      - code/date matrix planner
+      - max-code and max-date policy
+      - retry/resume policy for bounded index-code loops
+    risk_level: medium
+    partition_template: year_month
+    primary_date_field: trade_date
+    supported_params:
+      - ts_code
+      - trade_date
+      - start_date
+      - end_date
+    notes: "Inventory only; no index-code loop is executable in unattended A-share low-risk auto-sync."
+
   - api_name: index_weight
     family: index_weight
     domain: index

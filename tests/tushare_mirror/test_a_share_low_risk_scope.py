@@ -32,20 +32,10 @@ NEW_EXECUTABLE_FIXTURES = {
         [["600000.SH", "SSE", "Alice", "Bob", "Carol", 1000.0, "19990101", "Shanghai", "Shanghai", "intro", "https://example.invalid", "ir@example.invalid", "office", 100, "banking", "scope"]],
         {"exchange": "SSE"},
     ),
-    "concept": (
-        ["code", "name", "src"],
-        [["TS1", "concept one", "ts"]],
-        {"src": "ts"},
-    ),
     "index_basic": (
         ["ts_code", "name", "fullname", "market", "publisher", "index_type", "category", "base_date", "base_point", "list_date", "weight_rule", "desc", "exp_date"],
         [["000001.SH", "index", "index full", "SSE", "SSE", "composite", "scale", "19901219", 100.0, "19910715", "rule", "desc", None]],
         {"market": "SSE"},
-    ),
-    "index_daily": (
-        ["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "vol", "amount"],
-        [["000001.SH", "20250102", 3000.0, 3010.0, 2990.0, 3005.0, 3001.0, 4.0, 0.13, 100000.0, 1000000.0]],
-        {"trade_date": "20250102"},
     ),
     "index_weekly": (
         ["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "vol", "amount"],
@@ -168,8 +158,8 @@ class AShareLowRiskScopeTests(unittest.TestCase):
         self.assertIn("stock_company", payload["endpoints_in_scope"])
         self.assertIn("daily", payload["executable_now"])
         self.assertIn("stock_company", payload["executable_now"])
-        self.assertIn("concept", payload["executable_now"])
-        self.assertIn("index_daily", payload["executable_now"])
+        self.assertIn("concept", payload["disabled"])
+        self.assertIn("index_daily", payload["disabled"])
         self.assertIn("top10_holders", payload["disabled"])
         self.assertEqual(payload["missing_metadata"], [])
         self.assertIn("next_enablement_step", payload)
@@ -225,9 +215,7 @@ class AShareLowRiskScopeTests(unittest.TestCase):
 class AShareLowRiskEndpointMetadataTests(unittest.TestCase):
     EXECUTABLE_ADDED = {
         "stock_company",
-        "concept",
         "index_basic",
-        "index_daily",
         "index_weekly",
         "index_monthly",
         "ths_index",
@@ -242,7 +230,9 @@ class AShareLowRiskEndpointMetadataTests(unittest.TestCase):
         "pledge_stat",
         "pledge_detail",
         "repurchase",
+        "concept",
         "concept_detail",
+        "index_daily",
         "index_weight",
         "index_member",
         "ths_member",
@@ -278,7 +268,7 @@ class AShareLowRiskEndpointMetadataTests(unittest.TestCase):
         for api_name in self.DISABLED_LOW_RISK:
             cfg = inventory[api_name]
             self.assertEqual(cfg["execution_status"], "disabled")
-            self.assertIn(cfg["planner_kind"], {"code_list", "code_date_matrix", "code_period_matrix", "date_backfill"})
+            self.assertIn(cfg["planner_kind"], {"single_snapshot", "code_list", "code_date_matrix", "code_period_matrix", "date_backfill"})
             self.assertTrue(cfg["required_infra"])
             self.assertIn("domain", cfg)
             self.assertIn("family", cfg)
@@ -331,8 +321,8 @@ class AShareLowRiskPlannerTests(unittest.TestCase):
         self.assertEqual(self.counts(), before)
         by_endpoint = {item.endpoint: item for item in plan.items}
         self.assertEqual(set(A_SHARE_LOW_RISK_ENDPOINTS), set(by_endpoint))
-        self.assertEqual(by_endpoint["index_daily"].plan_status, "blocked_until_trade_cal")
-        self.assertEqual(by_endpoint["concept"].planned_action, "fetch")
+        self.assertEqual(by_endpoint["index_daily"].plan_status, "plan_only_no_execution")
+        self.assertEqual(by_endpoint["concept"].planned_action, "plan_only")
         self.assertEqual(by_endpoint["index_weekly"].planned_action, "date_backfill")
         self.assertEqual(by_endpoint["top10_holders"].plan_status, "plan_only_no_execution")
         self.assertFalse(by_endpoint["top10_holders"].will_execute)
@@ -341,9 +331,7 @@ class AShareLowRiskPlannerTests(unittest.TestCase):
         planner = JobPlanner(self.root, self.catalog)
         cases = {
             "stock_company": ({"exchange": "SSE"}, "api=stock_company/snapshot_date="),
-            "concept": ({"src": "ts"}, "api=concept/snapshot_date="),
             "index_basic": ({"market": "SSE"}, "domain=index/api=index_basic/snapshot_date="),
-            "index_daily": ({"trade_date": "20250102"}, "domain=index/api=index_daily/year=2025/month=01"),
             "index_weekly": ({"trade_date": "20250103"}, "domain=index/api=index_weekly/year=2025/month=01"),
             "index_monthly": ({"trade_date": "20250127"}, "domain=index/api=index_monthly/year=2025/month=01"),
             "ths_index": ({"exchange": "A", "type": "N"}, "domain=index/api=ths_index/snapshot_date="),
@@ -440,7 +428,7 @@ class AShareLowRiskExecutableFixtureTests(unittest.TestCase):
             max_jobs_per_api=20,
         )
         by_endpoint = {item.endpoint: item for item in plan.items}
-        for api_name in ["top10_holders", "concept_detail", "index_weight", "ths_member"]:
+        for api_name in ["concept", "index_daily", "top10_holders", "concept_detail", "index_weight", "ths_member"]:
             self.assertEqual(by_endpoint[api_name].plan_status, "plan_only_no_execution")
             self.assertFalse(by_endpoint[api_name].will_execute)
             with self.assertRaisesRegex(KeyError, "endpoint not found"):
@@ -496,7 +484,7 @@ class AShareLowRiskMirrorOrchestrationTests(unittest.TestCase):
         self.assertEqual(payload["scope"], "a-share-low-risk")
         self.assertEqual(payload["endpoint_count"], len(A_SHARE_LOW_RISK_ENDPOINTS))
         by_endpoint = {item["endpoint"]: item for item in payload["items"]}
-        self.assertEqual(by_endpoint["index_daily"]["plan_status"], "blocked_until_trade_cal")
+        self.assertEqual(by_endpoint["index_daily"]["plan_status"], "plan_only_no_execution")
         self.assertEqual(by_endpoint["top10_holders"]["plan_status"], "plan_only_no_execution")
         self.assertFalse(by_endpoint["top10_holders"]["will_execute"])
 
@@ -518,11 +506,12 @@ class AShareLowRiskMirrorOrchestrationTests(unittest.TestCase):
         self.assertEqual(result.status, "succeeded")
         endpoints = {item["endpoint"]: item for item in result.summary["items"]}
         self.assertEqual(len(endpoints), len(A_SHARE_LOW_RISK_ENDPOINTS))
-        self.assertEqual(endpoints["index_daily"]["status"], "succeeded")
+        self.assertEqual(endpoints["concept"]["status"], "excluded")
+        self.assertEqual(endpoints["index_daily"]["status"], "excluded")
         self.assertEqual(endpoints["top10_holders"]["status"], "excluded")
         self.assertEqual(endpoints["concept_detail"]["status"], "excluded")
         called = set(client.request_calls) | {api for api, _ in client.query_calls}
-        self.assertFalse({"top10_holders", "concept_detail", "index_weight", "ths_member"} & called)
+        self.assertFalse({"concept", "index_daily", "top10_holders", "concept_detail", "index_weight", "ths_member"} & called)
         self.assertNotIn("fake-token-for-hash-only", json.dumps(result.to_dict()))
 
     def test_fake_pilot_excludes_stock_code_smoke_endpoints_and_code_loops(self):
@@ -539,9 +528,10 @@ class AShareLowRiskMirrorOrchestrationTests(unittest.TestCase):
         self.assertEqual(endpoints["namechange"]["status"], "excluded")
         self.assertEqual(endpoints["stk_managers"]["status"], "excluded")
         self.assertEqual(endpoints["stk_rewards"]["status"], "excluded")
-        self.assertEqual(endpoints["index_daily"]["executed_jobs"], 7)
+        self.assertEqual(endpoints["concept"]["status"], "excluded")
+        self.assertEqual(endpoints["index_daily"]["status"], "excluded")
         called = set(client.request_calls) | {api for api, _ in client.query_calls}
-        self.assertFalse({"namechange", "stk_managers", "stk_rewards", "top10_holders"} & called)
+        self.assertFalse({"namechange", "stk_managers", "stk_rewards", "concept", "index_daily", "top10_holders"} & called)
 
 
 class AShareLowRiskReadinessIntegrationTests(unittest.TestCase):
@@ -601,7 +591,7 @@ class AShareLowRiskReadinessIntegrationTests(unittest.TestCase):
         by_endpoint = {item["endpoint"]: item for item in payload["endpoint_plans"]}
         self.assertEqual(payload["scope"], "a-share-low-risk")
         self.assertEqual(by_endpoint["stock_company"]["category"], "reference")
-        self.assertEqual(by_endpoint["index_daily"]["plan_status"], "blocked_until_trade_cal")
+        self.assertEqual(by_endpoint["index_daily"]["plan_status"], "excluded_no_stock_loop")
         self.assertEqual(by_endpoint["index_weekly"]["planned_action"], "bounded_explicit_date_plan")
         self.assertEqual(by_endpoint["top10_holders"]["plan_status"], "excluded_no_stock_loop")
         self.assertEqual(self.counts(), before)
@@ -622,7 +612,8 @@ class AShareLowRiskReadinessIntegrationTests(unittest.TestCase):
             check=True,
         ).stdout)
         self.assertEqual(estimate["report_version"], "request-estimate/v1")
-        self.assertIn("index_daily", estimate["estimated_requests_by_api"])
+        self.assertEqual(estimate["estimated_requests_by_api"]["index_daily"], 0)
+        self.assertEqual(estimate["estimated_requests_by_api"]["concept"], 0)
         self.assertIn("stock_company", estimate["estimated_requests_by_api"])
         self.assertEqual(estimate["daily_like_status"], "blocked_until_trade_cal")
 
@@ -641,7 +632,8 @@ class AShareLowRiskReadinessIntegrationTests(unittest.TestCase):
         ).stdout)
         self.assertEqual(coverage["report_version"], "mirror-coverage-matrix/v1")
         apis = {item["api"] for item in coverage["items"]}
-        self.assertTrue({"index_daily", "index_weekly", "index_monthly"} <= apis)
+        self.assertTrue({"index_weekly", "index_monthly"} <= apis)
+        self.assertNotIn("index_daily", apis)
         self.assertEqual(self.counts(), before)
 
     def test_readiness_json_contains_new_scope_endpoint_summary_without_side_effects(self):
@@ -879,9 +871,10 @@ class AShareLowRiskRealSmokeCommandTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertFalse(payload["real_requests_sent"])
         self.assertIn("stock_company", payload["endpoints"])
-        self.assertIn("index_daily", payload["endpoints"])
+        self.assertNotIn("concept", payload["endpoints"])
+        self.assertNotIn("index_daily", payload["endpoints"])
         self.assertGreater(payload["endpoint_count"], 12)
-        self.assertTrue(any("fetch --api index_daily" in command for command in payload["commands"]))
+        self.assertFalse(any("fetch --api index_daily" in command for command in payload["commands"]))
         self.assertFalse(payload["safety_limits"]["stock_loop"])
         self.assertFalse(payload["safety_limits"]["full_backfill"])
 
