@@ -624,6 +624,32 @@ class HKUSAutoSyncGuardrailTests(unittest.TestCase):
         self.assertEqual(payload["status"], "blocked")
         self.assertFalse(payload["state_valid"])
 
+    def test_a_share_execute_baseline_does_not_require_hk_us_confirmation(self):
+        state = self.base / "a-share-execute-state.json"
+        result = MirrorAutoSyncReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="a-share-low-risk",
+            from_date="20250201",
+            to_date="20250220",
+            window_days=20,
+            max_jobs_per_api=20,
+            state=state,
+            execute=True,
+            confirm_auto_sync=True,
+            client=HKUSAutoSyncFakeClient(),
+            token_available=True,
+            retry_backoff_seconds=0,
+            sleep=lambda _: None,
+        )
+        self.assertEqual(result.status, "succeeded", result.to_dict())
+        self.assertTrue(result.confirmation_reviewed)
+        payload = json.loads(state.read_text())
+        self.assertEqual(payload["state_version"], "mirror-auto-sync-state/v1")
+        self.assertIn("daily", result.executable_endpoints)
+        self.assertNotIn("hk_daily", result.executable_endpoints)
+        self.assertNotIn("us_daily", result.executable_endpoints)
+
     def test_auto_sync_lock_acquire_release_and_second_writer_block(self):
         lock_path = self.base / "auto-sync.lock"
         first = MirrorAutoSyncLock(
