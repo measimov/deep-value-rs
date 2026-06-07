@@ -5841,13 +5841,22 @@ class MirrorAutoSyncReporter:
         sleep=time.sleep,
     ) -> MirrorAutoSyncResult:
         ensure_mirror_scope(scope)
-        mirror_root = _resolve_path(Path(root))
-        backup_root = _resolve_path(Path(backup))
-        state_path = _resolve_path(Path(state)) if state else None
         warnings = [
             "mirror-auto-sync uses bounded pilot windows and does not enable disabled or plan-only endpoints",
         ]
         blocking_errors: list[str] = []
+        root_text = str(root).strip()
+        backup_text = str(backup).strip()
+        state_text = str(state).strip() if state is not None else None
+        if not root_text:
+            blocking_errors.append("--root must not be empty")
+        if not backup_text:
+            blocking_errors.append("--backup must not be empty")
+        if state is not None and not state_text:
+            blocking_errors.append("--state must not be empty")
+        mirror_root = _resolve_path(Path(root_text)) if root_text else Path("__invalid_empty_mirror_root__")
+        backup_root = _resolve_path(Path(backup_text)) if backup_text else Path("__invalid_empty_backup_root__")
+        state_path = _resolve_path(Path(state_text)) if state_text else None
         if scope != "a-share-low-risk":
             warnings.append(f"{scope} auto-sync is dry-run planning only; execute mode remains A-share-only in this goal")
             if execute:
@@ -5872,9 +5881,9 @@ class MirrorAutoSyncReporter:
             blocking_errors.append("--execute requires a Tushare client")
         if state_path is not None:
             blocking_errors.extend(self._preflight_state_path(mirror_root, backup_root, state_path))
-        if not mirror_root.exists():
+        if root_text and not mirror_root.exists():
             blocking_errors.append(f"mirror root does not exist: {mirror_root}")
-        if not backup_root.exists():
+        if backup_text and not backup_root.exists():
             blocking_errors.append(f"backup root does not exist: {backup_root}")
 
         normalized_from = self._normalize_date(from_date)

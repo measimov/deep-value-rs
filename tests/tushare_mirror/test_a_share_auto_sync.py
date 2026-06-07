@@ -165,6 +165,46 @@ class AShareAutoSyncTests(unittest.TestCase):
         self.assertIn("--execute requires --state for checkpoint/resume", result.blocking_errors)
         self.assertEqual(before, self.counts())
 
+    def test_execute_rejects_empty_backup_before_running(self):
+        before = self.counts()
+        state = self.base / "auto-sync-state.json"
+        client = AutoSyncFakeClient()
+        result = MirrorAutoSyncReporter().create(
+            root=self.root,
+            backup="",
+            scope="a-share-low-risk",
+            from_date="20250201",
+            to_date="20250220",
+            window_days=20,
+            max_jobs_per_api=20,
+            state=state,
+            execute=True,
+            confirm_auto_sync=True,
+            client=client,
+            sleep=lambda _: None,
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("--backup must not be empty", result.blocking_errors)
+        self.assertEqual([], client.request_calls)
+        self.assertEqual([], client.query_calls)
+        self.assertFalse(state.exists())
+        self.assertEqual(before, self.counts())
+
+    def test_dry_run_rejects_empty_root_and_state(self):
+        result = MirrorAutoSyncReporter().create(
+            root="",
+            backup=self.backup,
+            scope="a-share-low-risk",
+            from_date="20250201",
+            to_date="20250220",
+            window_days=20,
+            max_jobs_per_api=20,
+            state="",
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("--root must not be empty", result.blocking_errors)
+        self.assertIn("--state must not be empty", result.blocking_errors)
+
     def test_hk_us_auto_sync_dry_run_is_planning_only(self):
         before = self.counts()
         state = self.base / "hk-state.json"
