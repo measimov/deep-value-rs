@@ -30,6 +30,7 @@ from .coverage import CoverageReporter
 from .enablement import EndpointEnablementChecklistReporter
 from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
+from .financial_reports import FinancialCoverageMatrixReporter, FinancialReadinessReporter, FinancialRequestEstimateReporter
 from .financial_probe import HKUSFinancialProbeReporter
 from .hashing import token_hash
 from .intraday_plan import IntradayPlanner
@@ -619,6 +620,54 @@ def cmd_hk_us_financial_probe_report(args) -> int:
                     "recommended_execution_status",
                 ],
             )
+    return 1 if report.blocking_errors else 0
+
+
+def cmd_financial_readiness(args) -> int:
+    report = FinancialReadinessReporter().report(scope=args.scope, root=args.root_arg)
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        _print_key_values(report.summary())
+        if report.items:
+            _print_table(
+                report.items,
+                ["api_name", "probe_status", "raw_ready", "pit_safe_ready", "pit_usable_after_status", "recommended_execution_status"],
+            )
+    return 1 if report.blocking_errors else 0
+
+
+def cmd_financial_request_estimate(args) -> int:
+    report = FinancialRequestEstimateReporter().report(
+        scope=args.scope,
+        from_period=args.from_period,
+        to_period=args.to_period,
+        limit_codes=args.limit_codes,
+        max_periods=args.max_periods,
+    )
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        _print_key_values(report.summary())
+        if report.items:
+            _print_table(report.items, ["api_name", "raw_ready", "pit_safe_ready", "estimated_requests", "not_a_quota_guarantee"])
+    return 1 if report.blocking_errors else 0
+
+
+def cmd_financial_coverage_matrix(args) -> int:
+    report = FinancialCoverageMatrixReporter().report(
+        root=args.root_arg,
+        scope=args.scope,
+        periods=args.periods,
+        limit_codes=args.limit_codes,
+        universe=args.universe,
+    )
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        _print_key_values(report.summary())
+        if report.items:
+            _print_table(report.items, ["api_name", "coverage_class", "total_code_periods", "covered_code_periods", "missing_code_periods", "coverage_ratio", "status"])
     return 1 if report.blocking_errors else 0
 
 
@@ -1856,6 +1905,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--input', required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_hk_us_financial_probe_report)
+
+    p = sub.add_parser('financial-readiness', description='Read-only HK/US financial raw readiness report; does not fetch or write catalog state.')
+    p.add_argument('--scope', required=True)
+    p.add_argument('--root', dest='root_arg')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_financial_readiness)
+
+    p = sub.add_parser('financial-request-estimate', description='Read-only HK/US financial code-period request estimate; does not call Tushare or inspect quota.')
+    p.add_argument('--scope', required=True)
+    p.add_argument('--from-period', required=True)
+    p.add_argument('--to-period', required=True)
+    p.add_argument('--limit-codes', type=int, required=True)
+    p.add_argument('--max-periods', type=int, default=20)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_financial_request_estimate)
+
+    p = sub.add_parser('financial-coverage-matrix', description='Read-only HK/US financial code-period coverage matrix; does not fetch or write catalog state.')
+    p.add_argument('--root', dest='root_arg', required=True)
+    p.add_argument('--scope', required=True)
+    p.add_argument('--periods', required=True)
+    p.add_argument('--limit-codes', type=int, required=True)
+    p.add_argument('--universe')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_financial_coverage_matrix)
 
     p = sub.add_parser('mirror-review')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
