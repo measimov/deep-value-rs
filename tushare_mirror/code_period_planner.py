@@ -12,11 +12,31 @@ from .hashing import job_key as make_job_key
 from .periods import MAX_PERIODS, PeriodRangePlanner
 from .pit import validate_pit_safety
 from .planner import JobPlanner
+from .source_metadata import hk_us_low_risk_source_endpoints
 
 
 MAX_CODE_PERIOD_CODES = MAX_CODE_DATE_MATRIX_CODES
 MAX_CODE_PERIOD_PERIODS = MAX_PERIODS
 MAX_CODE_PERIOD_CANDIDATES = MAX_CODE_DATE_MATRIX_CANDIDATES
+FINANCIAL_RAW_SCOPES = {
+    "hk-financial-raw": "hk",
+    "us-financial-raw": "us",
+}
+FINANCIAL_SOURCE_CATEGORIES = {"financial_statement", "financial_indicator"}
+RAW_FINANCIAL_PROBE_STATUSES = {"passed"}
+RAW_FINANCIAL_PAGINATION_STATUSES = {"single_request_contract_passed", "offset_pagination_contract_passed"}
+
+
+@dataclass(frozen=True)
+class FinancialRawExecutionGate:
+    scope: str | None
+    raw_financial_scope: bool
+    execution_gate_status: str
+    raw_execution_allowed: bool
+    pit_safe_execution_allowed: bool
+    requires_guarded_command: bool
+    warnings: list[str]
+    blocking_errors: list[str]
 
 
 @dataclass(frozen=True)
@@ -41,6 +61,7 @@ class CodePeriodPlanItem:
 @dataclass(frozen=True)
 class CodePeriodPlanSummary:
     api_name: str
+    scope: str | None
     universe: str
     source_snapshot_id: str | None
     total_codes: int
@@ -56,6 +77,12 @@ class CodePeriodPlanSummary:
     dry_run: bool
     pit_required: bool
     pit_safety_status: str
+    raw_financial_scope: bool
+    raw_execution_allowed: bool
+    pit_safe_execution_allowed: bool
+    execution_gate_status: str
+    execution_gate_blocking_errors: list[str]
+    requires_guarded_command: bool
     warnings: list[str]
     blocking_errors: list[str]
 
@@ -72,7 +99,15 @@ class CodePeriodPlanSummary:
         max_periods: int,
         pit_required: bool,
         pit_safety_status: str,
+        scope: str | None = None,
         max_candidate_jobs: int = MAX_CODE_PERIOD_CANDIDATES,
+        execution_allowed: bool = False,
+        raw_financial_scope: bool = False,
+        raw_execution_allowed: bool = False,
+        pit_safe_execution_allowed: bool = False,
+        execution_gate_status: str = "not_requested",
+        execution_gate_blocking_errors: list[str] | None = None,
+        requires_guarded_command: bool = False,
         warnings: list[str] | None = None,
         blocking_errors: list[str] | None = None,
     ) -> "CodePeriodPlanSummary":
@@ -91,6 +126,7 @@ class CodePeriodPlanSummary:
         planned_jobs = planned_codes * planned_periods
         return cls(
             api_name=api_name,
+            scope=scope,
             universe=universe,
             source_snapshot_id=source_snapshot_id,
             total_codes=max(total_codes, 0),
@@ -102,10 +138,16 @@ class CodePeriodPlanSummary:
             truncated_by_code_limit=truncated_by_code_limit,
             truncated_by_period_limit=truncated_by_period_limit,
             truncated_by_candidate_limit=truncated_by_candidate_limit,
-            execution_allowed=False,
+            execution_allowed=execution_allowed,
             dry_run=True,
             pit_required=pit_required,
             pit_safety_status=pit_safety_status,
+            raw_financial_scope=raw_financial_scope,
+            raw_execution_allowed=raw_execution_allowed,
+            pit_safe_execution_allowed=pit_safe_execution_allowed,
+            execution_gate_status=execution_gate_status,
+            execution_gate_blocking_errors=list(execution_gate_blocking_errors or []),
+            requires_guarded_command=requires_guarded_command,
             warnings=list(warnings or []),
             blocking_errors=list(blocking_errors or []),
         )
@@ -147,6 +189,7 @@ class CodePeriodPlanner:
         period_frequency: str = "quarterly",
         max_periods: int = MAX_CODE_PERIOD_PERIODS,
         max_candidate_jobs: int = MAX_CODE_PERIOD_CANDIDATES,
+        scope: str | None = None,
     ) -> CodePeriodPlan:
         blocking_errors = self._validate_limits(limit_codes, max_periods, max_candidate_jobs)
         cfg = self._endpoint_config(api_name)
@@ -158,6 +201,8 @@ class CodePeriodPlanner:
         planner_kind = str(cfg.get("planner_kind") or "unsupported")
         if planner_kind not in {"code_period_matrix", "period"}:
             blocking_errors.append(f"planner_kind_not_code_period_compatible:{planner_kind}")
+        gate = self._financial_raw_execution_gate(api_name, cfg, scope)
+        blocking_errors.extend(gate.blocking_errors)
         pit_result = validate_pit_safety(cfg)
         if pit_result.blocked:
             blocking_errors.extend(f"pit:{error}" for error in pit_result.errors)
@@ -187,12 +232,15 @@ class CodePeriodPlanner:
                 total_periods=total_period_count,
                 pit_required=pit_result.pit_required,
                 pit_safety_status=pit_result.status,
-                warnings=list(universe_result.warnings) + list(pit_result.warnings),
+                scope=scope,
+                gate=gate,
+                warnings=list(universe_result.warnings) + list(pit_result.warnings) + list(gate.warnings),
                 blocking_errors=blocking_errors,
             )
 
         summary = CodePeriodPlanSummary.from_candidate_counts(
             api_name=api_name,
+            scope=scope,
             universe=universe,
             source_snapshot_id=universe_result.source_snapshot_id,
             total_codes=universe_result.code_count,
@@ -202,7 +250,14 @@ class CodePeriodPlanner:
             max_candidate_jobs=max_candidate_jobs,
             pit_required=pit_result.pit_required,
             pit_safety_status=pit_result.status,
-            warnings=list(universe_result.warnings) + list(pit_result.warnings),
+            execution_allowed=gate.raw_execution_allowed and not blocking_errors,
+            raw_financial_scope=gate.raw_financial_scope,
+            raw_execution_allowed=gate.raw_execution_allowed and not blocking_errors,
+            pit_safe_execution_allowed=gate.pit_safe_execution_allowed and not blocking_errors,
+            execution_gate_status=gate.execution_gate_status,
+            execution_gate_blocking_errors=gate.blocking_errors,
+            requires_guarded_command=gate.requires_guarded_command and not blocking_errors,
+            warnings=list(universe_result.warnings) + list(pit_result.warnings) + list(gate.warnings),
             blocking_errors=blocking_errors,
         )
         if blocking_errors:
@@ -223,6 +278,7 @@ class CodePeriodPlanner:
                 else:
                     job_key = make_job_key(api_name, params, [], f"inventory_{api_name}_code_period_v1")
                     existing_status, planned_action = "missing", "fetch"
+                item_execution_allowed = bool(summary.raw_execution_allowed and planned_action in {"fetch", "retry_failed"})
                 items.append(
                     CodePeriodPlanItem(
                         api_name=api_name,
@@ -235,11 +291,85 @@ class CodePeriodPlanner:
                         pit_required=pit_result.pit_required,
                         pit_safety_status=pit_result.status,
                         would_require_real_request=planned_action in {"fetch", "retry_failed"},
-                        execution_allowed=False,
-                        blocked_reason=self._blocked_reason_for_action(planned_action),
+                        execution_allowed=item_execution_allowed,
+                        blocked_reason=self._blocked_reason_for_action(planned_action, item_execution_allowed),
                     )
                 )
         return CodePeriodPlan(summary=summary, items=items)
+
+    def _financial_raw_execution_gate(self, api_name: str, cfg: dict[str, Any], scope: str | None) -> FinancialRawExecutionGate:
+        if not scope:
+            return FinancialRawExecutionGate(
+                scope=None,
+                raw_financial_scope=False,
+                execution_gate_status="not_requested",
+                raw_execution_allowed=False,
+                pit_safe_execution_allowed=False,
+                requires_guarded_command=False,
+                warnings=["code-period execution remains plan-only unless a financial raw scope is supplied"],
+                blocking_errors=[],
+            )
+        if scope not in FINANCIAL_RAW_SCOPES:
+            return FinancialRawExecutionGate(
+                scope=scope,
+                raw_financial_scope=False,
+                execution_gate_status="blocked",
+                raw_execution_allowed=False,
+                pit_safe_execution_allowed=False,
+                requires_guarded_command=False,
+                warnings=[],
+                blocking_errors=[f"unsupported_financial_raw_scope:{scope}"],
+            )
+
+        expected_market = FINANCIAL_RAW_SCOPES[scope]
+        source = self._financial_source_metadata(api_name)
+        errors: list[str] = []
+        warnings: list[str] = []
+        if source is None:
+            errors.append(f"financial_raw_source_metadata_missing:{api_name}")
+        else:
+            market = str(source.get("market") or "")
+            category = str(source.get("category") or "")
+            if market != expected_market:
+                errors.append(f"financial_raw_market_mismatch:{api_name}:{market or 'unknown'}:{expected_market}")
+            if category not in FINANCIAL_SOURCE_CATEGORIES:
+                errors.append(f"financial_raw_category_not_financial:{api_name}:{category or 'unknown'}")
+            if not bool(source.get("raw_mirror_candidate")):
+                status = str(source.get("real_probe_status") or "unknown")
+                errors.append(f"financial_raw_candidate_not_verified:{api_name}:{status}")
+            probe_status = str(source.get("real_probe_status") or "")
+            if probe_status not in RAW_FINANCIAL_PROBE_STATUSES:
+                errors.append(f"financial_raw_probe_not_passed:{api_name}:{probe_status or 'missing'}")
+            pagination_status = str(source.get("pagination_verification_status") or "")
+            if pagination_status not in RAW_FINANCIAL_PAGINATION_STATUSES:
+                errors.append(f"financial_raw_pagination_not_verified:{api_name}:{pagination_status or 'missing'}")
+            if bool(source.get("raw_mirror_candidate")) and not bool(source.get("pit_safe_candidate")):
+                warnings.append(f"financial_raw_not_pit_safe:{api_name}")
+
+        endpoint_kind = str(cfg.get("endpoint_kind") or "")
+        planner_kind = str(cfg.get("planner_kind") or "")
+        if endpoint_kind not in FINANCIAL_SOURCE_CATEGORIES:
+            errors.append(f"endpoint_kind_not_financial:{endpoint_kind or 'missing'}")
+        if planner_kind != "code_period_matrix":
+            errors.append(f"planner_kind_not_code_period_matrix:{planner_kind or 'missing'}")
+
+        allowed = not errors
+        return FinancialRawExecutionGate(
+            scope=scope,
+            raw_financial_scope=True,
+            execution_gate_status="ready_for_guarded_command" if allowed else "blocked",
+            raw_execution_allowed=allowed,
+            pit_safe_execution_allowed=allowed and bool(source and source.get("pit_safe_candidate")),
+            requires_guarded_command=allowed,
+            warnings=warnings,
+            blocking_errors=errors,
+        )
+
+    def _financial_source_metadata(self, api_name: str) -> dict[str, Any] | None:
+        for endpoint in hk_us_low_risk_source_endpoints():
+            if endpoint.get("api_name") == api_name:
+                return dict(endpoint)
+        return None
 
     def _validate_limits(self, limit_codes: int | None, max_periods: int, max_candidate_jobs: int) -> list[str]:
         errors: list[str] = []
@@ -297,11 +427,15 @@ class CodePeriodPlanner:
             return "unknown", "fetch"
         return "missing", "fetch"
 
-    def _blocked_reason_for_action(self, planned_action: str) -> str | None:
+    def _blocked_reason_for_action(self, planned_action: str, execution_allowed: bool = False) -> str | None:
+        if execution_allowed:
+            return None
         if planned_action == "blocked_quarantined":
             return "quarantined_exists"
         if planned_action == "blocked_staged":
             return "staged_exists"
+        if planned_action in {"fetch", "retry_failed"}:
+            return "guarded_financial_raw_scope_required"
         return None
 
     def _blocked(
@@ -313,11 +447,15 @@ class CodePeriodPlanner:
         total_periods: int = 0,
         pit_required: bool = False,
         pit_safety_status: str = "not_required",
+        scope: str | None = None,
+        gate: FinancialRawExecutionGate | None = None,
         warnings: list[str] | None = None,
         blocking_errors: list[str] | None = None,
     ) -> CodePeriodPlan:
+        gate = gate or self._financial_raw_execution_gate(api_name, {}, scope)
         summary = CodePeriodPlanSummary.from_candidate_counts(
             api_name=api_name,
+            scope=scope,
             universe=universe,
             source_snapshot_id=source_snapshot_id,
             total_codes=0,
@@ -326,6 +464,13 @@ class CodePeriodPlanner:
             max_periods=0,
             pit_required=pit_required,
             pit_safety_status=pit_safety_status,
+            execution_allowed=False,
+            raw_financial_scope=gate.raw_financial_scope,
+            raw_execution_allowed=False,
+            pit_safe_execution_allowed=False,
+            execution_gate_status=gate.execution_gate_status,
+            execution_gate_blocking_errors=gate.blocking_errors,
+            requires_guarded_command=False,
             warnings=warnings,
             blocking_errors=blocking_errors,
         )

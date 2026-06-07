@@ -1414,6 +1414,7 @@ def cmd_code_period_plan(args) -> int:
         period_frequency=args.period_frequency,
         max_periods=args.max_periods,
         max_candidate_jobs=args.max_candidate_jobs,
+        scope=args.scope,
     )
     payload = plan.to_dict()
     if args.json:
@@ -2217,6 +2218,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_period_plan)
 
     p = sub.add_parser('code-period-plan')
+    p.add_argument('--scope')
     p.add_argument('--api', required=True)
     p.add_argument('--universe', required=True)
     p.add_argument('--limit-codes', type=int, required=True)

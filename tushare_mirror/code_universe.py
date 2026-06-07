@@ -15,8 +15,11 @@ SUPPORTED_CODE_UNIVERSES = {
     "a_share_sme",
     "a_share_chinext",
     "a_share_star",
+    "hk_listed",
     "hs_const_sh",
     "hs_const_sz",
+    "us_listed",
+    "us_equity",
 }
 
 
@@ -63,6 +66,22 @@ class CodeUniverseProvider:
             )
         if universe_name.startswith("hs_const_"):
             return self._hs_const_universe(universe_name, limit)
+        if universe_name == "hk_listed":
+            return self._reference_universe(
+                universe_name,
+                source_api="hk_basic",
+                status_field="list_status",
+                allowed_statuses={"L"},
+                limit=limit,
+            )
+        if universe_name in {"us_listed", "us_equity"}:
+            return self._reference_universe(
+                universe_name,
+                source_api="us_basic",
+                status_field="classify",
+                allowed_statuses={"EQ"},
+                limit=limit,
+            )
         return self._stock_basic_universe(universe_name, limit)
 
     def _stock_basic_universe(self, universe_name: str, limit: int) -> CodeUniverseResult:
@@ -125,6 +144,41 @@ class CodeUniverseProvider:
             codes_sample=codes[: max(limit, 0)],
             blocked_reason=None,
             warnings=[],
+            codes=codes,
+        )
+
+    def _reference_universe(
+        self,
+        universe_name: str,
+        *,
+        source_api: str,
+        status_field: str,
+        allowed_statuses: set[str],
+        limit: int,
+    ) -> CodeUniverseResult:
+        snapshot = self.catalog.latest_snapshot(source_api)
+        if not snapshot:
+            return self._blocked(universe_name, source_api, f"missing_{source_api}_latest_snapshot")
+        table = LakeReader(self.root, self.catalog).scan_api(source_api, snapshot_id=snapshot["snapshot_id"])
+        rows = table.to_pylist()
+        if "ts_code" not in table.column_names:
+            return self._blocked(universe_name, source_api, f"{source_api}_missing_ts_code_column", snapshot, table.num_rows)
+        warnings: list[str] = []
+        filtered = rows
+        if status_field in table.column_names:
+            filtered = [row for row in rows if str(row.get(status_field) or "").upper() in allowed_statuses]
+        else:
+            warnings.append(f"{source_api} {status_field} column is unavailable; using all rows")
+        codes = sorted({str(row.get("ts_code")) for row in filtered if row.get("ts_code")})
+        return CodeUniverseResult(
+            universe_name=universe_name,
+            source_api=source_api,
+            source_snapshot_id=str(snapshot["snapshot_id"]),
+            source_record_count=table.num_rows,
+            code_count=len(codes),
+            codes_sample=codes[: max(limit, 0)],
+            blocked_reason=None,
+            warnings=warnings,
             codes=codes,
         )
 
