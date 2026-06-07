@@ -11,7 +11,8 @@ from pathlib import Path
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
 from tushare_mirror.endpoints import load_into_catalog
-from tushare_mirror.mirror import GLOBAL_EQUITY_LOW_RISK_SCOPE, MirrorAutoSyncReporter
+from tushare_mirror.errors import ErrorType, MirrorError
+from tushare_mirror.mirror import GLOBAL_EQUITY_LOW_RISK_SCOPE, MirrorAutoSyncReporter, MirrorRunResult
 from tushare_mirror.mirror import MirrorActiveWriterDetector, MirrorAutoSyncLock
 
 
@@ -76,6 +77,20 @@ class HKUSAutoSyncFakeClient:
             else:
                 values.append(1.0)
         return values
+
+
+class HKUSWindowRetryFakeClient(HKUSAutoSyncFakeClient):
+    def __init__(self, *, api_name: str, error_type: ErrorType, failures: int):
+        super().__init__()
+        self.failing_api_name = api_name
+        self.error_type = error_type
+        self.failures = failures
+
+    def query_paginated(self, api_name, params, fields, page_size=None):
+        if api_name == self.failing_api_name and self.failures > 0:
+            self.failures -= 1
+            raise MirrorError(self.error_type, self.error_type.value)
+        return super().query_paginated(api_name, params, fields, page_size=page_size)
 
 
 class HKUSAutoSyncGuardrailTests(unittest.TestCase):
@@ -346,6 +361,90 @@ class HKUSAutoSyncGuardrailTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "blocked")
         self.assertIn("global-equity-low-risk auto-sync execute is not supported; run HK and US separately", result.blocking_errors)
+
+    def test_rate_limit_failure_retries_current_window_and_succeeds(self):
+        state = self.base / "hk-retry-state.json"
+        client = HKUSWindowRetryFakeClient(api_name="hk_daily", error_type=ErrorType.RATE_LIMITED, failures=3)
+        sleeps: list[float] = []
+        result = MirrorAutoSyncReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="hk-low-risk",
+            from_date="20250101",
+            to_date="20250110",
+            window_days=10,
+            max_jobs_per_api=20,
+            state=state,
+            execute=True,
+            confirm_auto_sync=True,
+            confirm_hk_us_auto_sync=True,
+            max_attempts=2,
+            retry_backoff_seconds=0,
+            client=client,
+            token_available=True,
+            active_writer_detector=MirrorActiveWriterDetector(process_entries=[], now=lambda: self.catalog.db_path.stat().st_mtime + 999999),
+            sleep=sleeps.append,
+        )
+        self.assertEqual(result.status, "succeeded", result.to_dict())
+        self.assertEqual(result.windows[0]["attempts"], 2)
+        self.assertEqual(result.succeeded_window_count, 1)
+        payload = json.loads(state.read_text())
+        self.assertEqual(payload["next_start_date"], "20250111")
+        self.assertEqual(payload["attempt_history"][-1]["attempts"], 2)
+
+    def test_permission_denied_stops_without_window_retry(self):
+        state = self.base / "hk-permission-state.json"
+        client = HKUSWindowRetryFakeClient(api_name="hk_tradecal", error_type=ErrorType.PERMISSION_DENIED, failures=1)
+        result = MirrorAutoSyncReporter().create(
+            root=self.root,
+            backup=self.backup,
+            scope="hk-low-risk",
+            from_date="20250101",
+            to_date="20250110",
+            window_days=10,
+            max_jobs_per_api=20,
+            state=state,
+            execute=True,
+            confirm_auto_sync=True,
+            confirm_hk_us_auto_sync=True,
+            max_attempts=3,
+            retry_backoff_seconds=0,
+            client=client,
+            token_available=True,
+            active_writer_detector=MirrorActiveWriterDetector(process_entries=[], now=lambda: self.catalog.db_path.stat().st_mtime + 999999),
+            sleep=lambda _: None,
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.failed_window_count, 1)
+        self.assertEqual(result.windows[0]["attempts"], 1)
+        payload = json.loads(state.read_text())
+        self.assertEqual(payload["next_start_date"], "20250101")
+        self.assertEqual(payload["last_error_type"], "permission_denied")
+
+    def test_backup_and_validation_failures_are_not_retryable(self):
+        reporter = MirrorAutoSyncReporter()
+        backup_failed = MirrorRunResult(
+            run_id="run-backup",
+            status="failed",
+            summary={
+                "backup_status": "failed",
+                "restore_check_status": "not_requested",
+                "validation_status": "succeeded",
+                "items": [{"endpoint": "hk_daily", "status": "failed", "error_type": "rate_limited"}],
+            },
+        )
+        validation_failed = MirrorRunResult(
+            run_id="run-validation",
+            status="failed",
+            summary={
+                "backup_status": "not_requested",
+                "restore_check_status": "not_requested",
+                "validation_status": "failed",
+                "items": [{"endpoint": "hk_daily", "status": "failed", "error_type": "rate_limited"}],
+            },
+        )
+        self.assertFalse(reporter._retryable_result(backup_failed))
+        self.assertFalse(reporter._retryable_result(validation_failed))
 
     def test_auto_sync_lock_acquire_release_and_second_writer_block(self):
         lock_path = self.base / "auto-sync.lock"
