@@ -91,6 +91,26 @@ class DisclosureSource:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class HKEXDisclosureAutomationGate:
+    report_version: str
+    stock_code: str
+    period: str
+    source_status: str
+    automation_status: str
+    manual_audit_required: bool
+    can_auto_match_disclosure_date: bool
+    match_status: str
+    max_requests: int
+    real_requests_sent: bool
+    limitations: list[str]
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def validate_pit_strength(value: str) -> str:
     if value not in PIT_STRENGTH_VALUES:
         raise ValueError(f"unsupported pit_strength: {value}")
@@ -183,6 +203,46 @@ def validate_financial_disclosure_sources() -> list[str]:
     if "hkexnews_advanced_search" not in source_ids:
         errors.append("HKEXnews advanced search source is required")
     return errors
+
+
+def hkex_disclosure_automation_gate(
+    *,
+    stock_code: str,
+    period: str,
+    max_requests: int,
+    announcement_title: str | None = None,
+) -> HKEXDisclosureAutomationGate:
+    blocking_errors: list[str] = []
+    warnings = [
+        "HKEX disclosure automation remains manual-audit-only until a stable documented metadata path is proven",
+        "title-only evidence cannot upgrade HK financial data to availability_only",
+    ]
+    if max_requests < 1:
+        blocking_errors.append("max_requests_must_be_positive")
+    if max_requests > 2:
+        blocking_errors.append("max_requests_exceeds_hkex_gate_limit:2")
+    if len("".join(ch for ch in str(period) if ch.isdigit())) != 8:
+        blocking_errors.append("period_must_be_YYYYMMDD")
+    match_status = "candidate" if announcement_title else "source_unavailable"
+    return HKEXDisclosureAutomationGate(
+        report_version="hkex-disclosure-metadata-probe/v1",
+        stock_code=str(stock_code),
+        period=str(period),
+        source_status="tentative_manual_audit",
+        automation_status="manual_audit_only",
+        manual_audit_required=True,
+        can_auto_match_disclosure_date=False,
+        match_status=match_status,
+        max_requests=max_requests,
+        real_requests_sent=False,
+        limitations=[
+            "No stable documented HKEX JSON metadata API is assumed.",
+            "No PDF download, bulk crawl, or document parsing is allowed in this goal.",
+            "Operator-provided disclosure dates may be reviewed later but are not trusted automatically.",
+        ],
+        warnings=warnings,
+        blocking_errors=blocking_errors,
+    )
 
 
 def _load_source_map(filename: str) -> dict[str, Any]:

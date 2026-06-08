@@ -9,6 +9,7 @@ from tushare_mirror.disclosure import (
     PIT_STRENGTH_VALUES,
     DisclosureEvent,
     disclosure_sources,
+    hkex_disclosure_automation_gate,
     load_disclosure_event_schema,
     load_financial_disclosure_sources,
     validate_disclosure_event_schema,
@@ -113,6 +114,27 @@ class FinancialDisclosureSchemaTests(unittest.TestCase):
         self.assertEqual(hkex.source_status, "tentative_manual_audit")
         self.assertFalse(hkex.supports_automated_metadata)
         self.assertIn("manual_audit_only", hkex.automation_status)
+
+    def test_hkex_automation_gate_keeps_hk_manual_audit_only(self):
+        gate = hkex_disclosure_automation_gate(stock_code="00700", period="20241231", max_requests=2).to_dict()
+        self.assertEqual(gate["report_version"], "hkex-disclosure-metadata-probe/v1")
+        self.assertEqual(gate["source_status"], "tentative_manual_audit")
+        self.assertEqual(gate["automation_status"], "manual_audit_only")
+        self.assertTrue(gate["manual_audit_required"])
+        self.assertFalse(gate["can_auto_match_disclosure_date"])
+        self.assertEqual(gate["match_status"], "source_unavailable")
+        self.assertFalse(gate["real_requests_sent"])
+
+    def test_hkex_title_only_match_is_candidate_not_availability(self):
+        gate = hkex_disclosure_automation_gate(
+            stock_code="00700",
+            period="20241231",
+            max_requests=1,
+            announcement_title="Annual Results Announcement for the Year Ended 31 December 2024",
+        ).to_dict()
+        self.assertEqual(gate["match_status"], "candidate")
+        self.assertFalse(gate["can_auto_match_disclosure_date"])
+        self.assertTrue(gate["manual_audit_required"])
 
     def test_schema_and_source_validation_passes(self):
         self.assertEqual(validate_disclosure_event_schema(), [])

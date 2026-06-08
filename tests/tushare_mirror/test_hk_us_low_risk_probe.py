@@ -123,6 +123,7 @@ class HKUSLowRiskProbeHarnessTests(unittest.TestCase):
         self.assertIn("--hk-us-financial-pit-probe", result.stdout)
         self.assertIn("--sec-disclosure-probe", result.stdout)
         self.assertIn("--sec-tushare-disclosure-cross-check", result.stdout)
+        self.assertIn("--hkex-disclosure-metadata-probe", result.stdout)
         self.assertIn("--max-requests-per-endpoint", result.stdout)
         self.assertIn("--max-requests", result.stdout)
 
@@ -360,6 +361,46 @@ class HKUSLowRiskProbeHarnessTests(unittest.TestCase):
                     Path(tmp) / "cross-check.json",
                     **{**kwargs, "max_tushare_requests": 2},
                 )
+
+    def test_hkex_disclosure_metadata_probe_writes_manual_audit_gate_without_network(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            output = Path(tmp) / "hkex-probe.json"
+            with redirect_stdout(StringIO()):
+                code = tushare_real_smoke.run_hkex_disclosure_metadata_probe(
+                    output,
+                    stock_code="00700",
+                    period="20241231",
+                    max_requests=2,
+                    announcement_title="Annual Results Announcement",
+                )
+            payload = json.loads(output.read_text())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["report_version"], "hkex-disclosure-metadata-probe/v1")
+        self.assertEqual(payload["automation_status"], "manual_audit_only")
+        self.assertEqual(payload["match_status"], "candidate")
+        self.assertFalse(payload["can_auto_match_disclosure_date"])
+        self.assertFalse(payload["real_requests_sent"])
+
+    def test_hkex_disclosure_metadata_probe_output_path_and_request_cap_are_enforced(self):
+        output = Path(__file__).resolve().parents[2] / "hkex-probe.json"
+        with self.assertRaisesRegex(ValueError, "under /tmp"):
+            tushare_real_smoke.run_hkex_disclosure_metadata_probe(
+                output,
+                stock_code="00700",
+                period="20241231",
+                max_requests=2,
+            )
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            with redirect_stdout(StringIO()):
+                code = tushare_real_smoke.run_hkex_disclosure_metadata_probe(
+                    Path(tmp) / "hkex-probe.json",
+                    stock_code="00700",
+                    period="20241231",
+                    max_requests=3,
+                )
+            payload = json.loads((Path(tmp) / "hkex-probe.json").read_text())
+        self.assertEqual(code, 1)
+        self.assertIn("max_requests_exceeds_hkex_gate_limit:2", payload["blocking_errors"])
 
     def test_no_default_real_request_is_selected(self):
         result = self.run_script()

@@ -19,7 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import TushareClient, classify_probe_response
 from tushare_mirror.cli import load_dotenv
-from tushare_mirror.disclosure import DisclosureEvent
+from tushare_mirror.disclosure import DisclosureEvent, hkex_disclosure_automation_gate
 from tushare_mirror.endpoints import load_into_catalog
 from tushare_mirror.source_metadata import hk_us_low_risk_source_endpoints
 
@@ -907,6 +907,28 @@ def run_sec_tushare_disclosure_cross_check(
     return 0 if report["overall_status"] in {"passed", "warning"} else 1
 
 
+def run_hkex_disclosure_metadata_probe(
+    output: Path,
+    *,
+    stock_code: str,
+    period: str,
+    max_requests: int,
+    announcement_title: str | None = None,
+) -> int:
+    output = _ensure_tmp_output_path(output)
+    gate = hkex_disclosure_automation_gate(
+        stock_code=stock_code,
+        period=period,
+        max_requests=max_requests,
+        announcement_title=announcement_title,
+    )
+    payload = gate.to_dict()
+    payload["output"] = str(output)
+    _write_probe_report(output, payload)
+    print(json.dumps({"output": str(output), "overall_status": "blocked" if gate.blocking_errors else "warning", "real_requests_sent": False}, sort_keys=True))
+    return 1 if gate.blocking_errors else 0
+
+
 def run_smoke(root: Path, endpoints: list[str], reset_root: bool) -> int:
     load_dotenv()
     if not os.environ.get("TUSHARE_TOKEN"):
@@ -1026,11 +1048,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hk-us-financial-pit-probe", action="store_true", help="Run bounded HK/US financial PIT contract probes and write redacted diagnostics under /tmp.")
     parser.add_argument("--sec-disclosure-probe", action="store_true", help="Run a bounded SEC EDGAR disclosure metadata probe and write redacted diagnostics under /tmp.")
     parser.add_argument("--sec-tushare-disclosure-cross-check", action="store_true", help="Run bounded SEC-to-Tushare disclosure date cross-check diagnostics under /tmp.")
+    parser.add_argument("--hkex-disclosure-metadata-probe", action="store_true", help="Write a conservative HKEX disclosure metadata automation gate report under /tmp without crawling or downloading documents.")
     parser.add_argument("--api-name", help="Tushare API name for SEC-to-Tushare disclosure cross-check.")
     parser.add_argument("--ticker", help="Ticker for SEC disclosure probe.")
     parser.add_argument("--cik", help="CIK for SEC disclosure probe.")
     parser.add_argument("--period", help="Financial period for disclosure probe, formatted YYYYMMDD.")
     parser.add_argument("--ts-code", help="Tushare ts_code for SEC-to-Tushare disclosure cross-check.")
+    parser.add_argument("--stock-code", help="HK stock code for HKEX disclosure metadata gate.")
+    parser.add_argument("--announcement-title", help="Optional HKEX title fixture for local metadata gate diagnostics.")
     parser.add_argument("--output", help="Probe output JSON path. Required for HK/US probes and must be under /tmp.")
     parser.add_argument("--max-requests", type=int, default=3, help="SEC disclosure probe request cap; maximum 3.")
     parser.add_argument("--max-sec-requests", type=int, default=3, help="SEC side request cap for cross-check probes; maximum 3.")
@@ -1068,6 +1093,22 @@ def main(argv: list[str] | None = None) -> int:
                 period=args.period,
                 max_sec_requests=args.max_sec_requests,
                 max_tushare_requests=args.max_tushare_requests,
+            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+    if args.hkex_disclosure_metadata_probe:
+        missing = [name for name in ["output", "stock_code", "period"] if not getattr(args, name)]
+        if missing:
+            print(f"--{missing[0].replace('_', '-')} is required for --hkex-disclosure-metadata-probe", file=sys.stderr)
+            return 2
+        try:
+            return run_hkex_disclosure_metadata_probe(
+                Path(args.output),
+                stock_code=args.stock_code,
+                period=args.period,
+                max_requests=args.max_requests,
+                announcement_title=args.announcement_title,
             )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
@@ -1112,12 +1153,12 @@ def main(argv: list[str] | None = None) -> int:
     endpoints = [api for api in endpoints if not (api in seen or seen.add(api))]
     if args.print_commands:
         if not endpoints:
-            print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --hk-us-financial-pit-probe, --sec-disclosure-probe, --sec-tushare-disclosure-cross-check, or --endpoint.", file=sys.stderr)
+            print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --hk-us-financial-pit-probe, --sec-disclosure-probe, --sec-tushare-disclosure-cross-check, --hkex-disclosure-metadata-probe, or --endpoint.", file=sys.stderr)
             return 2
         print_command_preview(Path(args.root), endpoints)
         return 0
     if not endpoints:
-        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --hk-us-financial-pit-probe, --sec-disclosure-probe, --sec-tushare-disclosure-cross-check, --calendar-backfill, or --endpoint.", file=sys.stderr)
+        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --hk-us-financial-pit-probe, --sec-disclosure-probe, --sec-tushare-disclosure-cross-check, --hkex-disclosure-metadata-probe, --calendar-backfill, or --endpoint.", file=sys.stderr)
         return 2
     return run_smoke(Path(args.root), endpoints, args.reset_root)
 
