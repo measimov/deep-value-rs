@@ -19,7 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import TushareClient, classify_probe_response
 from tushare_mirror.cli import load_dotenv
-from tushare_mirror.disclosure import DisclosureEvent, hkex_disclosure_automation_gate
+from tushare_mirror.disclosure import DisclosureEvent, classify_disclosure_match, hkex_disclosure_automation_gate
 from tushare_mirror.endpoints import load_into_catalog
 from tushare_mirror.source_metadata import hk_us_low_risk_source_endpoints
 
@@ -741,49 +741,16 @@ def _normalize_us_tushare_code(value: str) -> str:
     return text[:-3] if text.upper().endswith(".US") else text
 
 
-def _parse_yyyymmdd(value: str | None) -> dt.date | None:
-    if not value:
-        return None
-    digits = "".join(ch for ch in str(value) if ch.isdigit())
-    if len(digits) != 8:
-        return None
-    try:
-        return dt.date(int(digits[:4]), int(digits[4:6]), int(digits[6:]))
-    except ValueError:
-        return None
-
-
 def _classify_disclosure_cross_check(sec_date: str | None, tushare_date: str | None) -> dict[str, Any]:
-    sec_parsed = _parse_yyyymmdd(sec_date)
-    tushare_parsed = _parse_yyyymmdd(tushare_date)
-    if not sec_parsed or not tushare_parsed:
-        return {
-            "match_status": "unmatched",
-            "match_confidence": 0.0,
-            "date_delta_days": None,
-            "pit_strength_candidate": "raw_only",
-        }
-    delta = abs((tushare_parsed - sec_parsed).days)
-    if delta == 0:
-        return {
-            "match_status": "exact",
-            "match_confidence": 1.0,
-            "date_delta_days": delta,
-            "pit_strength_candidate": "availability_only",
-        }
-    if delta <= 7:
-        return {
-            "match_status": "near",
-            "match_confidence": 0.8,
-            "date_delta_days": delta,
-            "pit_strength_candidate": "availability_only",
-        }
-    return {
-        "match_status": "period_only",
-        "match_confidence": 0.5,
-        "date_delta_days": delta,
-        "pit_strength_candidate": "raw_only",
-    }
+    result = classify_disclosure_match(
+        identifier_match=True,
+        period_match=True,
+        report_type_match=True,
+        source_doc_id_present=bool(sec_date),
+        external_disclosure_date=sec_date,
+        tushare_notice_date=tushare_date,
+    )
+    return result.to_dict()
 
 
 def _first_field_value(response: dict[str, Any], field_name: str) -> Any | None:

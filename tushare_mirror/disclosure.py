@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import date
 from importlib import resources
 from typing import Any, Mapping
 
@@ -18,6 +19,7 @@ DISCLOSURE_MATCH_STATUS_VALUES = {
     "period_only",
     "candidate",
     "unmatched",
+    "blocked",
     "source_unavailable",
     "manual_review_required",
 }
@@ -104,6 +106,20 @@ class HKEXDisclosureAutomationGate:
     max_requests: int
     real_requests_sent: bool
     limitations: list[str]
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class DisclosureMatchResult:
+    match_status: str
+    match_confidence: float
+    pit_strength_candidate: str
+    feature_eligible: bool
+    date_delta_days: int | None
     warnings: list[str]
     blocking_errors: list[str]
 
@@ -243,6 +259,120 @@ def hkex_disclosure_automation_gate(
         warnings=warnings,
         blocking_errors=blocking_errors,
     )
+
+
+def classify_disclosure_match(
+    *,
+    identifier_match: bool,
+    period_match: bool,
+    report_type_match: bool,
+    source_doc_id_present: bool,
+    external_disclosure_date: str | None,
+    tushare_notice_date: str | None,
+    source_available: bool = True,
+    unsafe_source: bool = False,
+    title_only: bool = False,
+    operator_audited: bool = False,
+    value_reconciled: bool = False,
+    near_tolerance_days: int = 7,
+) -> DisclosureMatchResult:
+    warnings: list[str] = []
+    blocking_errors: list[str] = []
+    if not source_available:
+        blocking_errors.append("disclosure_source_unavailable")
+    if unsafe_source:
+        blocking_errors.append("disclosure_source_unsafe")
+    if blocking_errors:
+        return DisclosureMatchResult(
+            match_status="blocked",
+            match_confidence=0.0,
+            pit_strength_candidate="raw_only",
+            feature_eligible=False,
+            date_delta_days=None,
+            warnings=warnings,
+            blocking_errors=blocking_errors,
+        )
+
+    if title_only:
+        warnings.append("title_only_match_requires_manual_audit")
+        return DisclosureMatchResult(
+            match_status="candidate",
+            match_confidence=0.25,
+            pit_strength_candidate="raw_only",
+            feature_eligible=False,
+            date_delta_days=None,
+            warnings=warnings,
+            blocking_errors=[],
+        )
+
+    if not identifier_match or not period_match:
+        return DisclosureMatchResult(
+            match_status="unmatched",
+            match_confidence=0.0,
+            pit_strength_candidate="raw_only",
+            feature_eligible=False,
+            date_delta_days=None,
+            warnings=warnings,
+            blocking_errors=[],
+        )
+
+    external_date = _parse_yyyymmdd(external_disclosure_date)
+    tushare_date = _parse_yyyymmdd(tushare_notice_date)
+    date_delta = abs((tushare_date - external_date).days) if external_date and tushare_date else None
+    if report_type_match and source_doc_id_present and date_delta == 0:
+        strength = "as_filed_verified" if value_reconciled else "availability_only"
+        return DisclosureMatchResult(
+            match_status="exact",
+            match_confidence=1.0,
+            pit_strength_candidate=strength,
+            feature_eligible=True,
+            date_delta_days=0,
+            warnings=["values are not as-filed verified"] if not value_reconciled else [],
+            blocking_errors=[],
+        )
+    if report_type_match and source_doc_id_present and date_delta is not None and date_delta <= near_tolerance_days:
+        strength = "as_filed_verified" if value_reconciled else "availability_only"
+        return DisclosureMatchResult(
+            match_status="near",
+            match_confidence=0.8,
+            pit_strength_candidate=strength,
+            feature_eligible=True,
+            date_delta_days=date_delta,
+            warnings=["near disclosure-date match requires review before feature promotion"],
+            blocking_errors=[],
+        )
+    if operator_audited and source_doc_id_present and external_date:
+        return DisclosureMatchResult(
+            match_status="period_only",
+            match_confidence=0.6,
+            pit_strength_candidate="availability_only",
+            feature_eligible=True,
+            date_delta_days=date_delta,
+            warnings=["operator-audited period-only match is availability-only, not as-filed verified"],
+            blocking_errors=[],
+        )
+    warnings.append("identifier and period align but report type or disclosure date confidence is insufficient")
+    return DisclosureMatchResult(
+        match_status="period_only",
+        match_confidence=0.5,
+        pit_strength_candidate="raw_only",
+        feature_eligible=False,
+        date_delta_days=date_delta,
+        warnings=warnings,
+        blocking_errors=[],
+    )
+
+
+def _parse_yyyymmdd(value: str | None) -> date | None:
+    if not value:
+        return None
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    if len(digits) != 8:
+        return None
+    try:
+        return date(int(digits[:4]), int(digits[4:6]), int(digits[6:]))
+    except ValueError:
+        return None
 
 
 def _load_source_map(filename: str) -> dict[str, Any]:

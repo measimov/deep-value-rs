@@ -39,6 +39,7 @@ match_status_values:
   - period_only
   - candidate
   - unmatched
+  - blocked
   - source_unavailable
   - manual_review_required
 field_definitions:

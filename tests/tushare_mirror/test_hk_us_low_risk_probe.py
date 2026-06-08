@@ -305,7 +305,7 @@ class HKUSLowRiskProbeHarnessTests(unittest.TestCase):
             ("20250226", "exact", 0, "availability_only"),
             ("20250228", "near", 2, "availability_only"),
             ("20250320", "period_only", 22, "raw_only"),
-            (None, "unmatched", None, "raw_only"),
+            (None, "period_only", None, "raw_only"),
         ]
         for notice_date, match_status, delta, strength in cases:
             with self.subTest(notice_date=notice_date):

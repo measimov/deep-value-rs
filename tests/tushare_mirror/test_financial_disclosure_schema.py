@@ -8,6 +8,7 @@ from tushare_mirror.disclosure import (
     DISCLOSURE_MATCH_STATUS_VALUES,
     PIT_STRENGTH_VALUES,
     DisclosureEvent,
+    classify_disclosure_match,
     disclosure_sources,
     hkex_disclosure_automation_gate,
     load_disclosure_event_schema,
@@ -135,6 +136,103 @@ class FinancialDisclosureSchemaTests(unittest.TestCase):
         self.assertEqual(gate["match_status"], "candidate")
         self.assertFalse(gate["can_auto_match_disclosure_date"])
         self.assertTrue(gate["manual_audit_required"])
+
+    def test_disclosure_matching_policy_classifies_grades_and_feature_eligibility(self):
+        exact = classify_disclosure_match(
+            identifier_match=True,
+            period_match=True,
+            report_type_match=True,
+            source_doc_id_present=True,
+            external_disclosure_date="20250226",
+            tushare_notice_date="20250226",
+        ).to_dict()
+        self.assertEqual(exact["match_status"], "exact")
+        self.assertEqual(exact["pit_strength_candidate"], "availability_only")
+        self.assertTrue(exact["feature_eligible"])
+
+        near = classify_disclosure_match(
+            identifier_match=True,
+            period_match=True,
+            report_type_match=True,
+            source_doc_id_present=True,
+            external_disclosure_date="20250226",
+            tushare_notice_date="20250228",
+        ).to_dict()
+        self.assertEqual(near["match_status"], "near")
+        self.assertEqual(near["date_delta_days"], 2)
+        self.assertTrue(near["feature_eligible"])
+
+        period_only = classify_disclosure_match(
+            identifier_match=True,
+            period_match=True,
+            report_type_match=False,
+            source_doc_id_present=True,
+            external_disclosure_date="20250226",
+            tushare_notice_date=None,
+        ).to_dict()
+        self.assertEqual(period_only["match_status"], "period_only")
+        self.assertEqual(period_only["pit_strength_candidate"], "raw_only")
+        self.assertFalse(period_only["feature_eligible"])
+
+        unmatched = classify_disclosure_match(
+            identifier_match=False,
+            period_match=True,
+            report_type_match=True,
+            source_doc_id_present=True,
+            external_disclosure_date="20250226",
+            tushare_notice_date="20250226",
+        ).to_dict()
+        self.assertEqual(unmatched["match_status"], "unmatched")
+        self.assertFalse(unmatched["feature_eligible"])
+
+        blocked = classify_disclosure_match(
+            identifier_match=True,
+            period_match=True,
+            report_type_match=True,
+            source_doc_id_present=True,
+            external_disclosure_date="20250226",
+            tushare_notice_date="20250226",
+            source_available=False,
+        ).to_dict()
+        self.assertEqual(blocked["match_status"], "blocked")
+        self.assertFalse(blocked["feature_eligible"])
+        self.assertIn("disclosure_source_unavailable", blocked["blocking_errors"])
+
+    def test_as_filed_verified_requires_value_reconciliation(self):
+        availability = classify_disclosure_match(
+            identifier_match=True,
+            period_match=True,
+            report_type_match=True,
+            source_doc_id_present=True,
+            external_disclosure_date="20250226",
+            tushare_notice_date="20250226",
+            value_reconciled=False,
+        ).to_dict()
+        verified = classify_disclosure_match(
+            identifier_match=True,
+            period_match=True,
+            report_type_match=True,
+            source_doc_id_present=True,
+            external_disclosure_date="20250226",
+            tushare_notice_date="20250226",
+            value_reconciled=True,
+        ).to_dict()
+        self.assertEqual(availability["pit_strength_candidate"], "availability_only")
+        self.assertEqual(verified["pit_strength_candidate"], "as_filed_verified")
+
+    def test_title_only_matching_policy_remains_candidate(self):
+        result = classify_disclosure_match(
+            identifier_match=True,
+            period_match=True,
+            report_type_match=True,
+            source_doc_id_present=False,
+            external_disclosure_date="20250226",
+            tushare_notice_date="20250226",
+            title_only=True,
+        ).to_dict()
+        self.assertEqual(result["match_status"], "candidate")
+        self.assertEqual(result["pit_strength_candidate"], "raw_only")
+        self.assertFalse(result["feature_eligible"])
 
     def test_schema_and_source_validation_passes(self):
         self.assertEqual(validate_disclosure_event_schema(), [])
