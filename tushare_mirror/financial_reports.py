@@ -66,14 +66,23 @@ class FinancialReadinessReporter:
         pit_safe = [item["api_name"] for item in items if item["pit_safe_ready"]]
         permission_blocked = [item["api_name"] for item in items if item["permission_blocked"]]
         contract_blocked = [item["api_name"] for item in items if item["contract_blocked"]]
+        candidate = [item["api_name"] for item in items if item["disclosure_state"] == "candidate"]
+        raw_only = [item["api_name"] for item in items if item["disclosure_state"] == "raw_only"]
         summary_fields = {
             "endpoint_count": len(items),
             "raw_ready_count": len(raw_ready),
             "pit_safe_ready_count": len(pit_safe),
+            "raw_only_count": len(raw_only),
+            "availability_only_count": 0,
+            "as_filed_verified_count": 0,
+            "candidate_count": len(candidate),
+            "feature_eligible_count": 0,
             "permission_blocked_count": len(permission_blocked),
             "contract_blocked_count": len(contract_blocked),
             "raw_ready": raw_ready,
             "pit_safe_ready": pit_safe,
+            "raw_only": raw_only,
+            "candidate": candidate,
             "permission_blocked": permission_blocked,
             "contract_blocked": contract_blocked,
             "not_a_full_pull": True,
@@ -256,12 +265,16 @@ def _endpoint_readiness_item(item: dict[str, Any]) -> dict[str, Any]:
     contract_blocked = not raw_ready and probe_status in {"empty_but_accessible", "contract_changed", "failed", "pending"}
     if pit_safe:
         pit_status = "complete"
+        disclosure_state = "candidate"
     elif raw_ready:
         pit_status = "blocked_without_disclosure_date"
+        disclosure_state = "raw_only"
     elif permission_blocked:
         pit_status = "permission_blocked"
+        disclosure_state = "blocked"
     else:
         pit_status = "probe_or_contract_pending"
+        disclosure_state = "blocked"
     observed_fields = list((item.get("real_probe_observed") or {}).get("fields") or [])
     return {
         "api_name": api_name,
@@ -271,6 +284,9 @@ def _endpoint_readiness_item(item: dict[str, Any]) -> dict[str, Any]:
         "permission_blocked": permission_blocked,
         "contract_blocked": contract_blocked,
         "pit_usable_after_status": pit_status,
+        "disclosure_state": disclosure_state,
+        "pit_strength": "raw_only",
+        "feature_eligible": False,
         "observed_fields": observed_fields,
         "observed_disclosure_fields": _observed_disclosure_fields(observed_fields),
         "recommended_execution_status": "guarded_raw" if raw_ready else "plan_only",

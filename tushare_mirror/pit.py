@@ -57,6 +57,8 @@ class PITReadinessReport:
     missing_usable_after_strategy: list[str]
     strategy_safe_count: int
     strategy_unsafe_count: int
+    availability_only_count: int
+    as_filed_verified_count: int
     next_required_infra: list[str]
     items: list[dict[str, Any]]
 
@@ -121,6 +123,8 @@ class PITReadinessReporter:
             missing_usable_after_strategy=sorted(missing_strategy),
             strategy_safe_count=strategy_safe,
             strategy_unsafe_count=total - strategy_safe,
+            availability_only_count=0,
+            as_filed_verified_count=0,
             next_required_infra=[
                 "PIT-safe usable_after generation",
                 "per-endpoint fake tests",

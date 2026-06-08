@@ -28,6 +28,7 @@ from .code_universe import CodeUniverseProvider
 from .compaction import CompactionPlanner
 from .coverage import CoverageReporter
 from .disclosure_contract import DisclosureContractReporter
+from .disclosure_reports import DisclosureAvailabilityReporter, DisclosureGateReporter, DisclosurePlanReporter, DisclosureSourceReporter
 from .enablement import EndpointEnablementChecklistReporter
 from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
@@ -632,6 +633,56 @@ def cmd_disclosure_contract_report(args) -> int:
         _print_json(payload)
     else:
         _print_key_values(report.summary())
+    return 1 if report.blocking_errors else 0
+
+
+def cmd_disclosure_source_report(args) -> int:
+    report = DisclosureSourceReporter().report()
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        _print_key_values(report.summary())
+        if report.items:
+            _print_table(report.items, ["source_id", "market", "source_status", "automation_status", "supports_automated_metadata"])
+    return 1 if report.blocking_errors else 0
+
+
+def cmd_disclosure_plan(args) -> int:
+    report = DisclosurePlanReporter().report(
+        scope=args.scope,
+        from_period=args.from_period,
+        to_period=args.to_period,
+        limit_codes=args.limit_codes,
+        max_periods=args.max_periods,
+    )
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        _print_key_values(report.summary())
+        if report.items:
+            _print_table(report.items, ["api_name", "state", "pit_strength", "feature_eligible", "reason"])
+    return 1 if report.blocking_errors else 0
+
+
+def cmd_disclosure_availability(args) -> int:
+    report = DisclosureAvailabilityReporter().report(scope=args.scope, root=args.root_arg)
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        _print_key_values(report.summary())
+        if report.items:
+            _print_table(report.items, ["api_name", "state", "pit_strength", "feature_eligible", "reason"])
+    return 1 if report.blocking_errors else 0
+
+
+def cmd_disclosure_gate(args) -> int:
+    report = DisclosureGateReporter().report(scope=args.scope, api_name=args.api_name, ts_code=args.ts_code, period=args.period)
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        _print_key_values(report.summary())
+        if report.items:
+            _print_table(report.items, ["api_name", "state", "pit_strength", "feature_eligible", "reason"])
     return 1 if report.blocking_errors else 0
 
 
@@ -1942,6 +1993,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--cross-check', required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_disclosure_contract_report)
+
+    p = sub.add_parser('disclosure-source-report', description='Read-only financial disclosure source inventory report; does not fetch or write catalog state.')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_disclosure_source_report)
+
+    p = sub.add_parser('disclosure-plan', description='Read-only financial disclosure availability planning report; does not fetch or write catalog state.')
+    p.add_argument('--scope', required=True)
+    p.add_argument('--from-period', required=True)
+    p.add_argument('--to-period', required=True)
+    p.add_argument('--limit-codes', type=int, required=True)
+    p.add_argument('--max-periods', type=int, default=20)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_disclosure_plan)
+
+    p = sub.add_parser('disclosure-availability', description='Read-only financial disclosure availability state report; does not fetch or write catalog state.')
+    p.add_argument('--scope', required=True)
+    p.add_argument('--root', dest='root_arg')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_disclosure_availability)
+
+    p = sub.add_parser('disclosure-gate', description='Read-only financial disclosure PIT feature gate report; does not fetch or write catalog state.')
+    p.add_argument('--scope', required=True)
+    p.add_argument('--api-name', required=True)
+    p.add_argument('--ts-code', required=True)
+    p.add_argument('--period', required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_disclosure_gate)
 
     p = sub.add_parser('financial-readiness', description='Read-only HK/US financial raw readiness report; does not fetch or write catalog state.')
     p.add_argument('--scope', required=True)
