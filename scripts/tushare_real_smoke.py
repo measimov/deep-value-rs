@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+from urllib.request import Request, urlopen
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import TushareClient, classify_probe_response
 from tushare_mirror.cli import load_dotenv
+from tushare_mirror.disclosure import DisclosureEvent
 from tushare_mirror.endpoints import load_into_catalog
 from tushare_mirror.source_metadata import hk_us_low_risk_source_endpoints
 
@@ -133,6 +135,9 @@ HK_US_FINANCIAL_PROBE_REQUESTS: dict[str, list[dict[str, Any]]] = {
     "us_cashflow": [{"ts_code": "NVDA", "period": "20241231"}],
     "us_fina_indicator": [{"ts_code": "NVDA", "period": "20241231"}],
 }
+SEC_DISCLOSURE_PROBE_VERSION = "sec-disclosure-probe/v1"
+SEC_SUBMISSIONS_BASE_URL = "https://data.sec.gov/submissions"
+DEFAULT_SEC_USER_AGENT = "deep-value-rs-tushare-mirror/0.1 contact=research@example.invalid"
 
 
 def run_cli(root: Path, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -250,6 +255,178 @@ def _redact_for_probe(value: Any, token: str | None) -> Any:
 
 def _write_probe_report(output: Path, payload: dict[str, Any]) -> None:
     output.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+
+
+def _sec_user_agent() -> str:
+    return os.environ.get("SEC_USER_AGENT") or DEFAULT_SEC_USER_AGENT
+
+
+def _normalize_cik(cik: str) -> str:
+    digits = "".join(ch for ch in str(cik) if ch.isdigit())
+    if not digits:
+        raise ValueError("--cik must contain digits")
+    return digits.zfill(10)
+
+
+def _normalize_period(value: str) -> str:
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    if len(digits) != 8:
+        raise ValueError("--period must be YYYYMMDD")
+    return digits
+
+
+def _sec_period_to_report_date(period: str) -> str:
+    normalized = _normalize_period(period)
+    return f"{normalized[:4]}-{normalized[4:6]}-{normalized[6:]}"
+
+
+def _sec_json_get(url: str, headers: dict[str, str]) -> dict[str, Any]:
+    request = Request(url, headers=headers)
+    with urlopen(request, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _recent_sec_filings(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    recent = ((payload.get("filings") or {}).get("recent") or {})
+    forms = list(recent.get("form") or [])
+    filings: list[dict[str, Any]] = []
+    for index, form in enumerate(forms):
+        filings.append(
+            {
+                "form": str(form),
+                "filing_date": _recent_value(recent, "filingDate", index),
+                "report_date": _recent_value(recent, "reportDate", index),
+                "accession_number": _recent_value(recent, "accessionNumber", index),
+                "accepted_at": _recent_value(recent, "acceptanceDateTime", index),
+                "primary_document": _recent_value(recent, "primaryDocument", index),
+            }
+        )
+    return filings
+
+
+def _recent_value(recent: dict[str, Any], key: str, index: int) -> str | None:
+    values = list(recent.get(key) or [])
+    if index >= len(values):
+        return None
+    value = values[index]
+    return str(value) if value is not None else None
+
+
+def _accession_url(cik: str, accession_number: str | None) -> str | None:
+    if not accession_number:
+        return None
+    compact = accession_number.replace("-", "")
+    return f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{compact}/"
+
+
+def _sec_disclosure_event(ticker: str, cik: str, period: str, filing: dict[str, Any]) -> dict[str, Any]:
+    accession = filing.get("accession_number")
+    filing_date = filing.get("filing_date")
+    form = filing.get("form")
+    event = DisclosureEvent(
+        event_id=f"sec_edgar_submissions:{ticker}:{period}:{form or 'unknown'}:{accession or 'unknown'}",
+        market="us",
+        source="sec_edgar_submissions",
+        source_status="stable_public_json",
+        source_doc_id=accession,
+        source_url=_accession_url(cik, accession),
+        ticker=ticker,
+        ts_code=f"{ticker}.US",
+        external_id=ticker,
+        cik=cik,
+        period=period,
+        end_date=period,
+        report_type=_report_type_from_form(form),
+        form_type=form,
+        filing_date=filing_date.replace("-", "") if filing_date else None,
+        accepted_at=filing.get("accepted_at"),
+        disclosure_date=filing_date.replace("-", "") if filing_date else None,
+        announcement_title=f"Form {form}" if form else None,
+        language="en",
+        match_status="exact",
+        match_confidence=1.0,
+        pit_strength="availability_only",
+        as_filed_value_verified=False,
+        limitations=["SEC filing date is matched; Tushare values are not reconciled to filing facts"],
+    )
+    return event.to_dict()
+
+
+def _report_type_from_form(form: str | None) -> str | None:
+    if form == "10-K":
+        return "annual"
+    if form == "10-Q":
+        return "quarterly"
+    if form == "20-F":
+        return "annual"
+    return None
+
+
+def run_sec_disclosure_probe(
+    output: Path,
+    *,
+    ticker: str,
+    cik: str,
+    period: str,
+    max_requests: int,
+    http_get: Any | None = None,
+) -> int:
+    if max_requests < 1:
+        raise ValueError("--max-requests must be positive")
+    if max_requests > 3:
+        raise ValueError("--max-requests must be <= 3 for SEC disclosure probes")
+    output = _ensure_tmp_output_path(output)
+    normalized_cik = _normalize_cik(cik)
+    normalized_period = _normalize_period(period)
+    report_date = _sec_period_to_report_date(normalized_period)
+    url = f"{SEC_SUBMISSIONS_BASE_URL}/CIK{normalized_cik}.json"
+    headers = {"User-Agent": _sec_user_agent(), "Accept-Encoding": "gzip, deflate", "Host": "data.sec.gov"}
+    getter = http_get or _sec_json_get
+    report: dict[str, Any] = {
+        "report_version": SEC_DISCLOSURE_PROBE_VERSION,
+        "generated_at": dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "output": str(output),
+        "ticker": ticker,
+        "cik": normalized_cik,
+        "period": normalized_period,
+        "sec_report_date": report_date,
+        "request_count": 0,
+        "max_requests": max_requests,
+        "real_requests_sent": False,
+        "source": "sec_edgar_submissions",
+        "source_status": "stable_public_json",
+        "user_agent_present": bool(headers["User-Agent"]),
+        "matched_filings": [],
+        "filing_sample": [],
+        "disclosure_events": [],
+        "overall_status": "blocked",
+        "warnings": [],
+        "blocking_errors": [],
+        "token_plaintext_found": False,
+    }
+    try:
+        payload = getter(url, headers)
+        report["request_count"] = 1
+        report["real_requests_sent"] = True
+    except Exception as exc:
+        report["blocking_errors"].append(f"sec_request_failed:{exc}")
+        _write_probe_report(output, report)
+        print(json.dumps({"output": str(output), "overall_status": "blocked", "real_requests_sent": report["real_requests_sent"]}, sort_keys=True))
+        return 1
+
+    filings = _recent_sec_filings(payload)
+    report["filing_sample"] = filings[:5]
+    matched = [item for item in filings if item.get("report_date") == report_date and item.get("form") in {"10-K", "10-Q", "20-F"}]
+    report["matched_filings"] = matched
+    report["disclosure_events"] = [_sec_disclosure_event(ticker, normalized_cik, normalized_period, item) for item in matched]
+    if matched:
+        report["overall_status"] = "passed"
+    else:
+        report["overall_status"] = "warning"
+        report["warnings"].append("no matching 10-K/10-Q/20-F filing found for requested period")
+    _write_probe_report(output, report)
+    print(json.dumps({"output": str(output), "overall_status": report["overall_status"], "real_requests_sent": True}, sort_keys=True))
+    return 0
 
 
 def _probe_report_header(output: Path, max_requests_per_endpoint: int) -> dict[str, Any]:
@@ -633,7 +810,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--a-share-low-risk-smoke", action="store_true", help="Run the bounded A-share low-risk endpoint smoke set.")
     parser.add_argument("--hk-us-low-risk-probe", action="store_true", help="Run bounded HK/US low-risk interface probes and write redacted diagnostics under /tmp.")
     parser.add_argument("--hk-us-financial-pit-probe", action="store_true", help="Run bounded HK/US financial PIT contract probes and write redacted diagnostics under /tmp.")
+    parser.add_argument("--sec-disclosure-probe", action="store_true", help="Run a bounded SEC EDGAR disclosure metadata probe and write redacted diagnostics under /tmp.")
+    parser.add_argument("--ticker", help="Ticker for SEC disclosure probe.")
+    parser.add_argument("--cik", help="CIK for SEC disclosure probe.")
+    parser.add_argument("--period", help="Financial period for disclosure probe, formatted YYYYMMDD.")
     parser.add_argument("--output", help="Probe output JSON path. Required for HK/US probes and must be under /tmp.")
+    parser.add_argument("--max-requests", type=int, default=3, help="SEC disclosure probe request cap; maximum 3.")
     parser.add_argument("--max-requests-per-endpoint", type=int, default=2, help="HK/US probe request cap per endpoint; maximum 2.")
     parser.add_argument("--print-commands", action="store_true", help="Print selected smoke commands without sending real requests.")
     parser.add_argument("--calendar-backfill", action="store_true", help="Run the Phase 2.4 calendar-aware daily backfill smoke.")
@@ -661,6 +843,22 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
+    if args.sec_disclosure_probe:
+        missing = [name for name in ["output", "ticker", "cik", "period"] if not getattr(args, name)]
+        if missing:
+            print(f"--{missing[0].replace('_', '-')} is required for --sec-disclosure-probe", file=sys.stderr)
+            return 2
+        try:
+            return run_sec_disclosure_probe(
+                Path(args.output),
+                ticker=args.ticker,
+                cik=args.cik,
+                period=args.period,
+                max_requests=args.max_requests,
+            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     endpoints: list[str] = []
     if args.all_phase_1:
         endpoints.extend(PHASE1_ENDPOINTS)
@@ -676,12 +874,12 @@ def main(argv: list[str] | None = None) -> int:
     endpoints = [api for api in endpoints if not (api in seen or seen.add(api))]
     if args.print_commands:
         if not endpoints:
-            print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --hk-us-financial-pit-probe, or --endpoint.", file=sys.stderr)
+            print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --hk-us-financial-pit-probe, --sec-disclosure-probe, or --endpoint.", file=sys.stderr)
             return 2
         print_command_preview(Path(args.root), endpoints)
         return 0
     if not endpoints:
-        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --hk-us-financial-pit-probe, --calendar-backfill, or --endpoint.", file=sys.stderr)
+        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --hk-us-financial-pit-probe, --sec-disclosure-probe, --calendar-backfill, or --endpoint.", file=sys.stderr)
         return 2
     return run_smoke(Path(args.root), endpoints, args.reset_root)
 

@@ -61,6 +61,26 @@ class FakeFinancialProbeClient:
         return {"code": 0, "msg": None, "data": {"fields": fields_list, "items": [row]}}
 
 
+class FakeSecHttp:
+    def __init__(self):
+        self.calls: list[tuple[str, dict[str, str]]] = []
+
+    def __call__(self, url: str, headers: dict[str, str]):
+        self.calls.append((url, dict(headers)))
+        return {
+            "filings": {
+                "recent": {
+                    "form": ["10-K", "8-K", "10-Q"],
+                    "filingDate": ["2025-02-26", "2025-01-13", "2024-11-20"],
+                    "reportDate": ["2024-12-31", "2025-01-13", "2024-10-27"],
+                    "accessionNumber": ["0001045810-25-000023", "0001045810-25-000005", "0001045810-24-000316"],
+                    "acceptanceDateTime": ["2025-02-26T21:36:00.000Z", "2025-01-13T21:10:00.000Z", "2024-11-20T21:15:00.000Z"],
+                    "primaryDocument": ["nvda-20250126.htm", "nvda-8k.htm", "nvda-20241027.htm"],
+                }
+            }
+        }
+
+
 class HKUSLowRiskProbeHarnessTests(unittest.TestCase):
     def run_script(self, *args, env=None):
         return subprocess.run(
@@ -77,7 +97,9 @@ class HKUSLowRiskProbeHarnessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("--hk-us-low-risk-probe", result.stdout)
         self.assertIn("--hk-us-financial-pit-probe", result.stdout)
+        self.assertIn("--sec-disclosure-probe", result.stdout)
         self.assertIn("--max-requests-per-endpoint", result.stdout)
+        self.assertIn("--max-requests", result.stdout)
 
     def test_probe_without_token_writes_blocked_report_and_sends_no_requests(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
@@ -174,6 +196,58 @@ class HKUSLowRiskProbeHarnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             with self.assertRaisesRegex(ValueError, "<= 2"):
                 tushare_real_smoke.run_hk_us_financial_pit_probe(Path(tmp) / "probe.json", 3, token="secret-token", client=FakeFinancialProbeClient())
+
+    def test_sec_disclosure_probe_with_fake_http_is_bounded_and_writes_event(self):
+        fake_http = FakeSecHttp()
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            output = Path(tmp) / "sec-probe.json"
+            with redirect_stdout(StringIO()):
+                code = tushare_real_smoke.run_sec_disclosure_probe(
+                    output,
+                    ticker="NVDA",
+                    cik="0001045810",
+                    period="20241231",
+                    max_requests=3,
+                    http_get=fake_http,
+                )
+            payload = json.loads(output.read_text())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["report_version"], "sec-disclosure-probe/v1")
+        self.assertEqual(payload["overall_status"], "passed")
+        self.assertEqual(payload["request_count"], 1)
+        self.assertTrue(payload["real_requests_sent"])
+        self.assertEqual(len(fake_http.calls), 1)
+        url, headers = fake_http.calls[0]
+        self.assertIn("CIK0001045810.json", url)
+        self.assertTrue(headers["User-Agent"])
+        self.assertEqual(payload["matched_filings"][0]["form"], "10-K")
+        event = payload["disclosure_events"][0]
+        self.assertEqual(event["source"], "sec_edgar_submissions")
+        self.assertEqual(event["pit_strength"], "availability_only")
+        self.assertEqual(event["disclosure_date"], "20250226")
+        self.assertFalse(event["as_filed_value_verified"])
+
+    def test_sec_disclosure_probe_output_path_and_request_cap_are_enforced(self):
+        output = Path(__file__).resolve().parents[2] / "sec-probe.json"
+        with self.assertRaisesRegex(ValueError, "under /tmp"):
+            tushare_real_smoke.run_sec_disclosure_probe(
+                output,
+                ticker="NVDA",
+                cik="0001045810",
+                period="20241231",
+                max_requests=3,
+                http_get=FakeSecHttp(),
+            )
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            with self.assertRaisesRegex(ValueError, "<= 3"):
+                tushare_real_smoke.run_sec_disclosure_probe(
+                    Path(tmp) / "sec-probe.json",
+                    ticker="NVDA",
+                    cik="0001045810",
+                    period="20241231",
+                    max_requests=4,
+                    http_get=FakeSecHttp(),
+                )
 
     def test_no_default_real_request_is_selected(self):
         result = self.run_script()
