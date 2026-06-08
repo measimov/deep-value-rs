@@ -27,6 +27,7 @@ from .code_list_planner import CodeListPlanner
 from .code_universe import CodeUniverseProvider
 from .compaction import CompactionPlanner
 from .coverage import CoverageReporter
+from .disclosure_contract import DisclosureContractReporter
 from .enablement import EndpointEnablementChecklistReporter
 from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
@@ -621,6 +622,16 @@ def cmd_hk_us_financial_probe_report(args) -> int:
                     "recommended_execution_status",
                 ],
             )
+    return 1 if report.blocking_errors else 0
+
+
+def cmd_disclosure_contract_report(args) -> int:
+    report = DisclosureContractReporter().report(sec_probe=args.sec_probe, cross_check=args.cross_check)
+    payload = report.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_key_values(report.summary())
     return 1 if report.blocking_errors else 0
 
 
@@ -1925,6 +1936,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--input', required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_hk_us_financial_probe_report)
+
+    p = sub.add_parser('disclosure-contract-report', description='Read-only SEC/Tushare disclosure contract report; reads probe artifacts without fetching or writing catalog state.')
+    p.add_argument('--sec-probe', required=True)
+    p.add_argument('--cross-check', required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_disclosure_contract_report)
 
     p = sub.add_parser('financial-readiness', description='Read-only HK/US financial raw readiness report; does not fetch or write catalog state.')
     p.add_argument('--scope', required=True)
