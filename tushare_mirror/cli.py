@@ -28,7 +28,7 @@ from .code_universe import CodeUniverseProvider
 from .compaction import CompactionPlanner
 from .coverage import CoverageReporter
 from .disclosure_contract import DisclosureContractReporter
-from .disclosure_reports import DisclosureAvailabilityReporter, DisclosureGateReporter, DisclosurePlanReporter, DisclosureSourceReporter
+from .disclosure_reports import DisclosureAvailabilityReporter, DisclosureBundleReporter, DisclosureGateReporter, DisclosurePlanReporter, DisclosureSourceReporter
 from .enablement import EndpointEnablementChecklistReporter
 from .endpoints import load_into_catalog
 from .errors import ErrorType, classify_exception, retry_delay_seconds, should_retry
@@ -683,6 +683,25 @@ def cmd_disclosure_gate(args) -> int:
         _print_key_values(report.summary())
         if report.items:
             _print_table(report.items, ["api_name", "state", "pit_strength", "feature_eligible", "reason"])
+    return 1 if report.blocking_errors else 0
+
+
+def cmd_disclosure_bundle(args) -> int:
+    report = DisclosureBundleReporter().report(
+        scope=args.scope,
+        root=args.root_arg,
+        backup=args.backup,
+        from_period=args.from_period,
+        to_period=args.to_period,
+        output=args.output,
+        limit_codes=args.limit_codes,
+        max_periods=args.max_periods,
+        overwrite=args.overwrite,
+    )
+    if args.json:
+        _print_json(report.to_dict())
+    else:
+        _print_key_values(report.summary())
     return 1 if report.blocking_errors else 0
 
 
@@ -2020,6 +2039,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--period', required=True)
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_disclosure_gate)
+
+    p = sub.add_parser('disclosure-bundle', description='Read-only/file-output financial disclosure availability bundle generator; does not execute or fetch.')
+    p.add_argument('--scope', required=True)
+    p.add_argument('--root', dest='root_arg', required=True)
+    p.add_argument('--backup', required=True)
+    p.add_argument('--from-period', required=True)
+    p.add_argument('--to-period', required=True)
+    p.add_argument('--limit-codes', type=int, default=1)
+    p.add_argument('--max-periods', type=int, default=20)
+    p.add_argument('--output', required=True)
+    p.add_argument('--overwrite', action='store_true')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_disclosure_bundle)
 
     p = sub.add_parser('financial-readiness', description='Read-only HK/US financial raw readiness report; does not fetch or write catalog state.')
     p.add_argument('--scope', required=True)

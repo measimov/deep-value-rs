@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -162,6 +164,124 @@ class DisclosureGateReporter:
         )
 
 
+@dataclass(frozen=True)
+class DisclosureBundleResult:
+    report_version: str
+    status: str
+    output: str
+    files: list[str]
+    scope: str
+    root: str
+    backup: str
+    from_period: str
+    to_period: str
+    user_confirmation_required: bool
+    commands_guarded: bool
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    @property
+    def blocked(self) -> bool:
+        return bool(self.blocking_errors)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def summary(self) -> dict[str, Any]:
+        return self.to_dict()
+
+
+class DisclosureBundleReporter:
+    REPORT_VERSION = "disclosure-bundle/v1"
+
+    def report(
+        self,
+        *,
+        scope: str,
+        root: str | Path,
+        backup: str | Path,
+        from_period: str,
+        to_period: str,
+        output: str | Path,
+        limit_codes: int = 1,
+        max_periods: int = 20,
+        overwrite: bool = False,
+    ) -> DisclosureBundleResult:
+        warnings = ["disclosure-bundle writes only the explicit output directory and does not execute commands"]
+        blocking_errors: list[str] = []
+        root_path = Path(root).expanduser().resolve()
+        backup_path = Path(backup).expanduser().resolve()
+        output_path = Path(output).expanduser().resolve()
+        if output_path == root_path or _is_relative_to(output_path, root_path):
+            blocking_errors.append("output path is inside mirror root")
+        if output_path == backup_path or _is_relative_to(output_path, backup_path):
+            blocking_errors.append("output path is inside backup root")
+        if output_path.exists() and not overwrite:
+            blocking_errors.append("output path already exists; rerun with --overwrite")
+        if blocking_errors:
+            return DisclosureBundleResult(
+                report_version=self.REPORT_VERSION,
+                status="blocked",
+                output=str(output_path),
+                files=[],
+                scope=scope,
+                root=str(root_path),
+                backup=str(backup_path),
+                from_period=from_period,
+                to_period=to_period,
+                user_confirmation_required=True,
+                commands_guarded=False,
+                warnings=warnings,
+                blocking_errors=blocking_errors,
+            )
+        if output_path.exists():
+            if output_path.is_dir():
+                shutil.rmtree(output_path)
+            else:
+                output_path.unlink()
+        output_path.mkdir(parents=True)
+
+        source_report = DisclosureSourceReporter().report().to_dict()
+        plan = DisclosurePlanReporter().report(
+            scope=scope,
+            from_period=from_period,
+            to_period=to_period,
+            limit_codes=limit_codes,
+            max_periods=max_periods,
+        ).to_dict()
+        availability = DisclosureAvailabilityReporter().report(scope=scope, root=root_path).to_dict()
+        gate_args = _default_gate_args(scope, from_period)
+        gate = DisclosureGateReporter().report(scope=scope, **gate_args).to_dict()
+
+        files = {
+            "source_report.json": source_report,
+            "disclosure_plan.json": plan,
+            "availability.json": availability,
+            "gate.json": gate,
+        }
+        for filename, payload in files.items():
+            (output_path / filename).write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        (output_path / "README.md").write_text(_bundle_readme(scope, root_path, backup_path, from_period, to_period, gate_args), encoding="utf-8")
+        (output_path / "limitations.md").write_text(_bundle_limitations(), encoding="utf-8")
+        (output_path / "commands.sh").write_text(_bundle_commands(scope, root_path, from_period, to_period, output_path), encoding="utf-8")
+        written = ["README.md", "source_report.json", "disclosure_plan.json", "availability.json", "gate.json", "limitations.md", "commands.sh"]
+        return DisclosureBundleResult(
+            report_version=self.REPORT_VERSION,
+            status="passed" if not (plan["blocking_errors"] or availability["blocking_errors"] or gate["blocking_errors"]) else "warning",
+            output=str(output_path),
+            files=written,
+            scope=scope,
+            root=str(root_path),
+            backup=str(backup_path),
+            from_period=from_period,
+            to_period=to_period,
+            user_confirmation_required=True,
+            commands_guarded=True,
+            warnings=warnings,
+            blocking_errors=[],
+        )
+
+
 def _source_endpoints(scope: str) -> tuple[list[dict[str, Any]], list[str]]:
     market = DISCLOSURE_FINANCIAL_SCOPES.get(scope)
     if market is None:
@@ -239,4 +359,56 @@ def _result(
         warnings=warnings,
         blocking_errors=blocking_errors,
         summary_fields=summary_fields,
+    )
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _default_gate_args(scope: str, period: str) -> dict[str, str]:
+    if scope == "hk-financial-raw":
+        return {"api_name": "hk_fina_indicator", "ts_code": "00700.HK", "period": period}
+    return {"api_name": "us_fina_indicator", "ts_code": "NVDA.US", "period": period}
+
+
+def _bundle_readme(scope: str, root: Path, backup: Path, from_period: str, to_period: str, gate_args: dict[str, str]) -> str:
+    return (
+        "# Financial Disclosure Availability Bundle\n\n"
+        "This bundle is a guarded planning artifact. It does not execute probes, "
+        "does not fetch Tushare data, and does not write to the mirror or backup roots.\n\n"
+        f"- scope: `{scope}`\n"
+        f"- root: `{root}`\n"
+        f"- backup: `{backup}`\n"
+        f"- period range: `{from_period}` to `{to_period}`\n"
+        f"- gate sample: `{gate_args['api_name']} {gate_args['ts_code']} {gate_args['period']}`\n\n"
+        "Review `source_report.json`, `disclosure_plan.json`, `availability.json`, "
+        "and `gate.json` before any future manually-confirmed probe.\n"
+    )
+
+
+def _bundle_limitations() -> str:
+    return (
+        "# Limitations\n\n"
+        "- `raw_only` financial data is not feature-eligible.\n"
+        "- `availability_only` requires an accepted disclosure event match.\n"
+        "- `as_filed_verified` requires value-level reconciliation and is not produced by this bundle.\n"
+        "- HKEX remains manual-audit-only unless a stable documented metadata path is proven.\n"
+    )
+
+
+def _bundle_commands(scope: str, root: Path, from_period: str, to_period: str, output: Path) -> str:
+    return (
+        "#!/usr/bin/env bash\n"
+        "# USER_CONFIRMATION_REQUIRED\n"
+        "# This file contains echo-only guarded checklist entries. It does not execute probes or fetch data.\n"
+        f"echo 'USER_CONFIRMATION_REQUIRED review disclosure-source-report for {scope}'\n"
+        f"echo 'USER_CONFIRMATION_REQUIRED review disclosure-plan {from_period} {to_period}'\n"
+        f"echo 'USER_CONFIRMATION_REQUIRED review disclosure-availability for root {root}'\n"
+        f"echo 'USER_CONFIRMATION_REQUIRED review generated bundle at {output}'\n"
+        "echo 'Do not run financial full pull from this disclosure bundle.'\n"
     )

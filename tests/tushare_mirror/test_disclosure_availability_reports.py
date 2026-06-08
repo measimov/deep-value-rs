@@ -9,11 +9,13 @@ from pathlib import Path
 
 from tushare_mirror.disclosure_reports import (
     DisclosureAvailabilityReporter,
+    DisclosureBundleReporter,
     DisclosureGateReporter,
     DisclosurePlanReporter,
     DisclosureSourceReporter,
 )
 from tushare_mirror.financial_reports import FinancialReadinessReporter
+from tushare_mirror.mirror import CommandSafetyAnalyzer
 from tushare_mirror.pit import PITReadinessReporter
 
 
@@ -143,6 +145,76 @@ class DisclosureAvailabilityReportTests(unittest.TestCase):
         self.assertEqual(by_api["us_fina_indicator"]["disclosure_state"], "candidate")
         self.assertEqual(by_api["us_fina_indicator"]["pit_strength"], "raw_only")
         self.assertFalse(by_api["us_fina_indicator"]["feature_eligible"])
+
+    def test_disclosure_bundle_created_outside_roots_and_commands_are_guarded(self):
+        backup = Path(self.tmp.name) / "backup"
+        backup.mkdir()
+        output = Path(self.tmp.name) / "bundle"
+        result = DisclosureBundleReporter().report(
+            scope="us-financial-raw",
+            root=self.root,
+            backup=backup,
+            from_period="2024Q4",
+            to_period="2024Q4",
+            output=output,
+        ).to_dict()
+        self.assertEqual(result["report_version"], "disclosure-bundle/v1")
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(
+            sorted(path.name for path in output.iterdir()),
+            ["README.md", "availability.json", "commands.sh", "disclosure_plan.json", "gate.json", "limitations.md", "source_report.json"],
+        )
+        commands = (output / "commands.sh").read_text()
+        self.assertIn("USER_CONFIRMATION_REQUIRED", commands)
+        self.assertNotIn("TUSHARE_TOKEN", commands)
+        safety = CommandSafetyAnalyzer().analyze(file=output / "commands.sh")
+        self.assertEqual(safety.status, "passed", safety.to_dict())
+        self.assertFalse(any((self.root / name).exists() for name in ["raw", "lake", "_catalog"]))
+
+    def test_disclosure_bundle_refuses_unsafe_or_existing_outputs(self):
+        backup = Path(self.tmp.name) / "backup"
+        backup.mkdir()
+        existing = Path(self.tmp.name) / "existing"
+        existing.mkdir()
+        for output, expected in [
+            (self.root / "bundle", "output path is inside mirror root"),
+            (backup / "bundle", "output path is inside backup root"),
+            (existing, "output path already exists; rerun with --overwrite"),
+        ]:
+            with self.subTest(output=output):
+                result = DisclosureBundleReporter().report(
+                    scope="us-financial-raw",
+                    root=self.root,
+                    backup=backup,
+                    from_period="2024Q4",
+                    to_period="2024Q4",
+                    output=output,
+                ).to_dict()
+                self.assertEqual(result["status"], "blocked")
+                self.assertIn(expected, result["blocking_errors"])
+
+    def test_disclosure_bundle_cli_json_and_overwrite(self):
+        backup = Path(self.tmp.name) / "backup"
+        backup.mkdir()
+        output = Path(self.tmp.name) / "cli-bundle"
+        output.mkdir()
+        result = self.run_cli(
+            "disclosure-bundle",
+            "--scope", "us-financial-raw",
+            "--root", str(self.root),
+            "--backup", str(backup),
+            "--from-period", "2024Q4",
+            "--to-period", "2024Q4",
+            "--output", str(output),
+            "--overwrite",
+            "--json",
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["report_version"], "disclosure-bundle/v1")
+        self.assertIn("commands.sh", payload["files"])
+        self.assertTrue(payload["user_confirmation_required"])
+        self.assertTrue(payload["commands_guarded"])
 
 
 if __name__ == "__main__":
