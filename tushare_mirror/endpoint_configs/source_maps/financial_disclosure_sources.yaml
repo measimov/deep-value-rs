@@ -1,0 +1,79 @@
+source_inventory_version: financial-disclosure-sources/v1
+reviewed_at: "2026-06-09"
+notes:
+  - "Disclosure sources are inventory only. They do not enable financial backfill or feature usage."
+  - "SEC is the first automated metadata path. HKEX remains manual-audit-only until stable metadata is proven."
+sources:
+  - source_id: sec_edgar_submissions
+    market: us
+    source: SEC EDGAR submissions API
+    source_status: stable_public_json
+    automation_status: automated_metadata_allowed_bounded
+    supports_automated_metadata: true
+    supports_value_verification: false
+    base_url: "https://data.sec.gov/submissions/"
+    query_keys: [cik]
+    useful_fields: [accessionNumber, filingDate, reportDate, acceptanceDateTime, form]
+    default_user_agent_required: true
+    bounded_probe_max_requests: 3
+    limitations:
+      - "Provides filing metadata, not value-level reconciliation."
+      - "Ticker to CIK mapping must be explicit or locally supplied."
+      - "Fair-access behavior requires bounded request volume and a clear User-Agent."
+    safety_notes:
+      - "May support availability_only for US filings when matched to Tushare code, period, and report type."
+      - "Does not by itself prove Tushare values equal as-filed values."
+
+  - source_id: sec_companyfacts
+    market: us
+    source: SEC EDGAR companyfacts API
+    source_status: stable_public_json
+    automation_status: future_value_verification_candidate
+    supports_automated_metadata: true
+    supports_value_verification: true
+    base_url: "https://data.sec.gov/api/xbrl/companyfacts/"
+    query_keys: [cik]
+    useful_fields: [facts, form, filed, frame, val]
+    default_user_agent_required: true
+    bounded_probe_max_requests: 1
+    limitations:
+      - "Mapping long-format Tushare financial items to XBRL taxonomy facts is endpoint-specific and not implemented."
+      - "This goal may inventory it but must not mark as_filed_verified without value reconciliation."
+    safety_notes:
+      - "Potential future path for as_filed_verified status."
+
+  - source_id: hkexnews_advanced_search
+    market: hk
+    source: HKEXnews advanced search
+    source_status: tentative_manual_audit
+    automation_status: manual_audit_only_until_stable_metadata_proven
+    supports_automated_metadata: false
+    supports_value_verification: false
+    base_url: "https://www1.hkexnews.hk/search/titlesearch.xhtml"
+    query_keys: [stock_code, date_range, category]
+    useful_fields: [announcement_title, release_time, stock_code, headline_category]
+    default_user_agent_required: true
+    bounded_probe_max_requests: 1
+    limitations:
+      - "No stable documented JSON API is assumed."
+      - "Title parsing may not identify fiscal period reliably."
+      - "PDF download and bulk crawling are prohibited in this goal."
+    safety_notes:
+      - "HK financial endpoints remain raw_only unless reliable disclosure events are operator-provided or a stable metadata path is proven."
+
+  - source_id: future_disclosure_vendor
+    market: global
+    source: future external disclosure data vendor
+    source_status: future_vendor_placeholder
+    automation_status: disabled
+    supports_automated_metadata: false
+    supports_value_verification: false
+    base_url: null
+    query_keys: []
+    useful_fields: []
+    default_user_agent_required: false
+    bounded_probe_max_requests: 0
+    limitations:
+      - "Placeholder only; no vendor integration is implemented."
+    safety_notes:
+      - "Requires separate contract, schema, license, and tests before use."

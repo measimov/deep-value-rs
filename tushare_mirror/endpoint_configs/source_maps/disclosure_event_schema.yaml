@@ -1,0 +1,133 @@
+schema_version: financial-disclosure-event-schema/v1
+reviewed_at: "2026-06-09"
+durable_storage_enabled: false
+notes:
+  - "Schema describes disclosure events for PIT availability reporting only."
+  - "This goal does not create a durable disclosure store under mirror or backup roots."
+required_fields:
+  - event_id
+  - market
+  - source
+  - source_status
+  - source_doc_id
+  - source_url
+  - ticker
+  - ts_code
+  - external_id
+  - cik
+  - period
+  - end_date
+  - report_type
+  - form_type
+  - filing_date
+  - accepted_at
+  - disclosure_date
+  - announcement_title
+  - language
+  - match_status
+  - match_confidence
+  - pit_strength
+  - as_filed_value_verified
+  - limitations
+pit_strength_values:
+  - raw_only
+  - availability_only
+  - as_filed_verified
+match_status_values:
+  - exact
+  - near
+  - period_only
+  - candidate
+  - unmatched
+  - source_unavailable
+  - manual_review_required
+field_definitions:
+  event_id:
+    type: string
+    required: true
+    description: "Stable event identifier generated from source, issuer, period, form/report type, and document id."
+  market:
+    type: string
+    required: true
+    examples: [us, hk]
+  source:
+    type: string
+    required: true
+    examples: [sec_edgar_submissions, sec_companyfacts, hkexnews_advanced_search]
+  source_status:
+    type: string
+    required: true
+    examples: [stable_public_json, tentative_manual_audit, future_vendor_placeholder]
+  source_doc_id:
+    type: string
+    required: false
+    description: "SEC accession number, HKEX headline id, or vendor document id."
+  source_url:
+    type: string
+    required: false
+  ticker:
+    type: string
+    required: false
+  ts_code:
+    type: string
+    required: false
+  external_id:
+    type: string
+    required: false
+    description: "Market-specific issuer id when ts_code is insufficient."
+  cik:
+    type: string
+    required: false
+  period:
+    type: string
+    required: true
+    examples: ["20241231"]
+  end_date:
+    type: string
+    required: true
+    examples: ["20241231"]
+  report_type:
+    type: string
+    required: false
+    examples: [annual, quarterly, interim, Q4]
+  form_type:
+    type: string
+    required: false
+    examples: ["10-K", "10-Q", "20-F", "Annual Results Announcement"]
+  filing_date:
+    type: string
+    required: false
+    examples: ["20250226"]
+  accepted_at:
+    type: string
+    required: false
+    description: "Source timestamp when available."
+  disclosure_date:
+    type: string
+    required: false
+    description: "Earliest date the filing or announcement can be treated as public for PIT gating."
+  announcement_title:
+    type: string
+    required: false
+  language:
+    type: string
+    required: false
+  match_status:
+    type: string
+    required: true
+    examples: [exact, near, period_only, candidate, unmatched]
+  match_confidence:
+    type: float
+    required: true
+    range: [0.0, 1.0]
+  pit_strength:
+    type: string
+    required: true
+    examples: [raw_only, availability_only, as_filed_verified]
+  as_filed_value_verified:
+    type: boolean
+    required: true
+    description: "True only when Tushare values have been reconciled to external filing values."
+  limitations:
+    type: list
+    required: true
