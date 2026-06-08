@@ -171,3 +171,36 @@ class HKUSLowRiskScopeTests(unittest.TestCase):
             *MirrorScopeReporter().report(scope="us-low-risk").executable_now,
         }
         self.assertFalse(financial & low_risk_executable)
+
+    def test_financial_raw_baselines_are_frozen_before_disclosure_calendar_work(self):
+        hk = MirrorScopeReporter().report(scope="hk-financial-raw").to_dict()
+        us = MirrorScopeReporter().report(scope="us-financial-raw").to_dict()
+
+        self.assertEqual(
+            hk["raw_executable_now"],
+            ["hk_income", "hk_balancesheet", "hk_cashflow", "hk_fina_indicator"],
+        )
+        self.assertEqual(hk["pit_safe_now"], [])
+        self.assertEqual(hk["plan_only"], [])
+        self.assertEqual(
+            hk["pit_usable_after_status"],
+            {
+                "hk_income": "blocked_without_disclosure_date",
+                "hk_balancesheet": "blocked_without_disclosure_date",
+                "hk_cashflow": "blocked_without_disclosure_date",
+                "hk_fina_indicator": "blocked_without_disclosure_date",
+            },
+        )
+
+        self.assertEqual(us["raw_executable_now"], ["us_fina_indicator"])
+        self.assertEqual(us["pit_safe_now"], ["us_fina_indicator"])
+        self.assertEqual(us["plan_only"], ["us_income", "us_balancesheet", "us_cashflow"])
+        self.assertEqual(
+            us["pit_usable_after_status"],
+            {
+                "us_income": "probe_empty_contract_pending",
+                "us_balancesheet": "probe_empty_contract_pending",
+                "us_cashflow": "probe_empty_contract_pending",
+                "us_fina_indicator": "complete",
+            },
+        )

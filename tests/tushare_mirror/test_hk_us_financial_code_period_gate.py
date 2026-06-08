@@ -119,6 +119,25 @@ class HKUSFinancialCodePeriodGateTests(unittest.TestCase):
         self.assertTrue(all(item["execution_allowed"] for item in payload["items"]))
         self.assertIn("financial_raw_not_pit_safe:hk_income", payload["warnings"])
 
+    def test_raw_financial_planning_does_not_require_disclosure_match(self):
+        self.seed_hk_basic()
+        plan = CodePeriodPlanner(self.root, self.catalog).plan(
+            api_name="hk_cashflow",
+            scope="hk-financial-raw",
+            universe="hk_listed",
+            limit_codes=1,
+            periods="20241231",
+        )
+        payload = plan.to_dict()
+        self.assertFalse(plan.blocked)
+        self.assertTrue(payload["raw_execution_allowed"])
+        self.assertFalse(payload["pit_safe_execution_allowed"])
+        self.assertEqual(payload["execution_gate_status"], "ready_for_guarded_command")
+        self.assertEqual(payload["blocking_errors"], [])
+        self.assertIn("financial_raw_not_pit_safe:hk_cashflow", payload["warnings"])
+        self.assertTrue(payload["items"][0]["execution_allowed"])
+        self.assertIsNone(payload["items"][0]["blocked_reason"])
+
     def test_code_period_without_financial_scope_remains_plan_only(self):
         self.seed_hk_basic()
         plan = CodePeriodPlanner(self.root, self.catalog).plan(
