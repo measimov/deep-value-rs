@@ -81,6 +81,30 @@ class FakeSecHttp:
         }
 
 
+class FakeCrossCheckTushareClient:
+    def __init__(self, notice_date: str | None, msg: str | None = None):
+        self.notice_date = notice_date
+        self.msg = msg
+        self.calls: list[tuple[str, dict, list[str]]] = []
+
+    def request(self, api_name, params, fields=None):
+        fields_list = list(fields or [])
+        self.calls.append((api_name, dict(params), fields_list))
+        if self.notice_date is None:
+            return {"code": 0, "msg": self.msg, "data": {"fields": fields_list, "items": []}}
+        row = []
+        for field in fields_list:
+            if field == "ts_code":
+                row.append(params.get("ts_code"))
+            elif field in {"end_date", "start_date", "std_report_date", "financial_date"}:
+                row.append(params.get("period"))
+            elif field == "notice_date":
+                row.append(self.notice_date)
+            else:
+                row.append("x")
+        return {"code": 0, "msg": self.msg, "data": {"fields": fields_list, "items": [row]}}
+
+
 class HKUSLowRiskProbeHarnessTests(unittest.TestCase):
     def run_script(self, *args, env=None):
         return subprocess.run(
@@ -98,6 +122,7 @@ class HKUSLowRiskProbeHarnessTests(unittest.TestCase):
         self.assertIn("--hk-us-low-risk-probe", result.stdout)
         self.assertIn("--hk-us-financial-pit-probe", result.stdout)
         self.assertIn("--sec-disclosure-probe", result.stdout)
+        self.assertIn("--sec-tushare-disclosure-cross-check", result.stdout)
         self.assertIn("--max-requests-per-endpoint", result.stdout)
         self.assertIn("--max-requests", result.stdout)
 
@@ -247,6 +272,93 @@ class HKUSLowRiskProbeHarnessTests(unittest.TestCase):
                     period="20241231",
                     max_requests=4,
                     http_get=FakeSecHttp(),
+                )
+
+    def test_sec_tushare_cross_check_token_missing_is_structured(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            output = Path(tmp) / "cross-check.json"
+            with redirect_stdout(StringIO()):
+                code = tushare_real_smoke.run_sec_tushare_disclosure_cross_check(
+                    output,
+                    api_name="us_fina_indicator",
+                    ts_code="NVDA.US",
+                    ticker="NVDA",
+                    cik="0001045810",
+                    period="20241231",
+                    max_sec_requests=3,
+                    max_tushare_requests=1,
+                    token="",
+                    sec_http_get=FakeSecHttp(),
+                )
+            payload = json.loads(output.read_text())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["report_version"], "sec-tushare-disclosure-cross-check/v1")
+        self.assertEqual(payload["sec_status"], "passed")
+        self.assertEqual(payload["tushare_status"], "blocked_token_missing")
+        self.assertEqual(payload["tushare_request_count"], 0)
+        self.assertEqual(payload["overall_status"], "warning")
+        self.assertEqual(payload["sec_disclosure_date"], "20250226")
+
+    def test_sec_tushare_cross_check_classifies_exact_near_period_and_unmatched(self):
+        cases = [
+            ("20250226", "exact", 0, "availability_only"),
+            ("20250228", "near", 2, "availability_only"),
+            ("20250320", "period_only", 22, "raw_only"),
+            (None, "unmatched", None, "raw_only"),
+        ]
+        for notice_date, match_status, delta, strength in cases:
+            with self.subTest(notice_date=notice_date):
+                client = FakeCrossCheckTushareClient(notice_date)
+                with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+                    output = Path(tmp) / "cross-check.json"
+                    with redirect_stdout(StringIO()):
+                        code = tushare_real_smoke.run_sec_tushare_disclosure_cross_check(
+                            output,
+                            api_name="us_fina_indicator",
+                            ts_code="NVDA.US",
+                            ticker="NVDA",
+                            cik="0001045810",
+                            period="20241231",
+                            max_sec_requests=3,
+                            max_tushare_requests=1,
+                            token="secret-token-1234567890",
+                            sec_http_get=FakeSecHttp(),
+                            tushare_client=client,
+                        )
+                    payload = json.loads(output.read_text())
+                    raw = output.read_text()
+                self.assertEqual(code, 0)
+                self.assertEqual(payload["match_status"], match_status)
+                self.assertEqual(payload["date_delta_days"], delta)
+                self.assertEqual(payload["pit_strength_candidate"], strength)
+                self.assertEqual(client.calls[0][1]["ts_code"], "NVDA")
+                self.assertNotIn("secret-token-1234567890", raw)
+
+    def test_sec_tushare_cross_check_limits_and_output_path_are_enforced(self):
+        output = Path(__file__).resolve().parents[2] / "cross-check.json"
+        kwargs = {
+            "api_name": "us_fina_indicator",
+            "ts_code": "NVDA.US",
+            "ticker": "NVDA",
+            "cik": "0001045810",
+            "period": "20241231",
+            "max_sec_requests": 3,
+            "max_tushare_requests": 1,
+            "token": "",
+            "sec_http_get": FakeSecHttp(),
+        }
+        with self.assertRaisesRegex(ValueError, "under /tmp"):
+            tushare_real_smoke.run_sec_tushare_disclosure_cross_check(output, **kwargs)
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            with self.assertRaisesRegex(ValueError, "<= 3"):
+                tushare_real_smoke.run_sec_tushare_disclosure_cross_check(
+                    Path(tmp) / "cross-check.json",
+                    **{**kwargs, "max_sec_requests": 4},
+                )
+            with self.assertRaisesRegex(ValueError, "<= 1"):
+                tushare_real_smoke.run_sec_tushare_disclosure_cross_check(
+                    Path(tmp) / "cross-check.json",
+                    **{**kwargs, "max_tushare_requests": 2},
                 )
 
     def test_no_default_real_request_is_selected(self):

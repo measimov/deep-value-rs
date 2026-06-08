@@ -352,6 +352,49 @@ def _sec_disclosure_event(ticker: str, cik: str, period: str, filing: dict[str, 
     return event.to_dict()
 
 
+def _fetch_sec_disclosure_match(
+    *,
+    ticker: str,
+    cik: str,
+    period: str,
+    max_requests: int,
+    http_get: Any | None = None,
+) -> dict[str, Any]:
+    if max_requests < 1:
+        raise ValueError("--max-sec-requests must be positive")
+    if max_requests > 3:
+        raise ValueError("--max-sec-requests must be <= 3")
+    normalized_cik = _normalize_cik(cik)
+    normalized_period = _normalize_period(period)
+    report_date = _sec_period_to_report_date(normalized_period)
+    url = f"{SEC_SUBMISSIONS_BASE_URL}/CIK{normalized_cik}.json"
+    headers = {"User-Agent": _sec_user_agent(), "Accept-Encoding": "gzip, deflate", "Host": "data.sec.gov"}
+    getter = http_get or _sec_json_get
+    try:
+        payload = getter(url, headers)
+    except Exception as exc:
+        return {
+            "sec_status": "blocked",
+            "sec_request_count": 0,
+            "sec_errors": [f"sec_request_failed:{exc}"],
+            "matched_filings": [],
+            "disclosure_events": [],
+            "sec_disclosure_date": None,
+        }
+    filings = _recent_sec_filings(payload)
+    matched = [item for item in filings if item.get("report_date") == report_date and item.get("form") in {"10-K", "10-Q", "20-F"}]
+    events = [_sec_disclosure_event(ticker, normalized_cik, normalized_period, item) for item in matched]
+    disclosure_date = events[0]["disclosure_date"] if events else None
+    return {
+        "sec_status": "passed" if matched else "warning",
+        "sec_request_count": 1,
+        "sec_errors": [] if matched else ["no matching 10-K/10-Q/20-F filing found for requested period"],
+        "matched_filings": matched,
+        "disclosure_events": events,
+        "sec_disclosure_date": disclosure_date,
+    }
+
+
 def _report_type_from_form(form: str | None) -> str | None:
     if form == "10-K":
         return "annual"
@@ -693,6 +736,177 @@ def run_hk_us_financial_pit_probe(
     return 0 if report["overall_status"] in {"passed", "warning"} else 1
 
 
+def _normalize_us_tushare_code(value: str) -> str:
+    text = str(value)
+    return text[:-3] if text.upper().endswith(".US") else text
+
+
+def _parse_yyyymmdd(value: str | None) -> dt.date | None:
+    if not value:
+        return None
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    if len(digits) != 8:
+        return None
+    try:
+        return dt.date(int(digits[:4]), int(digits[4:6]), int(digits[6:]))
+    except ValueError:
+        return None
+
+
+def _classify_disclosure_cross_check(sec_date: str | None, tushare_date: str | None) -> dict[str, Any]:
+    sec_parsed = _parse_yyyymmdd(sec_date)
+    tushare_parsed = _parse_yyyymmdd(tushare_date)
+    if not sec_parsed or not tushare_parsed:
+        return {
+            "match_status": "unmatched",
+            "match_confidence": 0.0,
+            "date_delta_days": None,
+            "pit_strength_candidate": "raw_only",
+        }
+    delta = abs((tushare_parsed - sec_parsed).days)
+    if delta == 0:
+        return {
+            "match_status": "exact",
+            "match_confidence": 1.0,
+            "date_delta_days": delta,
+            "pit_strength_candidate": "availability_only",
+        }
+    if delta <= 7:
+        return {
+            "match_status": "near",
+            "match_confidence": 0.8,
+            "date_delta_days": delta,
+            "pit_strength_candidate": "availability_only",
+        }
+    return {
+        "match_status": "period_only",
+        "match_confidence": 0.5,
+        "date_delta_days": delta,
+        "pit_strength_candidate": "raw_only",
+    }
+
+
+def _first_field_value(response: dict[str, Any], field_name: str) -> Any | None:
+    data = response.get("data") or {}
+    fields = [str(item) for item in (data.get("fields") or [])]
+    items = list(data.get("items") or [])
+    if field_name not in fields or not items:
+        return None
+    index = fields.index(field_name)
+    first = list(items[0])
+    if index >= len(first):
+        return None
+    return first[index]
+
+
+def run_sec_tushare_disclosure_cross_check(
+    output: Path,
+    *,
+    api_name: str,
+    ts_code: str,
+    ticker: str,
+    cik: str,
+    period: str,
+    max_sec_requests: int,
+    max_tushare_requests: int,
+    token: str | None = None,
+    sec_http_get: Any | None = None,
+    tushare_client: Any | None = None,
+) -> int:
+    if api_name != "us_fina_indicator":
+        raise ValueError("--api-name currently supports only us_fina_indicator")
+    if max_tushare_requests < 1:
+        raise ValueError("--max-tushare-requests must be positive")
+    if max_tushare_requests > 1:
+        raise ValueError("--max-tushare-requests must be <= 1")
+    output = _ensure_tmp_output_path(output)
+    normalized_period = _normalize_period(period)
+    sec = _fetch_sec_disclosure_match(ticker=ticker, cik=cik, period=normalized_period, max_requests=max_sec_requests, http_get=sec_http_get)
+    load_dotenv()
+    token = token if token is not None else os.environ.get("TUSHARE_TOKEN")
+    tushare_status = "blocked_token_missing"
+    tushare_notice_date: str | None = None
+    tushare_errors: list[str] = []
+    tushare_request_count = 0
+    if token:
+        client = tushare_client if tushare_client is not None else TushareClient(token)
+        fields = HK_US_FINANCIAL_PROBE_FIELDS["us_fina_indicator"]
+        params = {"ts_code": _normalize_us_tushare_code(ts_code), "period": normalized_period}
+        try:
+            response = client.request(api_name, params, fields)
+            tushare_request_count = 1
+            response = _redact_for_probe(response, token)
+            status, message = classify_probe_response(response)
+            if status in ACCESSIBLE:
+                value = _first_field_value(response, "notice_date")
+                tushare_notice_date = str(value) if value is not None else None
+                tushare_status = "passed" if tushare_notice_date else "notice_date_missing"
+            else:
+                tushare_status = status
+            if message:
+                tushare_errors.append(message)
+        except Exception as exc:
+            tushare_status = "blocked"
+            tushare_errors.append(_redact_for_probe(str(exc), token))
+
+    match = _classify_disclosure_cross_check(sec.get("sec_disclosure_date"), tushare_notice_date)
+    limitations = [
+        "SEC filing date and Tushare notice_date are compared; values are not reconciled.",
+        "This probe does not authorize financial full pull or feature usage.",
+    ]
+    warnings: list[str] = []
+    blocking_errors: list[str] = []
+    if sec["sec_status"] == "blocked":
+        blocking_errors.extend(sec["sec_errors"])
+    elif sec["sec_status"] == "warning":
+        warnings.extend(sec["sec_errors"])
+    if tushare_status == "blocked_token_missing":
+        warnings.append("TUSHARE_TOKEN is missing; Tushare side was skipped")
+    elif tushare_status != "passed":
+        warnings.extend(tushare_errors or [f"tushare_status:{tushare_status}"])
+    overall_status = "blocked" if blocking_errors else ("passed" if match["match_status"] in {"exact", "near"} and tushare_status == "passed" else "warning")
+    report = {
+        "report_version": "sec-tushare-disclosure-cross-check/v1",
+        "generated_at": dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "output": str(output),
+        "api_name": api_name,
+        "ts_code": ts_code,
+        "tushare_request_ts_code": _normalize_us_tushare_code(ts_code),
+        "ticker": ticker,
+        "cik": _normalize_cik(cik),
+        "period": normalized_period,
+        "sec_status": sec["sec_status"],
+        "tushare_status": tushare_status,
+        "sec_request_count": sec["sec_request_count"],
+        "tushare_request_count": tushare_request_count,
+        "max_sec_requests": max_sec_requests,
+        "max_tushare_requests": max_tushare_requests,
+        "sec_disclosure_date": sec.get("sec_disclosure_date"),
+        "tushare_notice_date": tushare_notice_date,
+        "date_delta_days": match["date_delta_days"],
+        "match_status": match["match_status"],
+        "match_confidence": match["match_confidence"],
+        "pit_strength_candidate": match["pit_strength_candidate"],
+        "matched_filings": sec["matched_filings"],
+        "disclosure_events": sec["disclosure_events"],
+        "limitations": limitations,
+        "warnings": warnings,
+        "blocking_errors": blocking_errors,
+        "overall_status": overall_status,
+        "real_requests_sent": bool(sec["sec_request_count"] or tushare_request_count),
+        "token_plaintext_found": False,
+    }
+    encoded = json.dumps(report, ensure_ascii=False)
+    report["token_plaintext_found"] = bool(token and token in encoded)
+    if report["token_plaintext_found"]:
+        report["overall_status"] = "blocked"
+        report["blocking_errors"].append("cross-check report would contain token plaintext")
+        report = _redact_for_probe(report, token)
+    _write_probe_report(output, report)
+    print(json.dumps({"output": str(output), "overall_status": report["overall_status"], "real_requests_sent": report["real_requests_sent"]}, sort_keys=True))
+    return 0 if report["overall_status"] in {"passed", "warning"} else 1
+
+
 def run_smoke(root: Path, endpoints: list[str], reset_root: bool) -> int:
     load_dotenv()
     if not os.environ.get("TUSHARE_TOKEN"):
@@ -811,11 +1025,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hk-us-low-risk-probe", action="store_true", help="Run bounded HK/US low-risk interface probes and write redacted diagnostics under /tmp.")
     parser.add_argument("--hk-us-financial-pit-probe", action="store_true", help="Run bounded HK/US financial PIT contract probes and write redacted diagnostics under /tmp.")
     parser.add_argument("--sec-disclosure-probe", action="store_true", help="Run a bounded SEC EDGAR disclosure metadata probe and write redacted diagnostics under /tmp.")
+    parser.add_argument("--sec-tushare-disclosure-cross-check", action="store_true", help="Run bounded SEC-to-Tushare disclosure date cross-check diagnostics under /tmp.")
+    parser.add_argument("--api-name", help="Tushare API name for SEC-to-Tushare disclosure cross-check.")
     parser.add_argument("--ticker", help="Ticker for SEC disclosure probe.")
     parser.add_argument("--cik", help="CIK for SEC disclosure probe.")
     parser.add_argument("--period", help="Financial period for disclosure probe, formatted YYYYMMDD.")
+    parser.add_argument("--ts-code", help="Tushare ts_code for SEC-to-Tushare disclosure cross-check.")
     parser.add_argument("--output", help="Probe output JSON path. Required for HK/US probes and must be under /tmp.")
     parser.add_argument("--max-requests", type=int, default=3, help="SEC disclosure probe request cap; maximum 3.")
+    parser.add_argument("--max-sec-requests", type=int, default=3, help="SEC side request cap for cross-check probes; maximum 3.")
+    parser.add_argument("--max-tushare-requests", type=int, default=1, help="Tushare side request cap for cross-check probes; maximum 1.")
     parser.add_argument("--max-requests-per-endpoint", type=int, default=2, help="HK/US probe request cap per endpoint; maximum 2.")
     parser.add_argument("--print-commands", action="store_true", help="Print selected smoke commands without sending real requests.")
     parser.add_argument("--calendar-backfill", action="store_true", help="Run the Phase 2.4 calendar-aware daily backfill smoke.")
@@ -831,6 +1050,25 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         try:
             return run_hk_us_low_risk_probe(Path(args.output), args.max_requests_per_endpoint)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+    if args.sec_tushare_disclosure_cross_check:
+        missing = [name for name in ["output", "api_name", "ts_code", "ticker", "cik", "period"] if not getattr(args, name)]
+        if missing:
+            print(f"--{missing[0].replace('_', '-')} is required for --sec-tushare-disclosure-cross-check", file=sys.stderr)
+            return 2
+        try:
+            return run_sec_tushare_disclosure_cross_check(
+                Path(args.output),
+                api_name=args.api_name,
+                ts_code=args.ts_code,
+                ticker=args.ticker,
+                cik=args.cik,
+                period=args.period,
+                max_sec_requests=args.max_sec_requests,
+                max_tushare_requests=args.max_tushare_requests,
+            )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
@@ -874,12 +1112,12 @@ def main(argv: list[str] | None = None) -> int:
     endpoints = [api for api in endpoints if not (api in seen or seen.add(api))]
     if args.print_commands:
         if not endpoints:
-            print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --hk-us-financial-pit-probe, --sec-disclosure-probe, or --endpoint.", file=sys.stderr)
+            print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --hk-us-financial-pit-probe, --sec-disclosure-probe, --sec-tushare-disclosure-cross-check, or --endpoint.", file=sys.stderr)
             return 2
         print_command_preview(Path(args.root), endpoints)
         return 0
     if not endpoints:
-        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --hk-us-financial-pit-probe, --sec-disclosure-probe, --calendar-backfill, or --endpoint.", file=sys.stderr)
+        print("No endpoints selected. Use --all-phase-1, --phase-2-low-volume, --a-share-low-risk-smoke, --hk-us-low-risk-probe, --hk-us-financial-pit-probe, --sec-disclosure-probe, --sec-tushare-disclosure-cross-check, --calendar-backfill, or --endpoint.", file=sys.stderr)
         return 2
     return run_smoke(Path(args.root), endpoints, args.reset_root)
 
