@@ -10,6 +10,7 @@ from tushare_mirror.disclosure import (
     DisclosureEvent,
     classify_disclosure_match,
     disclosure_sources,
+    evaluate_pit_feature_gate,
     hkex_disclosure_automation_gate,
     load_disclosure_event_schema,
     load_financial_disclosure_sources,
@@ -219,6 +220,28 @@ class FinancialDisclosureSchemaTests(unittest.TestCase):
         ).to_dict()
         self.assertEqual(availability["pit_strength_candidate"], "availability_only")
         self.assertEqual(verified["pit_strength_candidate"], "as_filed_verified")
+
+    def test_pit_feature_gate_blocks_raw_and_requires_as_filed_when_requested(self):
+        raw = evaluate_pit_feature_gate("raw_only").to_dict()
+        availability = evaluate_pit_feature_gate("availability_only").to_dict()
+        strict = evaluate_pit_feature_gate("availability_only", require_as_filed=True).to_dict()
+        verified = evaluate_pit_feature_gate("as_filed_verified", require_as_filed=True).to_dict()
+
+        self.assertEqual(raw["status"], "blocked")
+        self.assertFalse(raw["feature_eligible"])
+        self.assertIn("raw_only_not_feature_eligible", raw["blocking_errors"])
+
+        self.assertEqual(availability["status"], "warning")
+        self.assertTrue(availability["feature_eligible"])
+        self.assertFalse(availability["strong_feature_eligible"])
+        self.assertIn("not as-filed verified", availability["warnings"][0])
+
+        self.assertEqual(strict["status"], "blocked")
+        self.assertFalse(strict["feature_eligible"])
+        self.assertIn("as_filed_verified_required", strict["blocking_errors"])
+
+        self.assertEqual(verified["status"], "passed")
+        self.assertTrue(verified["strong_feature_eligible"])
 
     def test_title_only_matching_policy_remains_candidate(self):
         result = classify_disclosure_match(

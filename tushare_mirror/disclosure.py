@@ -127,6 +127,20 @@ class DisclosureMatchResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class PITFeatureGateResult:
+    status: str
+    pit_strength: str
+    feature_eligible: bool
+    strong_feature_eligible: bool
+    require_as_filed: bool
+    warnings: list[str]
+    blocking_errors: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def validate_pit_strength(value: str) -> str:
     if value not in PIT_STRENGTH_VALUES:
         raise ValueError(f"unsupported pit_strength: {value}")
@@ -358,6 +372,54 @@ def classify_disclosure_match(
         pit_strength_candidate="raw_only",
         feature_eligible=False,
         date_delta_days=date_delta,
+        warnings=warnings,
+        blocking_errors=[],
+    )
+
+
+def evaluate_pit_feature_gate(pit_strength: str, *, require_as_filed: bool = False) -> PITFeatureGateResult:
+    validate_pit_strength(pit_strength)
+    warnings: list[str] = []
+    blocking_errors: list[str] = []
+    if pit_strength == "raw_only":
+        blocking_errors.append("raw_only_not_feature_eligible")
+        return PITFeatureGateResult(
+            status="blocked",
+            pit_strength=pit_strength,
+            feature_eligible=False,
+            strong_feature_eligible=False,
+            require_as_filed=require_as_filed,
+            warnings=warnings,
+            blocking_errors=blocking_errors,
+        )
+    if pit_strength == "availability_only":
+        warnings.append("availability_only gates by disclosure date but values are not as-filed verified")
+        if require_as_filed:
+            blocking_errors.append("as_filed_verified_required")
+            return PITFeatureGateResult(
+                status="blocked",
+                pit_strength=pit_strength,
+                feature_eligible=False,
+                strong_feature_eligible=False,
+                require_as_filed=True,
+                warnings=warnings,
+                blocking_errors=blocking_errors,
+            )
+        return PITFeatureGateResult(
+            status="warning",
+            pit_strength=pit_strength,
+            feature_eligible=True,
+            strong_feature_eligible=False,
+            require_as_filed=False,
+            warnings=warnings,
+            blocking_errors=[],
+        )
+    return PITFeatureGateResult(
+        status="passed",
+        pit_strength=pit_strength,
+        feature_eligible=True,
+        strong_feature_eligible=True,
+        require_as_filed=require_as_filed,
         warnings=warnings,
         blocking_errors=[],
     )

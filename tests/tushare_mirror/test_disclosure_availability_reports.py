@@ -80,6 +80,8 @@ class DisclosureAvailabilityReportTests(unittest.TestCase):
         self.assertEqual(gate["candidate_count"], 1)
         self.assertEqual(gate["feature_eligible_count"], 0)
         self.assertEqual(gate["items"][0]["state"], "candidate")
+        self.assertEqual(gate["items"][0]["feature_gate_status"], "blocked")
+        self.assertIn("raw_only_not_feature_eligible", gate["items"][0]["feature_gate_blocking_errors"])
 
     def test_disclosure_report_clis_are_json_stable_and_read_only(self):
         before = sorted(path.name for path in self.root.iterdir())

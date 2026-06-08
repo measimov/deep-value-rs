@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .disclosure import disclosure_sources
+from .disclosure import disclosure_sources, evaluate_pit_feature_gate
 from .periods import PeriodRangePlanner
 from .source_metadata import hk_us_low_risk_source_endpoints
 
@@ -145,6 +145,9 @@ class DisclosureGateReporter:
         else:
             item = _endpoint_state(endpoint)
             item.update({"ts_code": ts_code, "period": period, "feature_eligible": False})
+            feature_gate = evaluate_pit_feature_gate(item["pit_strength"])
+            item["feature_gate_status"] = feature_gate.status
+            item["feature_gate_blocking_errors"] = feature_gate.blocking_errors
             if item["state"] == "candidate":
                 warnings.append("candidate disclosure state is not feature-eligible without an exact or approved near match")
             items = [item]
