@@ -1311,10 +1311,18 @@ class MirrorAutoSyncLock:
 class MirrorActiveWriterDetector:
     PROCESS_PATTERNS = ("mirror-auto-sync", "mirror-run")
 
-    def __init__(self, *, process_entries: list[dict[str, Any]] | None = None, now=None, recent_seconds: int = 300):
+    def __init__(
+        self,
+        *,
+        process_entries: list[dict[str, Any]] | None = None,
+        now=None,
+        recent_seconds: int = 300,
+        current_pid: int | None = None,
+    ):
         self.process_entries = process_entries
         self.now = now or time.time
         self.recent_seconds = recent_seconds
+        self.current_pid = int(current_pid if current_pid is not None else os.getpid())
 
     def report(self, *, root: Path | str) -> dict[str, Any]:
         mirror_root = _resolve_path(Path(root))
@@ -1334,6 +1342,9 @@ class MirrorActiveWriterDetector:
         root_text = str(root)
         matches: list[dict[str, Any]] = []
         for entry in self._iter_process_entries():
+            pid = entry.get("pid")
+            if isinstance(pid, int) and pid == self.current_pid:
+                continue
             cmdline = str(entry.get("cmdline") or "")
             if "--execute" not in cmdline:
                 continue
@@ -1373,7 +1384,6 @@ class MirrorActiveWriterDetector:
         candidates: list[Path] = [
             catalog / "catalog.sqlite",
             catalog / "catalog.sqlite-wal",
-            catalog / "catalog.sqlite-shm",
         ]
         for base in [root / "raw", root / "lake"]:
             if base.exists():
@@ -6364,7 +6374,7 @@ class MirrorAutoSyncReporter:
         calendar_dependency_status = self._calendar_dependency_status(scope)
         backup_status = "exists" if backup_text and backup_root.exists() else "missing"
         restore_check_status = "not_checked"
-        schema_status = self._schema_status(mirror_root) if root_text and mirror_root.exists() else "missing_root"
+        schema_status = self._schema_status(mirror_root, scope=scope) if root_text and mirror_root.exists() else "missing_root"
         lock_status = {
             "required_for_execute": bool(execute),
             "status": "not_required_dry_run" if not execute else "not_checked",
@@ -6603,18 +6613,43 @@ class MirrorAutoSyncReporter:
             errors.append("TUSHARE_TOKEN is not available")
         if state_path_status != "safe":
             errors.append("state path is not safe for execute")
-        if scope in HK_US_SCOPE_MARKETS and schema_status != "clear":
+        if scope in HK_US_SCOPE_MARKETS and schema_status != "clear" and not schema_status.startswith("scope_clear_"):
             errors.append(f"schema status blocks execute: {schema_status}")
         if set(executable_endpoints) & set(excluded_endpoints):
             errors.append("disabled or plan-only endpoints appear in executable set")
         return errors
 
-    def _schema_status(self, root: Path) -> str:
+    def _schema_status(self, root: Path, *, scope: str | None = None) -> str:
         catalog = CatalogStore(root, read_only=True)
         if not catalog.db_path.exists():
             return "missing_catalog"
         try:
             with catalog.connect() as conn:
+                scope_apis = set(mirror_scope_endpoints(scope)) if scope in HK_US_SCOPE_MARKETS else set()
+                if scope_apis:
+                    placeholders = ",".join("?" for _ in scope_apis)
+                    ordered_apis = sorted(scope_apis)
+                    quarantine_count = int(
+                        conn.execute(
+                            f"select count(*) from quarantine_files where api_name in ({placeholders})",
+                            ordered_apis,
+                        ).fetchone()[0]
+                    )
+                    incompatible_count = int(
+                        conn.execute(
+                            f"select count(*) from schema_changes where change_type like '%incompatible%' and api_name in ({placeholders})",
+                            ordered_apis,
+                        ).fetchone()[0]
+                    )
+                    global_quarantine_count = int(conn.execute("select count(*) from quarantine_files").fetchone()[0])
+                    global_incompatible_count = int(conn.execute("select count(*) from schema_changes where change_type like '%incompatible%'").fetchone()[0])
+                    if quarantine_count:
+                        return "scope_quarantine_present"
+                    if incompatible_count:
+                        return "scope_incompatible_schema_present"
+                    if global_quarantine_count or global_incompatible_count:
+                        return "scope_clear_unrelated_schema_issues_present"
+                    return "clear"
                 quarantine_count = int(conn.execute("select count(*) from quarantine_files").fetchone()[0])
                 incompatible_count = int(conn.execute("select count(*) from schema_changes where change_type like '%incompatible%'").fetchone()[0])
         except Exception as exc:

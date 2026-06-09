@@ -872,11 +872,75 @@ class HKUSAutoSyncGuardrailTests(unittest.TestCase):
         self.assertTrue(status["active_writer_detected"])
         self.assertEqual(status["process_matches"][0]["pid"], 778009)
 
+    def test_active_writer_detection_ignores_current_process(self):
+        detector = MirrorActiveWriterDetector(
+            process_entries=[
+                {
+                    "pid": 778009,
+                    "cmdline": (
+                        f"python3 -m tushare_mirror mirror-auto-sync --root {self.root} "
+                        "--backup /tmp/backup --scope us-low-risk --execute"
+                    ),
+                }
+            ],
+            current_pid=778009,
+            now=lambda: self.catalog.db_path.stat().st_mtime + 999999,
+        )
+        status = detector.report(root=self.root)
+        self.assertEqual(status["status"], "clear")
+        self.assertFalse(status["active_writer_detected"])
+        self.assertEqual(status["process_matches"], [])
+
     def test_recent_catalog_write_is_reported_as_active_writer_signal(self):
         detector = MirrorActiveWriterDetector(process_entries=[], now=lambda: self.catalog.db_path.stat().st_mtime + 1)
         status = detector.report(root=self.root)
         self.assertEqual(status["status"], "active_writer_possible")
         self.assertTrue(any(signal["path"].endswith("catalog.sqlite") for signal in status["recent_file_signals"]))
+
+    def test_sqlite_shared_memory_file_alone_is_not_active_writer_signal(self):
+        now = self.catalog.db_path.stat().st_mtime + 999999
+        shm = self.catalog.db_path.with_name("catalog.sqlite-shm")
+        shm.write_text("", encoding="utf-8")
+        os.utime(shm, (now - 1, now - 1))
+        detector = MirrorActiveWriterDetector(process_entries=[], now=lambda: now)
+        status = detector.report(root=self.root)
+        self.assertEqual(status["status"], "clear")
+        self.assertEqual(status["recent_file_signals"], [])
+
+    def test_hk_us_schema_gate_ignores_unrelated_a_share_quarantine(self):
+        run_id = self.catalog.create_run("fetch")
+        self.catalog.record_quarantine(run_id, "daily:20250102", "daily", "schema_incompatible", "_quarantine/daily", None, None)
+        self.catalog.record_schema_change("weekly", None, "schema_weekly_new", "incompatible_type_change", {}, approved=False)
+        reporter = MirrorAutoSyncReporter()
+        schema_status = reporter._schema_status(self.root, scope="us-low-risk")
+        self.assertEqual(schema_status, "scope_clear_unrelated_schema_issues_present")
+        errors = reporter._execute_gate_errors(
+            scope="us-low-risk",
+            confirm_hk_us_auto_sync=True,
+            token_available=True,
+            state_path_status="safe",
+            schema_status=schema_status,
+            executable_endpoints=["us_basic", "us_tradecal", "us_daily", "us_daily_adj", "us_adjfactor"],
+            excluded_endpoints=["us_income"],
+        )
+        self.assertFalse(any("schema status blocks execute" in error for error in errors))
+
+    def test_hk_us_schema_gate_blocks_scope_quarantine(self):
+        run_id = self.catalog.create_run("fetch")
+        self.catalog.record_quarantine(run_id, "us_daily:20250102", "us_daily", "schema_incompatible", "_quarantine/us_daily", None, None)
+        reporter = MirrorAutoSyncReporter()
+        schema_status = reporter._schema_status(self.root, scope="us-low-risk")
+        self.assertEqual(schema_status, "scope_quarantine_present")
+        errors = reporter._execute_gate_errors(
+            scope="us-low-risk",
+            confirm_hk_us_auto_sync=True,
+            token_available=True,
+            state_path_status="safe",
+            schema_status=schema_status,
+            executable_endpoints=["us_basic", "us_tradecal", "us_daily", "us_daily_adj", "us_adjfactor"],
+            excluded_endpoints=["us_income"],
+        )
+        self.assertIn("schema status blocks execute: scope_quarantine_present", errors)
 
     def test_v1_a_share_state_still_resumes_from_next_start_date(self):
         state = self.base / "a-share-state.json"
