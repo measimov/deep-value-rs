@@ -11,7 +11,7 @@ from pathlib import Path
 
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult, TushareError, TUSHARE_API_URL
-from tushare_mirror.endpoints import load_into_catalog
+from tushare_mirror.endpoints import load_bundled_endpoint_configs, load_into_catalog
 from tushare_mirror.errors import classify_tushare_response
 from tushare_mirror.store import FileLakeStore
 from tushare_mirror.validation import Validator
@@ -144,12 +144,12 @@ class Phase11HardeningTests(unittest.TestCase):
 
         inspect = json.loads(self.run_cli("catalog-inspect", "--json").stdout)
         self.assertEqual(inspect["schema_version"], 2)
-        self.assertEqual(inspect["endpoint_count"], 28)
+        self.assertEqual(inspect["endpoint_count"], len(load_bundled_endpoint_configs()))
         self.assertEqual(self.run_cli("catalog-version").stdout.strip(), "2")
         backup_path = self.root / "catalog-copy.sqlite"
         self.run_cli("catalog-backup", "--output", str(backup_path))
         with sqlite3.connect(backup_path) as conn:
-            self.assertEqual(conn.execute("select count(*) from endpoints").fetchone()[0], 28)
+            self.assertEqual(conn.execute("select count(*) from endpoints").fetchone()[0], len(load_bundled_endpoint_configs()))
             self.assertEqual(conn.execute("select value from catalog_meta where key='catalog_schema_version'").fetchone()[0], "2")
         permissions = json.loads(self.run_cli("show-permissions", "--api", "daily", "--json").stdout)
         self.assertEqual(permissions[0]["row_count"], 1)

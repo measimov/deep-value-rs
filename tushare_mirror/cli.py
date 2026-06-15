@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .a_share_financial import AShareFinancialExecutor, AShareFinancialPlanner, ASharePitAvailabilityReporter
 from .api_infra import ApiInfrastructureReadinessReporter
 from .backup import BackupExecutor, BackupInspector, BackupPlanner, RestoreChecker
 from .backfill import (
@@ -1581,6 +1582,105 @@ def cmd_code_period_plan(args) -> int:
     return 1 if plan.blocked else 0
 
 
+def cmd_a_share_financial_plan(args) -> int:
+    root = Path(args.root)
+    catalog = CatalogStore(root, read_only=True)
+    if not catalog.db_path.exists():
+        raise SystemExit(f"catalog not found: {catalog.db_path}; run init-catalog first")
+    try:
+        plan = AShareFinancialPlanner(root, catalog).plan(
+            apis=args.apis,
+            periods=args.periods,
+            start_period=args.start_period,
+            end_period=args.end_period,
+            period_frequency=args.period_frequency,
+            max_periods=args.max_periods,
+            max_jobs=args.max_jobs,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    payload = plan.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        summary = dict(payload)
+        summary.pop("items", None)
+        _print_key_values(summary)
+        if plan.items:
+            _print_table(
+                [item.to_dict() for item in plan.items],
+                ["api_name", "period", "existing_status", "planned_action", "execution_allowed", "blocked_reason", "job_key"],
+            )
+    return 1 if plan.blocked else 0
+
+
+def cmd_a_share_financial_run(args) -> int:
+    root = Path(args.root)
+    if args.execute:
+        catalog = CatalogStore(root)
+        if not catalog.db_path.exists():
+            raise SystemExit(f"catalog not found: {catalog.db_path}; run init-catalog first")
+    else:
+        catalog = CatalogStore(root, read_only=True)
+        if not catalog.db_path.exists():
+            raise SystemExit(f"catalog not found: {catalog.db_path}; run init-catalog first")
+    try:
+        plan = AShareFinancialPlanner(root, catalog).plan(
+            apis=args.apis,
+            periods=args.periods,
+            start_period=args.start_period,
+            end_period=args.end_period,
+            period_frequency=args.period_frequency,
+            max_periods=args.max_periods,
+            max_jobs=args.max_jobs,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    execution = None
+    if args.execute and not plan.blocked:
+        execution = AShareFinancialExecutor(root, catalog).execute(
+            plan,
+            TushareClient(require_token()),
+            max_attempts=args.max_attempts,
+        )
+    payload = {
+        "execute": bool(args.execute),
+        "plan": plan.to_dict(),
+        "execution": execution.to_dict() if execution else None,
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        _print_key_values({k: v for k, v in payload.items() if k != "plan"})
+        _print_key_values({k: v for k, v in plan.to_dict().items() if k != "items"})
+    if plan.blocked:
+        return 1
+    if execution and not execution.succeeded:
+        return 1
+    return 0
+
+
+def cmd_a_share_pit_availability(args) -> int:
+    root = Path(args.root)
+    catalog = CatalogStore(root, read_only=True)
+    if not catalog.db_path.exists():
+        raise SystemExit(f"catalog not found: {catalog.db_path}; run init-catalog first")
+    report = ASharePitAvailabilityReporter(root, catalog).report(periods=args.periods)
+    payload = report.to_dict()
+    if args.json:
+        _print_json(payload)
+    else:
+        summary = dict(payload)
+        summary.pop("periods_detail", None)
+        _print_key_values(summary)
+        _print_table(
+            [item.to_dict() for item in report.periods_detail],
+            ["period", "pit_safe", "blocked_reason", "disclosure_rows", "disclosure_actual_date_rows", "disclosure_missing_actual_date_rows"],
+        )
+    return 0 if report.feature_layer_allowed else 1
+
+
 def _print_mirror_plan(plan, as_json: bool) -> None:
     if as_json:
         _print_json(plan.to_dict())
@@ -2089,6 +2189,35 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--overwrite', action='store_true')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_financial_pull_command)
+
+    p = sub.add_parser('a-share-financial-plan', description='Read-only A-share financial raw/lake period plan; does not fetch or write catalog state.')
+    p.add_argument('--apis')
+    p.add_argument('--periods')
+    p.add_argument('--start-period')
+    p.add_argument('--end-period')
+    p.add_argument('--period-frequency', choices=['quarterly', 'annual'], default='annual')
+    p.add_argument('--max-periods', type=int, default=20)
+    p.add_argument('--max-jobs', type=int, default=20)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_a_share_financial_plan)
+
+    p = sub.add_parser('a-share-financial-run', description='Guarded A-share financial raw/lake fetch. Dry-run unless --execute is supplied.')
+    p.add_argument('--apis')
+    p.add_argument('--periods')
+    p.add_argument('--start-period')
+    p.add_argument('--end-period')
+    p.add_argument('--period-frequency', choices=['quarterly', 'annual'], default='annual')
+    p.add_argument('--max-periods', type=int, default=20)
+    p.add_argument('--max-jobs', type=int, default=20)
+    p.add_argument('--max-attempts', type=int, default=3)
+    p.add_argument('--execute', action='store_true')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_a_share_financial_run)
+
+    p = sub.add_parser('a-share-pit-availability', description='Read-only A-share financial PIT feature gate; requires disclosure_date actual_date coverage.')
+    p.add_argument('--periods', required=True)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_a_share_pit_availability)
 
     p = sub.add_parser('mirror-review')
     p.add_argument('--root', dest='mirror_root_arg', required=True)
