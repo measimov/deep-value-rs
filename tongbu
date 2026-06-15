@@ -1,0 +1,138 @@
+  1. 环境变量
+
+  cd /home/measimov/codes/github/measimov/deep-value-rs
+
+  export MIRROR_ROOT=/mnt/gw/TuShare
+  export MIRROR_BACKUP=/mnt/gw/TuShare-backup
+  export REVIEW_START=19900101
+  export REVIEW_END=20260609
+
+  : "${TUSHARE_TOKEN:?TUSHARE_TOKEN is not set}"
+  : "${MIRROR_ROOT:?MIRROR_ROOT is not set}"
+  : "${MIRROR_BACKUP:?MIRROR_BACKUP is not set}"
+
+  2. A 股全量验证，后台跑
+
+  export A_VERIFY_LOG=/tmp/tushare-a-share-low-risk-verify.log
+
+  nohup bash -lc '
+  python3 -m tushare_mirror mirror-status \
+    --root "$MIRROR_ROOT" \
+    --backup "$MIRROR_BACKUP" \
+    --scope a-share-low-risk \
+    --json
+
+  python3 -m tushare_mirror mirror-review \
+    --root "$MIRROR_ROOT" \
+    --backup "$MIRROR_BACKUP" \
+    --scope a-share-low-risk \
+    --mode pilot \
+    --start-date "$REVIEW_START" \
+    --end-date "$REVIEW_END" \
+    --json
+
+  python3 -m tushare_mirror mirror-coverage-matrix \
+    --root "$MIRROR_ROOT" \
+    --scope a-share-low-risk \
+    --start-date "$REVIEW_START" \
+    --end-date "$REVIEW_END" \
+    --json
+
+  python3 -m tushare_mirror schema-status \
+    --root "$MIRROR_ROOT" \
+    --json
+
+  python3 -m tushare_mirror backup-status \
+    --backup "$MIRROR_BACKUP" \
+    --json
+
+  python3 -m tushare_mirror mirror-audit \
+    --root "$MIRROR_ROOT" \
+    --backup "$MIRROR_BACKUP" \
+    --scope a-share-low-risk \
+    --limit 120 \
+    --json
+  ' > "$A_VERIFY_LOG" 2>&1 &
+
+  a_verify_pid=$!
+  echo "A-share verify PID: $a_verify_pid"
+  echo "A-share verify LOG: $A_VERIFY_LOG"
+  tail -f "$A_VERIFY_LOG"
+
+  如果要看是否结束：
+
+  pgrep -af "mirror-review|mirror-coverage-matrix|mirror-audit"
+  tail -n 120 "$A_VERIFY_LOG"
+
+  3. 同时启动 US low-risk 拉取
+
+  另开一个终端，执行：
+
+  cd /home/measimov/codes/github/measimov/deep-value-rs
+
+  export MIRROR_ROOT=/mnt/gw/TuShare
+  export MIRROR_BACKUP=/mnt/gw/TuShare-backup
+  export US_STATE=/mnt/gw/TuShare-us-low-risk-auto-sync-state.json
+  export US_LOG=/tmp/tushare-us-low-risk-auto-sync.log
+
+  : "${TUSHARE_TOKEN:?TUSHARE_TOKEN is not set}"
+
+  nohup python3 -m tushare_mirror mirror-auto-sync \
+    --root "$MIRROR_ROOT" \
+    --backup "$MIRROR_BACKUP" \
+    --scope us-low-risk \
+    --from-date 19900101 \
+    --to-date latest-trade-date \
+    --window-days 20 \
+    --max-jobs-per-api 20 \
+    --state "$US_STATE" \
+    --max-attempts 3 \
+    --retry-backoff-seconds 60 \
+    --execute \
+    --confirm-auto-sync \
+    --confirm-hk-us-auto-sync \
+    --json > "$US_LOG" 2>&1 &
+
+  us_pid=$!
+  echo "US PID: $us_pid"
+  echo "US LOG: $US_LOG"
+  tail -f "$US_LOG"
+
+  4. US 完成后再启动 HK low-risk
+
+  确认 US 不在跑：
+
+  pgrep -af "tushare_mirror mirror-auto-sync.*us-low-risk" || echo "US finished"
+  tail -n 120 /tmp/tushare-us-low-risk-auto-sync.log
+
+  然后启动 HK：
+
+  cd /home/measimov/codes/github/measimov/deep-value-rs
+
+  export MIRROR_ROOT=/mnt/gw/TuShare
+  export MIRROR_BACKUP=/mnt/gw/TuShare-backup
+  export HK_STATE=/mnt/gw/TuShare-hk-low-risk-auto-sync-state.json
+  export HK_LOG=/tmp/tushare-hk-low-risk-auto-sync.log
+
+  : "${TUSHARE_TOKEN:?TUSHARE_TOKEN is not set}"
+
+    --backup "$MIRROR_BACKUP" \
+    --scope hk-low-risk \
+    --from-date 19900101 \
+    --to-date latest-trade-date \
+    --window-days 20 \
+    --max-jobs-per-api 20 \
+    --state "$HK_STATE" \
+    --max-attempts 3 \
+    --retry-backoff-seconds 60 \
+    --execute \
+    --confirm-auto-sync \
+    --confirm-hk-us-auto-sync \
+    --json > "$HK_LOG" 2>&1 &
+
+  hk_pid=$!
+  echo "HK PID: $hk_pid"
+  echo "HK LOG: $HK_LOG"
+  tail -f "$HK_LOG"
+
+  关键点：A 股验证是只读，可以和 US 拉取并行；但 US/HK 都会写 catalog/raw/lake/backup，不建议同时跑。
