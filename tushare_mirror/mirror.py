@@ -1383,7 +1383,6 @@ class MirrorActiveWriterDetector:
         catalog = root / "_catalog"
         candidates: list[Path] = [
             catalog / "catalog.sqlite",
-            catalog / "catalog.sqlite-wal",
         ]
         for base in [root / "raw", root / "lake"]:
             if base.exists():

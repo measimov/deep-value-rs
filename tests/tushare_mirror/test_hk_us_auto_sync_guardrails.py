@@ -907,6 +907,16 @@ class HKUSAutoSyncGuardrailTests(unittest.TestCase):
         self.assertEqual(status["status"], "clear")
         self.assertEqual(status["recent_file_signals"], [])
 
+    def test_sqlite_wal_file_alone_is_not_active_writer_signal(self):
+        now = self.catalog.db_path.stat().st_mtime + 999999
+        wal = self.catalog.db_path.with_name("catalog.sqlite-wal")
+        wal.write_text("", encoding="utf-8")
+        os.utime(wal, (now - 1, now - 1))
+        detector = MirrorActiveWriterDetector(process_entries=[], now=lambda: now)
+        status = detector.report(root=self.root)
+        self.assertEqual(status["status"], "clear")
+        self.assertEqual(status["recent_file_signals"], [])
+
     def test_hk_us_schema_gate_ignores_unrelated_a_share_quarantine(self):
         run_id = self.catalog.create_run("fetch")
         self.catalog.record_quarantine(run_id, "daily:20250102", "daily", "schema_incompatible", "_quarantine/daily", None, None)
