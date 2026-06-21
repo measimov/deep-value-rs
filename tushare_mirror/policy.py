@@ -12,7 +12,7 @@ SUPPORTED_EXECUTABLE_PLANNER_KINDS = {
     "explicit_dates",
 }
 GUARDED_FINANCIAL_RAW_COMMANDS = {"financial-raw-fetch"}
-FINANCIAL_RAW_SCOPES = {"hk-financial-raw", "us-financial-raw"}
+FINANCIAL_RAW_SCOPES = {"a-share-financial-raw", "hk-financial-raw", "us-financial-raw"}
 MAX_GUARDED_FINANCIAL_RAW_CODES = 20
 MAX_GUARDED_FINANCIAL_RAW_JOBS = 100
 
@@ -303,11 +303,11 @@ class EndpointExecutionPolicy:
             missing.append(f"financial raw scope required: {', '.join(sorted(FINANCIAL_RAW_SCOPES))}")
         if endpoint_kind not in {"financial_statement", "financial_indicator"}:
             missing.append(f"financial endpoint kind required: {endpoint_kind}")
-        if planner_kind != "code_period_matrix":
-            missing.append(f"code_period_matrix planner required: {planner_kind}")
-        if request.max_codes_required is None:
+        if planner_kind not in {"code_period_matrix", "period"}:
+            missing.append(f"code_period_matrix or period planner required: {planner_kind}")
+        if requires_code_loop and request.max_codes_required is None:
             missing.append("max_codes_required is required for guarded financial raw execution")
-        elif request.max_codes_required > MAX_GUARDED_FINANCIAL_RAW_CODES:
+        elif request.max_codes_required is not None and request.max_codes_required > MAX_GUARDED_FINANCIAL_RAW_CODES:
             missing.append(f"max_codes_required exceeds guarded limit: {MAX_GUARDED_FINANCIAL_RAW_CODES}")
         if request.max_jobs is not None and request.max_jobs > MAX_GUARDED_FINANCIAL_RAW_JOBS:
             missing.append(f"max_jobs exceeds guarded financial raw limit: {MAX_GUARDED_FINANCIAL_RAW_JOBS}")

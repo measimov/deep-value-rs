@@ -19,7 +19,7 @@ from tushare_mirror.capabilities import (
 )
 from tushare_mirror.catalog import CatalogStore
 from tushare_mirror.client import QueryResult
-from tushare_mirror.endpoints import enrich_endpoint_config, load_into_catalog, load_inventory_configs, validate_inventory_config
+from tushare_mirror.endpoints import enrich_endpoint_config, load_bundled_endpoint_configs, load_into_catalog, load_inventory_configs, validate_inventory_config
 from tushare_mirror.errors import MirrorError
 from tushare_mirror.mirror import MirrorPlanner
 from tushare_mirror.policy import EndpointExecutionPolicy, ExecutionPolicyRequest
@@ -51,7 +51,7 @@ class EndpointCapabilityTaxonomyTests(unittest.TestCase):
     def test_enabled_endpoint_configs_are_normalized_with_allowed_capabilities(self):
         load_into_catalog(self.root, self.catalog)
         endpoints = self.catalog.list_endpoints()
-        self.assertEqual(len(endpoints), 28)
+        self.assertEqual(len(endpoints), len(load_bundled_endpoint_configs()))
         for row in endpoints:
             cfg = self.catalog.get_endpoint_config(row["api_name"])
             capability = capability_from_config(cfg)
@@ -239,7 +239,7 @@ class DisabledEndpointInventoryTests(unittest.TestCase):
         executable = {row["api_name"] for row in self.catalog.list_endpoints()}
         inventory = {item["api_name"] for item in load_inventory_configs()}
         self.assertTrue(inventory.isdisjoint(executable))
-        self.assertEqual(len(executable), 28)
+        self.assertEqual(len(executable), len(load_bundled_endpoint_configs()))
         plan = MirrorPlanner(self.root, self.catalog).plan(scope="low-risk-a-share", mode="smoke", max_jobs_per_api=3)
         planned = {item.endpoint for item in plan.items}
         self.assertTrue(inventory.isdisjoint(planned))
@@ -293,10 +293,34 @@ class ExecutionPolicyGuardrailTests(unittest.TestCase):
         policy = EndpointExecutionPolicy()
         for row in self.catalog.list_endpoints():
             cfg = self.catalog.get_endpoint_config(row["api_name"])
+            if cfg.get("risk_level") == "high":
+                continue
             decision = policy.decide(ExecutionPolicyRequest(endpoint_config=cfg, scope="low-risk-a-share", mode="pilot", user_command="fetch", max_jobs=1))
             self.assertEqual(decision.decision, "allow", cfg["api_name"])
             self.assertTrue(decision.allowed)
             self.assertFalse(decision.missing_infrastructure)
+
+    def test_a_share_financial_endpoints_require_guarded_raw_scope(self):
+        policy = EndpointExecutionPolicy()
+        for api_name in ["income_vip", "balancesheet_vip", "cashflow_vip", "fina_indicator_vip", "disclosure_date"]:
+            with self.subTest(api_name=api_name):
+                cfg = self.catalog.get_endpoint_config(api_name)
+                default_fetch = policy.decide(
+                    ExecutionPolicyRequest(endpoint_config=cfg, scope="low-risk-a-share", mode="pilot", user_command="fetch", max_jobs=1)
+                )
+                guarded_fetch = policy.decide(
+                    ExecutionPolicyRequest(
+                        endpoint_config=cfg,
+                        scope="a-share-financial-raw",
+                        mode="pilot",
+                        user_command="financial-raw-fetch",
+                        max_jobs=1,
+                        requires_pit_handling=False,
+                    )
+                )
+                self.assertEqual(default_fetch.decision, "blocked")
+                self.assertEqual(guarded_fetch.decision, "allow")
+                self.assertTrue(guarded_fetch.allowed)
 
     def test_disabled_and_unsupported_inventory_endpoints_block_with_clear_json(self):
         policy = EndpointExecutionPolicy()
@@ -554,7 +578,7 @@ class ApiInfraReadinessReportTests(unittest.TestCase):
         report = ApiInfrastructureReadinessReporter().report()
         payload = report.to_dict()
         self.assertEqual(payload["scope"], "all")
-        self.assertEqual(payload["enabled_executable_endpoint_count"], 28)
+        self.assertEqual(payload["enabled_executable_endpoint_count"], len(load_bundled_endpoint_configs()))
         self.assertGreaterEqual(payload["disabled_inventory_endpoint_count"], 10)
         self.assertIn("calendar_backfill", payload["supported_planner_kinds"])
         self.assertIn("code_date_matrix", payload["supported_planner_kinds"])

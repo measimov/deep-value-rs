@@ -1,0 +1,305 @@
+endpoints:
+  - api_name: income_vip
+    family: stock_financial
+    market: a
+    domain: financial
+    permission_class: regular
+    volume_class: F1_FINANCIAL_PERIOD
+    endpoint_kind: financial_statement
+    planner_kind: period
+    execution_status: enabled
+    partition_template: period_year
+    primary_date_field: period
+    period_field: period
+    supported_params:
+      - period
+      - report_type
+    default_params:
+      report_type: "1"
+    default_fields:
+      - ts_code
+      - ann_date
+      - f_ann_date
+      - end_date
+      - report_type
+      - basic_eps
+      - total_revenue
+      - revenue
+      - oper_cost
+      - sell_exp
+      - admin_exp
+      - fin_exp
+      - rd_exp
+      - total_profit
+      - income_tax
+      - n_income
+      - n_income_attr_p
+      - update_flag
+    probe:
+      params:
+        period: "20241231"
+        report_type: "1"
+      fields:
+        - ts_code
+        - ann_date
+        - f_ann_date
+        - end_date
+        - n_income
+      allow_empty_probe: true
+    page_size: 5000
+    risk_level: high
+    pit_safety:
+      pit_required: true
+      requires_disclosure_date: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+        - f_ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+    required_infra:
+      - guarded financial raw execution
+      - disclosure_date actual_date coverage
+      - PIT-safe derived layer
+    notes: "A-share period-wide income pull. Raw/lake sync only; not strategy-safe until disclosure_date actual_date is joined."
+    enabled: true
+
+  - api_name: balancesheet_vip
+    family: stock_financial
+    market: a
+    domain: financial
+    permission_class: regular
+    volume_class: F1_FINANCIAL_PERIOD
+    endpoint_kind: financial_statement
+    planner_kind: period
+    execution_status: enabled
+    partition_template: period_year
+    primary_date_field: period
+    period_field: period
+    supported_params:
+      - period
+      - report_type
+    default_params:
+      report_type: "1"
+    default_fields:
+      - ts_code
+      - ann_date
+      - f_ann_date
+      - end_date
+      - report_type
+      - total_share
+      - cap_rese
+      - surplus_rese
+      - undistr_porfit
+      - total_cur_assets
+      - total_assets
+      - total_cur_liab
+      - total_liab
+      - total_hldr_eqy_exc_min_int
+      - update_flag
+    probe:
+      params:
+        period: "20241231"
+        report_type: "1"
+      fields:
+        - ts_code
+        - ann_date
+        - f_ann_date
+        - end_date
+        - total_hldr_eqy_exc_min_int
+      allow_empty_probe: true
+    page_size: 5000
+    risk_level: high
+    pit_safety:
+      pit_required: true
+      requires_disclosure_date: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+        - f_ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+    required_infra:
+      - guarded financial raw execution
+      - disclosure_date actual_date coverage
+      - PIT-safe derived layer
+    notes: "A-share period-wide balance sheet pull. Raw/lake sync only; strict feature use must join disclosure_date actual_date."
+    enabled: true
+
+  - api_name: cashflow_vip
+    family: stock_financial
+    market: a
+    domain: financial
+    permission_class: regular
+    volume_class: F1_FINANCIAL_PERIOD
+    endpoint_kind: financial_statement
+    planner_kind: period
+    execution_status: enabled
+    partition_template: period_year
+    primary_date_field: period
+    period_field: period
+    supported_params:
+      - period
+      - report_type
+    default_params:
+      report_type: "1"
+    default_fields:
+      - ts_code
+      - ann_date
+      - f_ann_date
+      - end_date
+      - report_type
+      - net_profit
+      - n_cashflow_act
+      - n_cash_flows_inv_act
+      - n_cash_flows_fnc_act
+      - c_free_cashflow
+      - update_flag
+    probe:
+      params:
+        period: "20241231"
+        report_type: "1"
+      fields:
+        - ts_code
+        - ann_date
+        - f_ann_date
+        - end_date
+        - n_cashflow_act
+      allow_empty_probe: true
+    page_size: 5000
+    risk_level: high
+    pit_safety:
+      pit_required: true
+      requires_disclosure_date: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+        - f_ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+    required_infra:
+      - guarded financial raw execution
+      - disclosure_date actual_date coverage
+      - PIT-safe derived layer
+    notes: "A-share period-wide cash flow pull. Raw/lake sync only; strict feature use must join disclosure_date actual_date."
+    enabled: true
+
+  - api_name: fina_indicator_vip
+    family: stock_financial
+    market: a
+    domain: financial
+    permission_class: regular
+    volume_class: F1_FINANCIAL_PERIOD
+    endpoint_kind: financial_indicator
+    planner_kind: period
+    execution_status: enabled
+    partition_template: period_year
+    primary_date_field: period
+    period_field: period
+    supported_params:
+      - period
+    default_fields:
+      - ts_code
+      - ann_date
+      - end_date
+      - eps
+      - dt_eps
+      - bps
+      - roe
+      - roa
+      - roic
+      - grossprofit_margin
+      - netprofit_margin
+      - debt_to_assets
+      - ocfps
+      - or_yoy
+      - netprofit_yoy
+      - update_flag
+    probe:
+      params:
+        period: "20241231"
+      fields:
+        - ts_code
+        - ann_date
+        - end_date
+        - eps
+      allow_empty_probe: true
+    page_size: 5000
+    risk_level: high
+    pit_safety:
+      pit_required: true
+      requires_disclosure_date: true
+      period_field: period
+      announcement_date_fields:
+        - ann_date
+      usable_after_field: ann_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+    required_infra:
+      - guarded financial raw execution
+      - disclosure_date actual_date coverage
+      - PIT-safe derived layer
+    notes: "A-share period-wide financial indicator pull. Raw/lake sync only; not strategy-safe by itself."
+    enabled: true
+
+  - api_name: disclosure_date
+    family: stock_financial
+    market: a
+    domain: financial
+    permission_class: regular
+    volume_class: F1_FINANCIAL_PERIOD
+    endpoint_kind: financial_indicator
+    planner_kind: period
+    execution_status: enabled
+    partition_template: period_year
+    primary_date_field: end_date
+    period_field: end_date
+    supported_params:
+      - end_date
+    default_fields:
+      - ts_code
+      - end_date
+      - ann_date
+      - actual_date
+      - pre_date
+      - modify_date
+    probe:
+      params:
+        end_date: "20241231"
+      fields:
+        - ts_code
+        - end_date
+        - ann_date
+        - actual_date
+      allow_empty_probe: true
+    page_size: 5000
+    risk_level: high
+    pit_safety:
+      pit_required: true
+      requires_disclosure_date: false
+      period_field: end_date
+      announcement_date_fields:
+        - actual_date
+        - ann_date
+      usable_after_field: actual_date
+      fallback_usable_after_policy: block_without_disclosure_date
+      allow_without_disclosure_date: false
+      lookahead_risk: true
+      strategy_safe_default: false
+    required_infra:
+      - guarded financial raw execution
+      - actual_date completeness diagnostics
+      - PIT-safe derived layer
+    notes: "Disclosure schedule source for strict PIT usable-after dates. Strategy code must prefer actual_date and block missing rows."
+    enabled: true
