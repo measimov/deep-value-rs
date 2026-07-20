@@ -1,0 +1,29 @@
+[Unit]
+Description=Sequential TuShare A-share/HK/US low-risk incremental sync
+Documentation=file:%h/codes/github/measimov/deep-value-rs/docs/tushare_mirror_periodic_sync.md
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/mnt/gw/TuShare /mnt/gw/TuShare-backup
+ConditionPathExists=%h/codes/github/measimov/deep-value-rs/.env
+ConditionPathExists=/mnt/gw/TuShare-auto-sync-state.json
+ConditionPathExists=/mnt/gw/TuShare-hk-low-risk-auto-sync-state.json
+ConditionPathExists=/mnt/gw/TuShare-us-low-risk-auto-sync-state.json
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/codes/github/measimov/deep-value-rs
+EnvironmentFile=%h/codes/github/measimov/deep-value-rs/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=TUSHARE_MIRROR_ROOT=/mnt/gw/TuShare
+Environment=TUSHARE_MIRROR_BACKUP=/mnt/gw/TuShare-backup
+Environment=TUSHARE_MIRROR_STATE_DIR=/mnt/gw
+ExecStart=/usr/bin/python3 %h/codes/github/measimov/deep-value-rs/scripts/tushare_mirror_periodic_sync.py --execute --confirm-periodic-sync --json
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+TimeoutStartSec=18h
+TimeoutStopSec=5min
+KillMode=control-group
+NoNewPrivileges=true
+SyslogIdentifier=tushare-mirror-periodic-sync
