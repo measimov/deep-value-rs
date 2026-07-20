@@ -2880,3 +2880,29 @@ Recommended operator flow:
 This is still not a full financial mirror. A full financial/PIT system still
 needs a dedicated executor, durable checkpointing for code-period jobs, PIT-safe
 derived-layer handling, and an explicit user confirmation step.
+
+## Scheduled A-share, HK, And US Incremental Sync
+
+After all three low-risk historical checkpoints exist, use the single user-level
+systemd timer documented in
+[`docs/tushare_mirror_periodic_sync.md`](tushare_mirror_periodic_sync.md). The
+coordinator executes `a-share-low-risk`, `hk-low-risk`, and `us-low-risk`
+sequentially against the shared catalog and backup. It refuses missing or
+mismatched checkpoint files and cannot silently bootstrap another historical
+pull.
+
+Validate the configuration without fetching:
+
+```bash
+python3 scripts/tushare_mirror_periodic_sync.py --json
+```
+
+Install, enable, and start the first catch-up run:
+
+```bash
+scripts/install_tushare_mirror_periodic_sync.sh --start-now
+```
+
+The daily timer is persistent across reboot and logout. This scheduled workflow
+still excludes financial/PIT, intraday, realtime, object, and plan-only
+endpoints.

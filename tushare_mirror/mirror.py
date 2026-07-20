@@ -1151,6 +1151,8 @@ class MirrorAutoSyncStatusResult:
     next_window: dict[str, Any] | None
     completed_window_count: int
     failed_window_count: int
+    covered_failed_window_count: int
+    uncovered_failed_window_count: int
     in_progress_window: dict[str, Any] | None
     last_run_id: str | None
     last_error_type: str | None
@@ -7200,6 +7202,8 @@ class MirrorAutoSyncStatusReporter:
                 next_window=None,
                 completed_window_count=0,
                 failed_window_count=0,
+                covered_failed_window_count=0,
+                uncovered_failed_window_count=0,
                 in_progress_window=None,
                 last_run_id=None,
                 last_error_type=None,
@@ -7217,9 +7221,24 @@ class MirrorAutoSyncStatusReporter:
             return self._invalid(state_path, warnings, f"unsupported auto-sync state file version: {version}")
         completed = [item for item in payload.get("completed_windows", []) if isinstance(item, dict)]
         failed = [item for item in payload.get("failed_windows", []) if isinstance(item, dict)]
+        completed_ranges = {
+            (item.get("start_date"), item.get("end_date"))
+            for item in completed
+            if item.get("start_date") and item.get("end_date")
+        }
+        covered_failed = [
+            item
+            for item in failed
+            if (item.get("start_date"), item.get("end_date")) in completed_ranges
+        ]
+        uncovered_failed = [item for item in failed if item not in covered_failed]
+        if covered_failed:
+            warnings.append(
+                f"{len(covered_failed)} historical failed window(s) are covered by later successful retries"
+            )
         in_progress = payload.get("in_progress_window") if isinstance(payload.get("in_progress_window"), dict) else None
         next_window = in_progress or ({"start_date": payload.get("next_start_date")} if payload.get("next_start_date") else None)
-        status = "interrupted" if in_progress else ("failed" if failed else "ready")
+        status = "interrupted" if in_progress else ("failed" if uncovered_failed else "ready")
         return MirrorAutoSyncStatusResult(
             report_version=self.REPORT_VERSION,
             status=status,
@@ -7233,6 +7252,8 @@ class MirrorAutoSyncStatusReporter:
             next_window=next_window,
             completed_window_count=len(completed),
             failed_window_count=len(failed),
+            covered_failed_window_count=len(covered_failed),
+            uncovered_failed_window_count=len(uncovered_failed),
             in_progress_window=in_progress,
             last_run_id=payload.get("last_run_id"),
             last_error_type=payload.get("last_error_type"),
@@ -7254,6 +7275,8 @@ class MirrorAutoSyncStatusReporter:
             next_window=None,
             completed_window_count=0,
             failed_window_count=0,
+            covered_failed_window_count=0,
+            uncovered_failed_window_count=0,
             in_progress_window=None,
             last_run_id=None,
             last_error_type=None,

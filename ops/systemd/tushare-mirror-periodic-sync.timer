@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily TuShare low-risk incremental sync timer
+
+[Timer]
+OnCalendar=*-*-* 09:15:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=10min
+AccuracySec=1min
+Unit=tushare-mirror-periodic-sync.service
+
+[Install]
+WantedBy=timers.target
